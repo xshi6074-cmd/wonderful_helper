@@ -1,0 +1,22 @@
+[package]
+name = "premortem"
+version = "0.1.0"
+edition = "2024"
+description = "Premortem —— 把撞墙之后才学到的东西，前移成动手之前的强制检查"
+
+[dependencies]
+# 运行时：SessionActor(Core) / turn task / subagent 都是 tokio task
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+# CancellationToken：全项目唯一的取消手段，绝不使用 JoinHandle::abort
+tokio-util  = { version = "0.7", default-features = false }
+# FuturesUnordered：run_tools 里并行工具的汇聚点
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+uuid        = { version = "1", features = ["v4"] }
+thiserror   = "2"
+# 持久层是用户直接编辑的文件，所以要人写得动的格式
+toml        = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "test-util"] }

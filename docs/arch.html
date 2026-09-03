@@ -1,0 +1,394 @@
+<title>Premortem Core 架构</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #f6f7f9; --panel: #ffffff; --panel-2: #eef0f4;
+  --ink: #1b2230; --ink-2: #4a5568; --ink-3: #767f8f;
+  --rule: #dce0e7; --rule-2: #c3c9d4;
+  --gate: #a35f00; --gate-soft: #f5e7d2;
+  --user: #0f6f68; --user-soft: #dcefec;
+  --abort: #a3374e; --abort-soft: #f6e2e6;
+  --shadow: 0 1px 2px rgba(27,34,48,.06), 0 8px 24px rgba(27,34,48,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #11151c; --panel: #191f29; --panel-2: #222936;
+    --ink: #dfe4ec; --ink-2: #a8b1c1; --ink-3: #7d8697;
+    --rule: #2b3341; --rule-2: #3b4557;
+    --gate: #e0a24a; --gate-soft: #33280f;
+    --user: #45b8ab; --user-soft: #10312e;
+    --abort: #e0798d; --abort-soft: #351a21;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #11151c; --panel: #191f29; --panel-2: #222936;
+  --ink: #dfe4ec; --ink-2: #a8b1c1; --ink-3: #7d8697;
+  --rule: #2b3341; --rule-2: #3b4557;
+  --gate: #e0a24a; --gate-soft: #33280f;
+  --user: #45b8ab; --user-soft: #10312e;
+  --abort: #e0798d; --abort-soft: #351a21;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  font-size: 15px; line-height: 1.65; -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1000px; margin: 0 auto; padding: 0 24px 96px; }
+header { border-bottom: 1px solid var(--rule); margin-bottom: 40px; padding: 56px 0 28px; }
+.eyebrow { font-family: "IBM Plex Mono", monospace; font-size: 11.5px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 12px; }
+h1 { font-family: "Zilla Slab", Georgia, serif; font-weight: 700;
+  font-size: clamp(30px, 4.6vw, 44px); line-height: 1.12; margin: 0 0 14px;
+  letter-spacing: -.01em; text-wrap: balance; }
+.lede { font-size: 17px; color: var(--ink-2); max-width: 62ch; margin: 0 0 26px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font-family: "IBM Plex Mono", monospace; font-size: 12px;
+  border: 1px solid var(--rule-2); border-radius: 3px; padding: 4px 9px;
+  color: var(--ink-2); background: var(--panel); }
+.chip b { color: var(--ink); font-weight: 600; }
+.chip.pass { border-color: var(--user); color: var(--user); }
+.chip.cut { border-color: var(--abort); color: var(--abort); }
+section { margin: 0 0 56px; }
+h2 { font-family: "Zilla Slab", Georgia, serif; font-weight: 600; font-size: 25px;
+  margin: 0 0 6px; letter-spacing: -.005em; text-wrap: balance; }
+h2 .num { font-family: "IBM Plex Mono", monospace; font-size: 13px; font-weight: 500;
+  color: var(--gate); margin-right: 12px; vertical-align: 3px; }
+h3 { font-weight: 600; font-size: 15.5px; margin: 30px 0 8px; }
+.sub { color: var(--ink-2); margin: 0 0 22px; max-width: 68ch; }
+p { max-width: 68ch; }
+code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .885em;
+  background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+figure { margin: 26px 0; background: var(--panel); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 22px 22px 16px; box-shadow: var(--shadow); overflow-x: auto; }
+figure svg { display: block; width: 100%; height: auto; min-width: 660px; color: var(--ink); }
+figcaption { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule);
+  font-size: 13.5px; color: var(--ink-2); max-width: 78ch; }
+figcaption b { color: var(--ink); font-weight: 600; }
+.tw { overflow-x: auto; margin: 20px 0; border: 1px solid var(--rule);
+  border-radius: 6px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 580px; }
+th { text-align: left; font-family: "IBM Plex Mono", monospace; font-weight: 500;
+  font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3);
+  padding: 11px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+td.f { font-family: "IBM Plex Mono", monospace; white-space: nowrap; font-size: 12.5px; }
+td.n { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.tag { display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 11px;
+  padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+.tag.ok { background: var(--user-soft); color: var(--user); }
+.tag.warn { background: var(--gate-soft); color: var(--gate); }
+.note { border-left: 3px solid var(--gate); background: var(--panel); padding: 14px 18px;
+  margin: 22px 0; border-radius: 0 5px 5px 0; box-shadow: var(--shadow); }
+.note p { margin: 0; max-width: 72ch; }
+.note.cut { border-left-color: var(--abort); }
+pre { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 14px 16px; overflow-x: auto; margin: 18px 0;
+  font-family: "IBM Plex Mono", monospace; font-size: 12.5px; line-height: 1.6; color: var(--ink-2); }
+pre b { color: var(--ink); font-weight: 600; }
+pre .g { color: var(--gate); }
+pre .u { color: var(--user); }
+ul { max-width: 68ch; padding-left: 20px; }
+li { margin-bottom: 6px; }
+del { color: var(--abort); text-decoration-color: var(--abort); }
+</style>
+
+<div class="wrap">
+
+<header>
+  <p class="eyebrow">Premortem · core 骨架 · 第三轮：记忆与上下文对齐</p>
+  <h1>两层记忆，一份对话</h1>
+  <p class="lede">
+    会话层删除，只留持久层与推断层。历史不再做滑动窗口 —— 灌全量，接近上限才折叠。
+    判断段和回答段吃同一份对话；两段式省下的是场景指令与案例，不是历史。
+  </p>
+  <div class="chips">
+    <span class="chip">crate <b>premortem</b> · edition 2024</span>
+    <span class="chip"><b>4 692</b> 行 / 16 个文件</span>
+    <span class="chip">cargo build <b>0 warning</b></span>
+    <span class="chip pass">链路测试 <b>15 场景 / 87 断言 全过</b></span>
+    <span class="chip cut">已删 <b>Action</b> · <b>Budget</b> · <b>会话层</b> · <b>history 窗口</b></span>
+  </div>
+</header>
+
+<!-- ══════════════════ 1 ══════════════════ -->
+<section>
+  <h2><span class="num">01</span>记忆两层：文件就是界面</h2>
+  <p class="sub">
+    持久层不是一个不透明的存档，它是一组用户可以直接打开来改的文件。
+    这条约束决定了格式选择：叙述用 Markdown，结构化的场景目录用 TOML。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 920 400" role="img" aria-label="记忆两层：持久层跨会话，以 Markdown 与 TOML 文件形式存在，用户可直接编辑，会话开始时装载进上下文；推断层是一次会话内的推断图，turn 为事务边界；一键蒸馏由用户触发，产出草稿文件而不是直接覆盖持久层">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#a35f00"/></marker>
+        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0f6f68"/></marker>
+      </defs>
+
+      <rect x="280" y="40" width="380" height="128" rx="5" fill="none" stroke="#a35f00" stroke-width="2"/>
+      <text x="470" y="66" text-anchor="middle" font-size="14" font-weight="600" fill="#a35f00">持久层 · 跨会话</text>
+      <text x="470" y="88" text-anchor="middle" font-size="11.5" fill="currentColor">项目概述 · 阶段目标 · 进展（成立的 / 没成立的方法）</text>
+      <text x="470" y="106" text-anchor="middle" font-size="11.5" fill="currentColor">合作偏好 · 知识与经验评估</text>
+      <text x="470" y="124" text-anchor="middle" font-size="11.5" fill="currentColor">易犯错场景目录与指令 · 参考案例</text>
+      <text x="470" y="148" text-anchor="middle" font-size="11" fill="#a35f00">目标：让一个新对话能快速入手这个项目</text>
+
+      <text x="690" y="62" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">memory/project.md</text>
+      <text x="690" y="80" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">memory/preferences.md</text>
+      <text x="690" y="98" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">memory/knowledge.md</text>
+      <text x="690" y="116" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">memory/playbook.toml</text>
+      <text x="690" y="134" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">memory/cases/*.md</text>
+
+      <rect x="40" y="66" width="180" height="70" rx="4" fill="none" stroke="#0f6f68" stroke-width="1.8"/>
+      <text x="130" y="92" text-anchor="middle" font-size="13" font-weight="600" fill="#0f6f68">用户</text>
+      <text x="130" y="112" text-anchor="middle" font-size="10.5" fill="#0f6f68" opacity=".85">直接打开文件编辑</text>
+      <text x="130" y="128" text-anchor="middle" font-size="10.5" fill="#0f6f68" opacity=".85">bootstrap 内容也归他</text>
+      <line x1="220" y1="101" x2="274" y2="101" stroke="#0f6f68" stroke-width="1.6" marker-end="url(#a3)"/>
+
+      <rect x="280" y="236" width="380" height="96" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="470" y="262" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">推断层 · 一次会话</text>
+      <text x="470" y="284" text-anchor="middle" font-size="11.5" fill="currentColor">推断图（值 · 出处 · 来源 · 置信度）· 本轮场景</text>
+      <text x="470" y="302" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">turn 为事务边界：模型改动先入未提交区，turn 结束一次提交</text>
+      <text x="470" y="320" text-anchor="middle" font-size="11" fill="currentColor" opacity=".7">用户编辑立即生效并落盘，不随 turn 回滚</text>
+      <text x="690" y="272" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">session/state.json</text>
+      <text x="690" y="290" font-size="10.5" font-family="monospace" fill="currentColor" opacity=".65">session/history.jsonl</text>
+
+      <line x1="560" y1="236" x2="560" y2="176" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a1)"/>
+      <text x="572" y="208" font-size="10.5" fill="currentColor" opacity=".62">会话开始装载 ↑</text>
+
+      <path d="M 370 236 L 370 200 L 200 200 L 200 176" fill="none" stroke="#a35f00" stroke-width="1.6" marker-end="url(#a2)"/>
+      <rect x="120" y="176" width="160" height="0" fill="none"/>
+      <text x="200" y="220" text-anchor="middle" font-size="11.5" font-weight="600" fill="#a35f00">一键蒸馏</text>
+      <text x="200" y="236" text-anchor="middle" font-size="10.5" fill="#a35f00" opacity=".85">用户按下才发生</text>
+      <text x="200" y="252" text-anchor="middle" font-size="10.5" fill="#a35f00" opacity=".85">产出 draft-*.md</text>
+      <text x="200" y="268" text-anchor="middle" font-size="10.5" fill="#a35f00" opacity=".85">用户改过再合并</text>
+
+      <text x="60" y="360" font-size="11.5" fill="currentColor" opacity=".75">中间那层「会话层 / 工作 memory」删掉了：完整对话本来就要塞给模型，</text>
+      <text x="60" y="378" font-size="11.5" fill="currentColor" opacity=".75">推断图已经承担了信息整合，再夹一层筛选过的会话事实是重复劳动。</text>
+    </svg>
+    <figcaption>
+      <b>蒸馏产出草稿，不直接覆盖。</b>蒸馏是模型对整段会话的概括，直接盖掉用户手写的记忆是越权 ——
+      这是「哪些不该有的打扰/越权」清单上的一条。同理它只能由用户按下触发：
+      模型不能自己决定「这段话值得写进你的长期记忆」。
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ══════════════════ 2 ══════════════════ -->
+<section>
+  <h2><span class="num">02</span>上下文：灌全量，接近上限才折叠</h2>
+  <p class="sub">
+    只送最近 K 轮不现实 —— 用户会引用三十轮之前定下的东西。上一版那个滑动窗口删了。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 920 400" role="img" aria-label="上下文五段：system、持久层、场景目录跨轮不变可命中缓存；推断图每轮变；完整对话逐轮增长。判断段与回答段吃同一份对话，场景指令与案例只给回答段。接近上限时把较早一段折叠成摘要">
+      <text x="60" y="26" font-size="11" fill="currentColor" opacity=".6">送入顺序 ↓</text>
+      <rect x="60" y="38" width="480" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="78" y="60" font-size="12.5" fill="currentColor">system prompt（角色约束 · [用户设定] 规则 · mode）</text>
+      <rect x="60" y="78" width="480" height="34" rx="3" fill="none" stroke="#a35f00" stroke-width="1.5"/>
+      <text x="78" y="100" font-size="12.5" fill="#a35f00">持久层：项目 · 合作偏好 · 知识评估</text>
+      <rect x="60" y="118" width="480" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="78" y="140" font-size="12.5" fill="currentColor">场景目录（id + 触发条件，不含指令全文）</text>
+
+      <line x1="44" y1="160" x2="700" y2="160" stroke="#a35f00" stroke-width="1.3" stroke-dasharray="5 4"/>
+      <text x="700" y="154" text-anchor="end" font-size="11" fill="#a35f00">prompt cache 命中到这里</text>
+
+      <rect x="60" y="168" width="480" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <text x="78" y="190" font-size="12.5" fill="currentColor">推断图</text>
+      <rect x="60" y="208" width="480" height="34" rx="3" fill="none" stroke="#0f6f68" stroke-width="1.5"/>
+      <text x="78" y="230" font-size="12.5" fill="#0f6f68">完整对话（不做滑动窗口）</text>
+
+      <path d="M 556 42 L 570 42 L 570 238 L 556 238" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="580" y="130" font-size="11.5" fill="currentColor">判断段</text>
+      <text x="580" y="146" font-size="10" fill="currentColor" opacity=".6">818 字符</text>
+
+      <path d="M 640 42 L 654 42 L 654 238 L 640 238" fill="none" stroke="#a35f00" stroke-width="1.6"/>
+      <text x="664" y="122" font-size="11.5" fill="#a35f00">回答段</text>
+      <text x="664" y="138" font-size="10" fill="#a35f00" opacity=".75">+ 本轮场景的指令</text>
+      <text x="664" y="152" font-size="10" fill="#a35f00" opacity=".75">+ 命中的参考案例</text>
+      <text x="664" y="166" font-size="10" fill="#a35f00" opacity=".75">933 字符</text>
+
+      <rect x="60" y="280" width="800" height="92" rx="5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3"/>
+      <text x="78" y="304" font-size="12.5" font-weight="600" fill="currentColor">折叠：估算到上限的八成时触发</text>
+      <text x="78" y="324" font-size="11.5" fill="currentColor" opacity=".78">位置 = 判断段之前、上一轮推断提交之后。那时推断图刚更新过，值得留的结构化信息已经进图，折叠的是叙述过程。</text>
+      <text x="78" y="342" font-size="11.5" fill="currentColor" opacity=".78">交给摘要模型时带上推断图，并明说：图里已有的不要重复；保住图上没有但后面会被引用的东西 ——</text>
+      <text x="78" y="360" font-size="11.5" fill="currentColor" opacity=".78">口径与原话约束、放弃的路线与理由、已问过的问题、明确排除的可能性。最近数轮保留原文，绝不折叠用户刚说的话。</text>
+    </svg>
+    <figcaption>
+      <b>判断段现在也吃 history。</b>判断「这一轮该进哪个场景」本来就要看用户刚说了什么、之前谈到哪了，
+      砍掉历史等于让判断变瞎。两段式省下的是**场景指令全文与参考案例** —— 八份指令全塞进判断段，
+      它就跟回答段一样重了。实测判断段 818 字符 vs 回答段 933 字符。
+    </figcaption>
+  </figure>
+
+  <pre><span class="u">ContextLimit</span> { max_prompt_tokens, trigger_at: 0.8, keep_recent_turns }
+留两成余量的理由：折叠本身要一次模型调用，而这一轮的回答还没生成。
+压到 100% 才动手，这一轮就直接超限失败了。</pre>
+</section>
+
+<!-- ══════════════════ 3 ══════════════════ -->
+<section>
+  <h2><span class="num">03</span>run_turn：加了一步折叠</h2>
+
+  <figure>
+    <svg viewBox="0 0 900 600" role="img" aria-label="run_turn 控制流：取一次快照，接近上限则先折叠早期对话，然后循环：检查点0吸收插话、判断段判定场景并提交推断、检索材料、检查点1有插话则回到循环顶、回答段注入场景材料并暴露工具、模型调工具则带结果回到循环顶、Done 结束">
+      <defs>
+        <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+        <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#0f6f68"/></marker>
+      </defs>
+
+      <path d="M 128 116 L 112 116 L 112 496 L 128 496" fill="none" stroke="#a35f00" stroke-width="1.3" stroke-dasharray="5 4"/>
+      <text x="104" y="300" text-anchor="middle" font-size="11" fill="#a35f00" transform="rotate(-90 104 300)">每个长 await 都过 guarded(token, …)</text>
+
+      <rect x="300" y="20" width="300" height="40" rx="4" fill="none" stroke="#a35f00" stroke-width="1.8"/>
+      <text x="450" y="38" text-anchor="middle" font-size="12.5" font-weight="600" fill="#a35f00">取快照 · 整轮唯一一次</text>
+      <text x="450" y="54" text-anchor="middle" font-size="10.5" fill="#a35f00" opacity=".85">用户中途的编辑不进这一轮</text>
+      <line x1="450" y1="60" x2="450" y2="80" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+
+      <rect x="300" y="86" width="300" height="40" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3"/>
+      <text x="450" y="104" text-anchor="middle" font-size="12.5" fill="currentColor">接近上限 ⇒ 折叠早期对话</text>
+      <text x="450" y="120" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">失败就带全量继续，不让用户这一轮用不了</text>
+      <line x1="450" y1="126" x2="450" y2="146" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+
+      <rect x="300" y="152" width="300" height="38" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="450" y="176" text-anchor="middle" font-size="12.5" fill="currentColor">检查点 0 · take_injections</text>
+
+      <rect x="300" y="216" width="300" height="50" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="450" y="238" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">判断段 → SceneId</text>
+      <text x="450" y="255" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">失败则降级为 none 并在历史里留明账</text>
+
+      <rect x="300" y="292" width="300" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="450" y="311" text-anchor="middle" font-size="12" fill="currentColor">propose(ops) → 未提交区</text>
+      <text x="450" y="327" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">Stale 回喂模型，省下它重复提交的一轮</text>
+
+      <rect x="300" y="360" width="300" height="38" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 3"/>
+      <text x="450" y="378" text-anchor="middle" font-size="12" fill="currentColor">judge.retrieve · 组装材料用的检索</text>
+      <text x="450" y="392" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".6">取回来的是材料，不是代模型执行动作</text>
+
+      <rect x="300" y="424" width="300" height="38" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="450" y="448" text-anchor="middle" font-size="12.5" fill="currentColor">检查点 1 · take_injections</text>
+
+      <rect x="300" y="488" width="300" height="62" rx="4" fill="none" stroke="#0f6f68" stroke-width="1.8"/>
+      <text x="450" y="510" text-anchor="middle" font-size="12.5" font-weight="600" fill="#0f6f68">回答段</text>
+      <text x="450" y="527" text-anchor="middle" font-size="10.5" fill="#0f6f68" opacity=".85">注入 scene.guidance + 命中案例</text>
+      <text x="450" y="543" text-anchor="middle" font-size="10.5" fill="#0f6f68" opacity=".85">暴露 scene.tools，模型自主调用</text>
+
+      <line x1="450" y1="190" x2="450" y2="210" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+      <line x1="450" y1="266" x2="450" y2="286" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+      <line x1="450" y1="334" x2="450" y2="354" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+      <line x1="450" y1="398" x2="450" y2="418" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+      <line x1="450" y1="462" x2="450" y2="482" stroke="currentColor" stroke-width="1.4" marker-end="url(#b1)"/>
+
+      <path d="M 600 443 L 690 443 L 690 168 L 606 168" fill="none" stroke="#0f6f68" stroke-width="1.6" marker-end="url(#b2)"/>
+      <text x="700" y="286" font-size="11" fill="#0f6f68">有插话 → continue</text>
+      <text x="700" y="302" font-size="10" fill="#0f6f68" opacity=".75">重走判断，场景可能变了</text>
+
+      <path d="M 600 519 L 800 519 L 800 158 L 606 158" fill="none" stroke="#0f6f68" stroke-width="1.6" marker-end="url(#b2)"/>
+      <text x="700" y="360" font-size="11" fill="#0f6f68">ToolCalls → continue</text>
+      <text x="700" y="376" font-size="10" fill="#0f6f68" opacity=".75">带结果再问，顺便重过检查点</text>
+
+      <text x="150" y="560" font-size="11" fill="#a3374e" opacity=".85">这里原来有一条「抢占 → 跳过回答段」，已删除</text>
+      <text x="150" y="578" font-size="11" fill="#a3374e" opacity=".85">判断优先 = 判断先跑并决定注入什么，不是能掐断回复</text>
+    </svg>
+    <figcaption>
+      折叠放在循环外、判断段之前，所以一轮最多折叠一次；折叠失败就带全量上下文继续 ——
+      让用户因为一次摘要调用失败而这一轮用不了，是又一次不该有的打扰。
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ══════════════════ 4 ══════════════════ -->
+<section>
+  <h2><span class="num">04</span>打扰与越权：现行清单</h2>
+  <p class="sub">这一版新增了三行（折叠、蒸馏、摘要失败）。打扰预算依旧不存在。</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>位置</th><th>判断</th><th>现状</th></tr></thead>
+    <tbody>
+      <tr><td>harness 抢占：判断说要问就掐断回复</td><td><span class="tag warn">不该有</span></td><td><b>已删</b>，模型在回答段自己决定</td></tr>
+      <tr><td><code>Action::Block</code>：模型拒绝推进阶段</td><td><span class="tag warn">不该有</span></td><td><b>已删</b>。阶段闸门本来就在用户手里</td></tr>
+      <tr><td>mode 自动切换建议弹给用户</td><td><span class="tag warn">不该有</span></td><td><b>不实现</b>。mode 由用户显式切换</td></tr>
+      <tr><td>工具失败 / 超时 / 工具名不存在</td><td><span class="tag warn">不该有</span></td><td>作为结果回给模型，让它应对（S7）</td></tr>
+      <tr><td>判断段调用失败 → 阻断回答</td><td><span class="tag warn">不该有</span></td><td>降级为「本轮无场景」+ 留明账</td></tr>
+      <tr><td>上下文折叠 → 弹窗请示</td><td><span class="tag warn">不该有</span></td><td>自动折叠 + 事后告知 <code>Compacted</code>（S11）</td></tr>
+      <tr><td>摘要调用失败 → 中断这一轮</td><td><span class="tag warn">不该有</span></td><td>带全量上下文继续</td></tr>
+      <tr><td>蒸馏写入用户的长期记忆</td><td><span class="tag warn">越权</span></td><td>只能用户按一键蒸馏触发，且只产出草稿（S12）</td></tr>
+      <tr><td>模型调用 <code>ask_user</code></td><td><span class="tag ok">该有</span></td><td>保留，不需要 harness 审批（S2b）</td></tr>
+      <tr><td>心跳 / 侧栏 diff / 场景展示 / 占用条</td><td><span class="tag ok">不是打扰</span></td><td>被动呈现，保留</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ══════════════════ 5 ══════════════════ -->
+<section>
+  <h2><span class="num">05</span>文件清单与链路测试</h2>
+  <div class="tw">
+  <table>
+    <thead><tr><th>文件</th><th class="n">行</th><th>负责什么</th></tr></thead>
+    <tbody>
+      <tr><td class="f">lib.rs</td><td class="n">51</td><td>三条原则与两条硬纪律</td></tr>
+      <tr><td class="f">ids.rs</td><td class="n">93</td><td>newtype 防串号 + <code>LruSet</code> 去重</td></tr>
+      <tr><td class="f"><b>memory.rs</b></td><td class="n">224</td><td><b>新增。</b>持久层：加载 / bootstrap / 案例检索 / 草稿路径。「文件就是界面」写在文件头</td></tr>
+      <tr><td class="f">scene.rs</td><td class="n">234</td><td>playbook 与场景；TOML 往返；8 个 bootstrap 场景</td></tr>
+      <tr><td class="f"><b>context.rs</b></td><td class="n">275</td><td><b>大改。</b>五段分层、<code>for_judge</code>/<code>for_answer</code>、折叠计划与摘要指令、<code>Footprint</code></td></tr>
+      <tr><td class="f">state.rs</td><td class="n">418</td><td>推断层。来源/置信度/待落定/搁置区改为可选项</td></tr>
+      <tr><td class="f">msg.rs</td><td class="n">282</td><td>三条通道的全部消息 + 背压语义 + <code>TurnStats</code></td></tr>
+      <tr><td class="f">model.rs</td><td class="n">322</td><td><code>ModelClient</code>、三角色 <code>Models</code>、<code>complete()</code>、<code>Mode</code> 两旋钮</td></tr>
+      <tr><td class="f">tools.rs</td><td class="n">390</td><td><code>Tool</code> + <code>run_tools</code>（心跳/硬超时）+ 内置 <code>ask_user</code></td></tr>
+      <tr><td class="f">cost.rs</td><td class="n">63</td><td>R6 账本，判断段占比</td></tr>
+      <tr><td class="f">handle.rs</td><td class="n">167</td><td>跟 Core 说话的唯一入口</td></tr>
+      <tr><td class="f">turn.rs</td><td class="n">440</td><td>全部控制流。<b>文件头是那张打扰清单</b></td></tr>
+      <tr><td class="f">core.rs</td><td class="n">674</td><td>SessionActor。<code>apply()</code> 搜 <code>★</code> 看唯一的拒绝条件；折叠与蒸馏</td></tr>
+      <tr><td class="f">persist.rs</td><td class="n">176</td><td>单一 writer + 原子快照 + <code>restore()</code></td></tr>
+      <tr><td class="f">mock.rs</td><td class="n">264</td><td>假模型记录每次实际发出的 prompt</td></tr>
+      <tr><td class="f">main.rs</td><td class="n">619</td><td>链路测试，15 场景 87 断言</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>这一轮新增的场景</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>场景</th><th>验的是</th><th>实测</th></tr></thead>
+    <tbody>
+      <tr><td class="f">S10 上下文分层</td><td>两段吃同一份对话；指令与案例只给回答段</td><td><span class="tag ok">通过</span> 818 vs 933 字符</td></tr>
+      <tr><td class="f">S11 上下文压缩</td><td>接近上限才折叠；摘要留在历史里；不弹窗</td><td><span class="tag ok">通过</span> 折叠 2 次 4 条</td></tr>
+      <tr><td class="f">S12 一键蒸馏</td><td>用户触发；产出 <code>draft-*.md</code> 而非覆盖</td><td><span class="tag ok">通过</span></td></tr>
+      <tr><td class="f">S13 持久层 bootstrap</td><td>落成文件；用户改过能读回；TOML 往返</td><td><span class="tag ok">通过</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ══════════════════ 6 ══════════════════ -->
+<section>
+  <h2><span class="num">06</span>设计文档已同步更新</h2>
+  <p class="sub">
+    <code>docs/设计文档.html</code> 已按新口径重写：只写决策，不写取舍过程，不留未定项。
+  </p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>位置</th><th>改动</th></tr></thead>
+    <tbody>
+      <tr><td class="f">二 · 三条约束</td><td><del>用户编辑过的字段加锁，模型不得覆盖</del> → 图上标出出处，模型改动前先在正文里询问；新增第三条「判断决定注入什么，不决定做什么」</td></tr>
+      <tr><td class="f">三 · 2 协作动作</td><td>改名「协作场景」。<del>模型判断场景后选择下一步动作</del> → 判定场景后 harness 注入约束与案例、暴露工具，之后由模型决定</td></tr>
+      <tr><td class="f">三 · 3 记忆</td><td>三层 → 两层。持久层内容按新口径重列，形态写明「Markdown / TOML，用户随时直接编辑」</td></tr>
+      <tr><td class="f">三 · 4 模式</td><td><del>打扰预算 高 / 低，超出则直接给结论</del> → 整行删除，只剩两个旋钮</td></tr>
+      <tr><td class="f">三 · 5 复盘蒸馏</td><td>改为「一键蒸馏」，明确是用户操作、产出草稿</td></tr>
+      <tr><td class="f">图 1</td><td>core 方框 <del>打扰预算</del> → 写权仲裁；state 接口三层 → 两层</td></tr>
+      <tr><td class="f">图 2</td><td><del>注入动作约束</del> → 注入场景材料 + 暴露工具；回答段标注「模型自主调用工具」</td></tr>
+      <tr><td class="f">图 3</td><td>重画：记忆两层 + 文件路径 + 一键蒸馏方向</td></tr>
+      <tr><td class="f">图 4</td><td><del>加锁</del> → 即时提交 · 即时落盘 · 不随 turn 回滚；caption 补上打断后照常提交</td></tr>
+      <tr><td class="f">图 5</td><td>重画：<del>判断段不含 history</del> → 两段同吃完整对话；<del>compact 由用户触发、不自动压缩</del> → 接近上限自动折叠</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+</div>

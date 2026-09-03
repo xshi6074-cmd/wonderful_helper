@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Premortem 设计文档</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --paper:#F6F8F7; --surface:#FFFFFF;
+    --ink:#1A2226; --ink-2:#5A6C73; --ink-3:#86979C;
+    --rule:#D2DAD8; --rule-2:#E6EBEA;
+    --hot:#BC5019;
+    --sans:"IBM Plex Sans","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
+    --mono:"IBM Plex Mono","SFMono-Regular",Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#10161A; --surface:#171F24;
+      --ink:#E2EAE8; --ink-2:#93A5AB; --ink-3:#6D7F85;
+      --rule:#2B373C; --rule-2:#212B30; --hot:#E88A4E;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#10161A; --surface:#171F24;
+    --ink:#E2EAE8; --ink-2:#93A5AB; --ink-3:#6D7F85;
+    --rule:#2B373C; --rule-2:#212B30; --hot:#E88A4E;
+  }
+  *{ box-sizing:border-box; }
+  html{ -webkit-text-size-adjust:100%; }
+  body{ margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); line-height:1.75; font-size:15px; }
+  .wrap{ max-width:1020px; margin:0 auto; padding:56px 28px 110px; }
+
+  header{ display:flex; flex-direction:column; gap:12px; padding-bottom:28px; border-bottom:1px solid var(--rule); }
+  .eyebrow{ font-size:11.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); font-weight:500; }
+  h1{ font-size:38px; font-weight:600; letter-spacing:-.022em; margin:0; }
+  .lede{ font-size:15.5px; color:var(--ink-2); max-width:64ch; margin:0; }
+
+  section{ padding-top:48px; }
+  h2{ font-size:21px; font-weight:600; margin:0 0 16px; letter-spacing:-.01em; display:flex; align-items:baseline; gap:14px; }
+  h2 .num{ font-family:var(--mono); font-size:13px; color:var(--hot); font-weight:500; }
+  h3{ font-size:15px; font-weight:600; margin:26px 0 10px; }
+  h3:first-of-type{ margin-top:4px; }
+  p{ margin:0 0 12px; max-width:68ch; }
+  p:last-child{ margin-bottom:0; }
+  code{ font-family:var(--mono); font-size:.88em; background:var(--rule-2); padding:1px 5px; border-radius:3px; }
+  ul,ol{ margin:0 0 12px; padding-left:22px; max-width:68ch; }
+  li{ margin-bottom:7px; }
+  li::marker{ color:var(--ink-3); }
+
+  .tbl{ overflow-x:auto; border:1px solid var(--rule); border-radius:5px; background:var(--surface); margin:14px 0; }
+  table{ border-collapse:collapse; width:100%; min-width:560px; font-size:14px; }
+  th{ text-align:left; font-weight:600; font-size:11.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); padding:12px 16px; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  td{ padding:12px 16px; border-bottom:1px solid var(--rule-2); vertical-align:top; }
+  tr:last-child td{ border-bottom:none; }
+  td.k{ font-family:var(--mono); font-size:12.5px; white-space:nowrap; color:var(--ink-2); }
+
+  figure{ margin:18px 0 0; padding:22px 20px 16px; background:var(--surface); border:1px solid var(--rule); border-radius:5px; overflow-x:auto; }
+  figure svg{ display:block; width:100%; min-width:660px; height:auto; color:var(--ink); }
+  figcaption{ margin-top:14px; padding-top:12px; border-top:1px solid var(--rule-2); font-size:13px; color:var(--ink-2); line-height:1.6; min-width:660px; }
+
+  svg text{ font-family:var(--sans); fill:currentColor; }
+  svg .bx{ fill:none; stroke:currentColor; stroke-width:1.2; }
+  svg .bx-core{ fill:none; stroke:currentColor; stroke-width:2.2; }
+  svg .bx-dash{ fill:none; stroke:currentColor; stroke-width:1.2; stroke-dasharray:5 4; }
+  svg .bx-solid{ fill:currentColor; stroke:none; }
+  svg .ln{ stroke:currentColor; stroke-width:1.2; fill:none; }
+  svg .ln-thin{ stroke:currentColor; stroke-width:1; fill:none; opacity:.55; }
+  svg .ln-dash{ stroke:currentColor; stroke-width:1.2; fill:none; stroke-dasharray:5 4; }
+  svg .frame{ fill:none; stroke:currentColor; stroke-width:1; stroke-dasharray:3 5; opacity:.42; }
+  svg .hot{ stroke:var(--hot); }
+  svg .hotf{ fill:var(--hot); }
+  svg .mut{ fill:currentColor; opacity:.62; }
+  svg .inv{ fill:var(--surface); }
+  svg .t{ font-size:12.5px; font-weight:500; }
+  svg .ts{ font-size:10.5px; }
+  svg .tm{ font-size:10.5px; font-family:var(--mono); }
+  svg .tl{ font-size:15px; font-weight:600; }
+  svg .tag{ font-size:10.5px; letter-spacing:.08em; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">程序设计训练（Rust）· AI Agent 大作业 · 设计文档</div>
+  <h1>Premortem</h1>
+  <p class="lede">缩小从一个模糊待验证的 idea，到能交给编码 agent 写实验代码的实验设计方案之间的 gap。</p>
+</header>
+
+<section>
+  <h2><span class="num">一</span>痛点分析</h2>
+  <p>选题来源于一个刚入门的科研新手需要 agent 辅助落实实验代码的场景。基于 Codex / Claude Code 的 agent 有很强的执行和编码能力，使用者看起来手上有很强力的工具，但从一个模糊待验证的 idea 到跑出实验结果能验证或证伪这个 idea，中间有很大 gap，需要反复试错、与 agent 频繁交互调整来填平。原因大致是下面这些：</p>
+  <ol>
+    <li>科研新手对自己的领域认识不全，容易给出一个模糊、比较偏离正轨的实验思路就让 agent 照此实现；或者不熟悉实验链路和各模块适配情况，浅读论文给出一些胡乱拼凑的实验设计。</li>
+    <li>Agent 执行强，但权衡判断不主动，很可能盲目执行、过度执行。</li>
+    <li>Agent 一般不维持关于用户学习状态、对项目认识状态的工作记忆。通用 agent 的 memory 多是命令执行要求或长期用户画像。</li>
+    <li>当前给出模糊需求让 agent 独立完成全权设计，稳定性、准确性尚低，具体权衡仍然需要 human in loop。</li>
+  </ol>
+  <p>但 agent 编码能力相对可信。所以需要用户反复试错并调整与 agent 的交互方式，或者让这些调整和判断的经验被 agent 学习吸收为固定流程。</p>
+</section>
+
+<section>
+  <h2><span class="num">二</span>定位与设计思路</h2>
+  <p>实现一个 agent，用于缩小从模糊待验证的 idea 到能交给编码 agent 写实验代码的实验设计方案之间的 gap。它不写实验代码，也不替用户做决定。</p>
+  <p>每一轮先判断当前处于哪一种协作场景，据此注入该场景对应的约束、建议与参考案例，并暴露该场景下可用的工具，然后生成回复。同时更新持久记忆、维护用户能随时修改的实验方案推断。场景在多轮协作中持续判定：当前需要的是补充领域背景、澄清目标、追踪代码链路、检查假设、发散设计、优先低成本试验，还是及时停止讨论并进入实现。场景、指令、参考案例与工具集都依个人经验自定义。</p>
+  <p>三条贯穿全局的约束：</p>
+  <ul>
+    <li><strong>Agent 不主导流程。</strong>推断随交互自由更新；推断图上标出每个字段的出处，模型改动用户填过的字段之前先在正文里询问；进入实现由用户拍板。</li>
+    <li><strong>判断的优先级高于回复。</strong>每轮先判断场景，判断结果决定这一轮用什么约束、给什么案例、开放哪些工具，然后才生成回复。</li>
+    <li><strong>判断决定注入什么，不决定做什么。</strong>harness 把工具与呈现形式摆出来，用不用、用几次、什么顺序由模型决定。每句话要能说清它服务于哪个尚未落定的问题。</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="num">三</span>功能</h2>
+
+  <h3>1 · 推断架构图</h3>
+  <p>模型通读实验代码库，结合对用户实验需求的推断画架构图并呈现在对话侧边栏，用户可随时修改。底层存结构化数据（节点、边、属性），渲染层负责画图：模型修改数据，用户在侧栏点选节点编辑字段，两边都不接触画图语法。</p>
+  <p>节点与边可标注来源与置信度。来源是仓库位置、论文章节、用户口述或模型推测；未标来源与标为模型推测的在图上以虚线区分。图中有逻辑不顺或缺失的部分能让用户意识到盲区，也便于用户和 agent 快速对齐。</p>
+  <p>写权归 core 唯一所有。模型的改动先进入本轮的未提交区，turn 结束时一次提交；用户的编辑立即生效并落盘，不随 turn 回滚。</p>
+
+  <h3>2 · 协作场景</h3>
+  <p>每轮由模型判断当前场景。harness 据此做三件事：注入该场景的约束与建议、注入命中的参考案例、暴露该场景下的工具。之后由模型自行决定说什么、调用哪些工具、调用几次。界面显示本轮所选场景与判定理由，并支持一键更换，更换记录用于修正场景描述。</p>
+  <p>提问同样是一个工具。模型调用它时给出问题与候选项，界面渲染成选择题；用户的选择作为下一轮输入回来。新手答不上开放式问题，所以带候选项的提问是默认形式。</p>
+  <p>场景目录是纯文本配置文件，用户随时可改。新增一个场景或替换整份目录都不需要改代码。</p>
+
+  <h3>3 · 记忆与持久层</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>层</th><th>内容</th><th>形态</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>持久层</td>
+        <td>项目总体概述、阶段目标、进展（跑通并成立的与试过没成立的实验方法概述）；用户的合作偏好；用户的实验相关知识情况与经验评估；易犯错场景目录与对应指令；参考案例</td>
+        <td>跨会话。Markdown 与 TOML 文件，用户随时直接编辑</td>
+      </tr>
+      <tr>
+        <td>推断层</td>
+        <td>推断图；本轮场景</td>
+        <td>一次会话。turn 是它的事务边界</td>
+      </tr>
+    </tbody>
+  </table></div>
+  <p>持久层的目标是让一个新对话能快速入手这个项目。首次运行时把初始内容写成文件，之后读到的就是用户改过的版本。</p>
+  <p>知识与经验评估用三档决定 agent 是提问还是讲解：有储备则提问；明确没有储备则先讲通机制再把判断交回；储备情况不清楚时先问清楚这一点本身。</p>
+
+  <h3>4 · 模式选择</h3>
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>探索 mode</th><th>行动 mode</th></tr></thead>
+    <tbody>
+      <tr><td>可用场景</td><td>全集，含讲解与开放式追问</td><td>关闭讲解类场景</td></tr>
+      <tr><td>资料抽取目标</td><td>领域知识、动机、术语</td><td>方法、超参、实现细节</td></tr>
+    </tbody>
+  </table></div>
+  <p>mode 由用户显式切换。</p>
+
+  <h3>5 · 一键蒸馏</h3>
+  <p>用户在一段会话结束后触发蒸馏。subagent 读全程对话与推断图，产出持久层的更新草稿：项目进展、这次显现的合作偏好、知识与经验评估的更新、值得入库的易犯错场景与指令。草稿写成独立文件，用户看过、改过再合并进持久层。</p>
+</section>
+
+<section>
+  <h2><span class="num">四</span>场景定制方案</h2>
+
+  <h3>定制一 · 判断与回答分离的两段式循环</h3>
+  <p><strong>解决</strong>：通用 agent 由模型自行决定要不要提问，"尽快收敛到可执行"的目标会压制提问倾向，问题只在撞墙后暴露。</p>
+  <p><strong>做法</strong>：harness 强制每轮先跑判断段，产出场景判定与推断 diff；据此注入约束、案例与工具集，再跑回答段。判断段不带任何场景的指令全文与案例，可配便宜模型。场景目录与案例库为可插拔配置。</p>
+  <p><strong>对比示例</strong>：同一个模糊 idea，通用 agent 直接给出的实现方案，与本系统在动手前提出的第一个问题。</p>
+
+  <h3>定制二 · 结构化架构图推断</h3>
+  <p><strong>解决</strong>：新手判断不了 agent 给的设计对不对，也意识不到 agent 误解了什么。</p>
+  <p><strong>做法</strong>：推断以带来源标注的结构化架构图承载，由仓库问答 subagent 从真实代码填充；未标来源的节点在图上显式区分。</p>
+  <p><strong>对比示例</strong>：同一个仓库下，纯文字回答与带来源标注的架构图在"能否发现模块接口不匹配"上的差别。</p>
+
+  <h3>定制三 · 持久记忆驱动的问 / 讲切换</h3>
+  <p><strong>解决</strong>：agent 不知道用户懂到哪一步，只能反复解释或默认全懂。</p>
+  <p><strong>做法</strong>：跨会话维护用户的知识与经验评估，三态决定 agent 提问、讲解还是先问清储备本身。评估由一键蒸馏更新，用户可直接编辑。</p>
+  <p><strong>对比示例</strong>：用户自陈某处不熟之后，前后两轮回复在详略上的变化。</p>
+</section>
+
+<section>
+  <h2><span class="num">五</span>系统架构</h2>
+  <p>core 负责调度与写权仲裁。UI、模型、tool call、state 分别作为接口插入 core，workspace 缓存会话数据。</p>
+
+  <figure>
+    <svg viewBox="0 0 920 590" role="img" aria-label="模块结构图：core 居中调度并仲裁写权，UI、模型、state、tool call 四个接口接入，state 分持久层与推断层，subagent 挂在 tool call 之下，全部包在 workspace 内">
+      <defs>
+        <marker id="m1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
+        <marker id="m1h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+      </defs>
+      <rect class="frame" x="16" y="16" width="888" height="548" rx="6"/>
+      <text class="tag mut" x="34" y="42">WORKSPACE · 会话缓存 / 快照 / 记账</text>
+
+      <rect class="bx" x="330" y="60" width="250" height="66" rx="4"/>
+      <text class="t" x="455" y="88" text-anchor="middle">UI 接口</text>
+      <text class="ts mut" x="455" y="108" text-anchor="middle">主区 · 可编辑侧栏 · 场景条 · 成本条</text>
+
+      <rect class="bx-core" x="330" y="232" width="250" height="104" rx="4"/>
+      <text class="tl" x="455" y="272" text-anchor="middle">core</text>
+      <text class="ts mut" x="455" y="294" text-anchor="middle">调度 · 分流 · turn 事务 · 写权仲裁</text>
+      <text class="ts mut" x="455" y="312" text-anchor="middle">上下文组装与压缩 · 记账</text>
+
+      <rect class="bx" x="40" y="244" width="200" height="80" rx="4"/>
+      <text class="t" x="140" y="274" text-anchor="middle">模型接口</text>
+      <text class="ts mut" x="140" y="294" text-anchor="middle">判断 / 回答 / subagent</text>
+      <text class="ts mut" x="140" y="310" text-anchor="middle">三个角色分别可配</text>
+
+      <rect class="bx" x="650" y="150" width="240" height="270" rx="4"/>
+      <text class="t" x="770" y="178" text-anchor="middle">state 接口</text>
+      <rect class="bx-dash" x="666" y="192" width="208" height="106" rx="3"/>
+      <text class="t" x="770" y="216" text-anchor="middle">持久层</text>
+      <text class="ts mut" x="770" y="234" text-anchor="middle">项目概述 · 阶段目标 · 进展</text>
+      <text class="ts mut" x="770" y="250" text-anchor="middle">合作偏好 · 知识与经验评估</text>
+      <text class="ts mut" x="770" y="266" text-anchor="middle">场景目录 · 参考案例</text>
+      <text class="ts hotf" x="770" y="286" text-anchor="middle">Markdown / TOML，用户直接编辑</text>
+      <rect class="bx-dash" x="666" y="312" width="208" height="86" rx="3"/>
+      <text class="t" x="770" y="336" text-anchor="middle">推断层</text>
+      <text class="ts mut" x="770" y="354" text-anchor="middle">推断图 · 本轮场景</text>
+      <text class="ts mut" x="770" y="372" text-anchor="middle">turn 是事务边界</text>
+      <text class="ts mut" x="770" y="390" text-anchor="middle">模型改动先入未提交区</text>
+
+      <rect class="bx" x="330" y="430" width="250" height="66" rx="4"/>
+      <text class="t" x="455" y="458" text-anchor="middle">tool call</text>
+      <text class="ts mut" x="455" y="478" text-anchor="middle">仓库 · 论文 · 搜索 · 提问 · 本地文件</text>
+
+      <rect class="bx hot" x="40" y="430" width="250" height="66" rx="4"/>
+      <text class="t hotf" x="165" y="458" text-anchor="middle">subagent</text>
+      <text class="ts mut" x="165" y="478" text-anchor="middle">检索 · 仓库问答 · 摘要 · 蒸馏</text>
+
+      <line class="ln" x1="415" y1="126" x2="415" y2="226" marker-end="url(#m1)"/>
+      <text class="ts mut" x="407" y="182" text-anchor="end">输入 · 编辑 · 打断</text>
+      <line class="ln" x1="495" y1="232" x2="495" y2="132" marker-end="url(#m1)"/>
+      <text class="ts mut" x="503" y="182">正文 · diff · 场景 · 成本</text>
+      <line class="ln" x1="330" y1="266" x2="246" y2="266" marker-end="url(#m1)"/>
+      <text class="ts mut" x="288" y="256" text-anchor="middle">组装后的上下文</text>
+      <line class="ln" x1="240" y1="304" x2="324" y2="304" marker-end="url(#m1)"/>
+      <text class="ts mut" x="288" y="324" text-anchor="middle">场景 · diff · 正文</text>
+      <line class="ln" x1="580" y1="266" x2="644" y2="266" marker-end="url(#m1)"/>
+      <text class="ts mut" x="614" y="256" text-anchor="middle">读</text>
+      <line class="ln" x1="650" y1="304" x2="586" y2="304" marker-end="url(#m1)"/>
+      <text class="ts mut" x="614" y="324" text-anchor="middle">提议 diff</text>
+      <line class="ln" x1="455" y1="336" x2="455" y2="424" marker-end="url(#m1)"/>
+      <text class="ts mut" x="465" y="386">调用</text>
+      <line class="ln hot" x1="324" y1="463" x2="296" y2="463" marker-end="url(#m1h)"/>
+      <text class="ts hotf" x="165" y="516" text-anchor="middle">大块上下文不进主循环</text>
+    </svg>
+    <figcaption>图 1 · 模块结构。四个接口对称插在 core 上，workspace 兜住全部会话数据；新增一种协作方式只需要往持久层加一条场景配置。</figcaption>
+  </figure>
+
+  <figure>
+    <svg viewBox="0 0 960 420" role="img" aria-label="单轮流程图：用户输入、组装上下文、判断调用产出场景判定与推断 diff、必要时派 subagent 取材料、注入场景约束与案例并暴露工具、回答调用流式输出且模型自主调用工具，侧栏 diff 先于正文抵达">
+      <defs>
+        <marker id="m2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
+        <marker id="m2h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+      </defs>
+      <rect class="bx hot" x="344" y="70" width="340" height="60" rx="4"/>
+      <text class="t hotf" x="514" y="96" text-anchor="middle">subagent（按需）</text>
+      <text class="ts mut" x="514" y="116" text-anchor="middle">案例检索 · 仓库问答 · 论文抽取</text>
+
+      <rect class="bx" x="24" y="208" width="104" height="64" rx="4"/>
+      <text class="t" x="76" y="236" text-anchor="middle">用户输入</text>
+      <text class="ts mut" x="76" y="256" text-anchor="middle">或选择项</text>
+
+      <rect class="bx" x="168" y="208" width="136" height="64" rx="4"/>
+      <text class="t" x="236" y="230" text-anchor="middle">组装上下文</text>
+      <text class="ts mut" x="236" y="248" text-anchor="middle">持久层 · 场景目录</text>
+      <text class="ts mut" x="236" y="264" text-anchor="middle">推断图 · 完整对话</text>
+
+      <rect class="bx-core" x="344" y="208" width="152" height="64" rx="4"/>
+      <text class="t" x="420" y="230" text-anchor="middle">① 判断调用</text>
+      <text class="ts mut" x="420" y="248" text-anchor="middle">场景判定 + 理由</text>
+      <text class="ts mut" x="420" y="264" text-anchor="middle">推断 diff</text>
+
+      <rect class="bx" x="536" y="208" width="136" height="64" rx="4"/>
+      <text class="t" x="604" y="228" text-anchor="middle">注入场景材料</text>
+      <text class="ts mut" x="604" y="246" text-anchor="middle">约束与建议 + 案例</text>
+      <text class="ts hotf" x="604" y="264" text-anchor="middle">暴露该场景的工具</text>
+
+      <rect class="bx-core" x="712" y="208" width="152" height="64" rx="4"/>
+      <text class="t" x="788" y="230" text-anchor="middle">② 回答调用</text>
+      <text class="ts mut" x="788" y="248" text-anchor="middle">流式正文</text>
+      <text class="ts hotf" x="788" y="264" text-anchor="middle">模型自主调用工具</text>
+
+      <line class="ln" x1="128" y1="240" x2="162" y2="240" marker-end="url(#m2)"/>
+      <line class="ln" x1="304" y1="240" x2="338" y2="240" marker-end="url(#m2)"/>
+      <line class="ln" x1="496" y1="240" x2="530" y2="240" marker-end="url(#m2)"/>
+      <line class="ln" x1="672" y1="240" x2="706" y2="240" marker-end="url(#m2)"/>
+      <line class="ln hot" x1="400" y1="208" x2="400" y2="136" marker-end="url(#m2h)"/>
+      <text class="ts hotf" x="390" y="174" text-anchor="end">需要时</text>
+      <line class="ln hot" x1="628" y1="130" x2="628" y2="202" marker-end="url(#m2h)"/>
+      <text class="ts hotf" x="638" y="174">材料回注</text>
+
+      <rect class="bx" x="344" y="316" width="152" height="54" rx="4"/>
+      <text class="t" x="420" y="340" text-anchor="middle">侧栏先更新</text>
+      <text class="ts mut" x="420" y="358" text-anchor="middle">推断 diff · 本轮场景</text>
+      <line class="ln" x1="420" y1="272" x2="420" y2="310" marker-end="url(#m2)"/>
+      <text class="ts mut" x="430" y="296">先</text>
+      <rect class="bx" x="712" y="316" width="152" height="54" rx="4"/>
+      <text class="t" x="788" y="340" text-anchor="middle">主区流式正文</text>
+      <text class="ts mut" x="788" y="358" text-anchor="middle">可随时打断</text>
+      <line class="ln" x1="788" y1="272" x2="788" y2="310" marker-end="url(#m2)"/>
+      <text class="ts mut" x="798" y="296">后</text>
+
+      <text class="ts hotf" x="24" y="400">判断决定注入什么材料；说什么、调哪个工具、调几次由模型决定。</text>
+    </svg>
+    <figcaption>图 2 · 一轮对话。判断与回答分为两次调用；判断段不带场景指令全文与案例。推断 diff 结构化输出，先于正文抵达侧栏。</figcaption>
+  </figure>
+
+  <figure>
+    <svg viewBox="0 0 900 350" role="img" aria-label="记忆两层图：持久层跨会话，以 Markdown 与 TOML 文件形式由用户直接编辑；推断层一次会话，turn 为事务边界；一键蒸馏由用户触发，产出草稿写入持久层">
+      <defs>
+        <marker id="m3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
+        <marker id="m3h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+      </defs>
+      <rect class="bx-core" x="240" y="40" width="400" height="112" rx="4"/>
+      <text class="t" x="440" y="68" text-anchor="middle">持久层 · 跨会话</text>
+      <text class="ts mut" x="440" y="88" text-anchor="middle">项目概述 · 阶段目标 · 进展（成立的 / 没成立的方法概述）</text>
+      <text class="ts mut" x="440" y="106" text-anchor="middle">合作偏好 · 知识与经验评估</text>
+      <text class="ts mut" x="440" y="124" text-anchor="middle">易犯错场景目录与指令 · 参考案例</text>
+      <text class="ts hotf" x="440" y="144" text-anchor="middle">让一个新对话能快速入手这个项目</text>
+
+      <rect class="bx" x="240" y="216" width="400" height="86" rx="4"/>
+      <text class="t" x="440" y="244" text-anchor="middle">推断层 · 一次会话</text>
+      <text class="ts mut" x="440" y="264" text-anchor="middle">推断图（节点 · 边 · 来源 · 置信度）· 本轮场景</text>
+      <text class="ts mut" x="440" y="282" text-anchor="middle">turn 为事务边界：模型改动先入未提交区，turn 结束提交</text>
+
+      <line class="ln hot" x1="330" y1="216" x2="330" y2="158" marker-end="url(#m3h)"/>
+      <text class="ts hotf" x="340" y="192">一键蒸馏 · 用户触发</text>
+      <text class="ts mut" x="340" y="208">产出草稿，用户合并</text>
+      <line class="ln-thin" x1="560" y1="152" x2="560" y2="210" marker-end="url(#m3)"/>
+      <text class="ts mut" x="550" y="186" text-anchor="end">会话开始装载</text>
+
+      <text class="tm mut" x="662" y="72">memory/project.md</text>
+      <text class="tm mut" x="662" y="92">memory/preferences.md</text>
+      <text class="tm mut" x="662" y="112">memory/knowledge.md</text>
+      <text class="tm mut" x="662" y="132">memory/playbook.toml</text>
+      <text class="tm mut" x="662" y="252">session/state.json</text>
+      <text class="ts mut" x="222" y="96" text-anchor="end">用户</text>
+      <text class="ts mut" x="222" y="114" text-anchor="end">随时直接</text>
+      <text class="ts mut" x="222" y="132" text-anchor="end">编辑文件</text>
+      <text class="ts mut" x="222" y="260" text-anchor="end">用户在侧栏编辑</text>
+      <text class="ts hotf" x="240" y="330">用户的编辑立即生效并落盘，不随 turn 回滚，也不推进正在跑的那一轮。</text>
+    </svg>
+    <figcaption>图 3 · 记忆两层。持久层是蒸馏成果，以文件形式交给用户；推断层承担一次会话内的信息整合，由 turn 事务保证一致。</figcaption>
+  </figure>
+
+  <figure>
+    <svg viewBox="0 0 940 430" role="img" aria-label="turn 事务与打断图：turn token 派生子 token 给判断调用、两个 subagent 与回答调用，各任务把事件发回 SessionActor 串行处理；模型改动累积在未提交区，turn 结束提交并拍快照；用户编辑即时提交不随 turn 回滚">
+      <defs>
+        <marker id="m4" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
+      </defs>
+      <line class="ln-dash" x1="176" y1="24" x2="176" y2="352"/>
+      <line class="ln-dash" x1="806" y1="24" x2="806" y2="352"/>
+      <text class="ts mut" x="182" y="20">turn 开始</text>
+      <text class="ts mut" x="800" y="20" text-anchor="end">turn 结束</text>
+
+      <rect class="bx-core" x="196" y="34" width="124" height="28" rx="3"/>
+      <text class="t" x="258" y="53" text-anchor="middle">turn token</text>
+      <text class="ts hotf" x="190" y="53" text-anchor="end">打断 →</text>
+
+      <line class="ln-thin" x1="258" y1="62" x2="258" y2="182"/>
+      <line class="ln-thin" x1="258" y1="93" x2="352" y2="93"/>
+      <line class="ln-thin" x1="258" y1="131" x2="512" y2="131"/>
+      <line class="ln-thin" x1="258" y1="169" x2="512" y2="169"/>
+      <line class="ln-thin" x1="258" y1="182" x2="682" y2="182"/>
+      <text class="ts mut" x="196" y="200">child tokens</text>
+
+      <rect class="bx" x="356" y="80" width="120" height="26" rx="3"/>
+      <text class="ts" x="416" y="97" text-anchor="middle">① 判断调用</text>
+      <rect class="bx hot" x="516" y="118" width="150" height="26" rx="3"/>
+      <text class="ts hotf" x="591" y="135" text-anchor="middle">案例检索</text>
+      <rect class="bx hot" x="516" y="156" width="150" height="26" rx="3"/>
+      <text class="ts hotf" x="591" y="173" text-anchor="middle">仓库问答</text>
+      <rect class="bx" x="686" y="169" width="112" height="26" rx="3"/>
+      <text class="ts" x="742" y="186" text-anchor="middle">② 回答调用</text>
+
+      <line class="ln-dash" x1="416" y1="106" x2="416" y2="216" marker-end="url(#m4)"/>
+      <line class="ln-dash" x1="566" y1="144" x2="566" y2="216" marker-end="url(#m4)"/>
+      <line class="ln-dash" x1="626" y1="182" x2="626" y2="216" marker-end="url(#m4)"/>
+      <line class="ln-dash" x1="742" y1="195" x2="742" y2="216" marker-end="url(#m4)"/>
+      <text class="ts mut" x="900" y="212" text-anchor="end">Event：进度 / 结果 / 错误</text>
+
+      <rect class="bx-core" x="40" y="220" width="860" height="64" rx="4"/>
+      <text class="t" x="60" y="246">SessionActor</text>
+      <text class="ts mut" x="60" y="266">独占 state · 只处理快消息，不 await 长任务 · 写权唯一</text>
+
+      <rect class="bx-dash" x="356" y="312" width="450" height="28" rx="3"/>
+      <text class="ts mut" x="581" y="331" text-anchor="middle">未提交区 · 本轮模型改动</text>
+      <line class="ln" x1="581" y1="284" x2="581" y2="306" marker-end="url(#m4)"/>
+      <text class="ts hotf" x="816" y="331">提交 + 快照</text>
+
+      <rect class="bx-solid" x="90" y="368" width="200" height="30" rx="3"/>
+      <text class="ts inv" x="190" y="387" text-anchor="middle">用户编辑（侧栏）</text>
+      <line class="ln" x1="190" y1="368" x2="190" y2="290" marker-end="url(#m4)"/>
+      <text class="ts mut" x="200" y="330">即时提交 · 即时落盘 · 不随 turn 回滚</text>
+    </svg>
+    <figcaption>图 4 · turn 事务与打断。任务层级由 CancellationToken 的父子关系表达，打断一个 turn 即 cancel 父 token，子任务收敛。控制流由 turn task 持有（含模型与工具的多次往返），SessionActor 只裁决状态写入，因此不会被长任务阻塞。打断后已产生的推断照常提交，落盘顺序为先写历史、再提交状态、最后拍快照。</figcaption>
+  </figure>
+
+  <figure>
+    <svg viewBox="0 0 900 360" role="img" aria-label="上下文分层与压缩：system prompt、持久层、场景目录跨轮不变可命中缓存；推断图每轮变；完整对话逐轮增长；判断段与回答段吃同一份对话，场景指令与案例只给回答段；接近上限时折叠早期对话为摘要">
+      <text class="ts mut" x="60" y="26">送入顺序 ↓</text>
+      <rect class="bx" x="60" y="38" width="470" height="36" rx="3"/>
+      <text class="t" x="78" y="61">system prompt</text>
+      <rect class="bx" x="60" y="84" width="470" height="36" rx="3"/>
+      <text class="t" x="78" y="107">持久层：项目 · 合作偏好 · 知识评估</text>
+      <rect class="bx" x="60" y="130" width="470" height="36" rx="3"/>
+      <text class="t" x="78" y="153">场景目录（名称与触发条件）</text>
+      <line class="ln-dash hot" x1="44" y1="174" x2="700" y2="174"/>
+      <text class="ts hotf" x="700" y="168" text-anchor="end">prompt cache 命中到这里</text>
+      <rect class="bx" x="60" y="182" width="470" height="36" rx="3"/>
+      <text class="t" x="78" y="205">推断图</text>
+      <rect class="bx" x="60" y="228" width="470" height="36" rx="3"/>
+      <text class="t" x="78" y="251">完整对话</text>
+
+      <path class="ln" d="M548,42 L562,42 L562,260 L548,260"/>
+      <text class="ts" x="572" y="146">判断段</text>
+
+      <path class="ln hot" d="M626,42 L640,42 L640,260 L626,260"/>
+      <text class="ts hotf" x="650" y="140">回答段</text>
+      <text class="ts hotf" x="650" y="156">+ 本轮场景的</text>
+      <text class="ts hotf" x="650" y="172">  约束与案例</text>
+
+      <rect class="bx-dash" x="60" y="292" width="640" height="46" rx="3"/>
+      <text class="ts" x="78" y="312">接近模型上限时：把较早的一段对话折叠成摘要，保留最近数轮原文。</text>
+      <text class="ts mut" x="78" y="330">折叠发生在判断段之前、上一轮推断提交之后；折叠时带上推断图，图里已有的不重复留存。</text>
+    </svg>
+    <figcaption>图 5 · 上下文分层与压缩。按变化频率排序，前三段跨轮复用。两段调用吃同一份完整对话，判断段不带场景指令全文与案例。</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2><span class="num">六</span>技术选型</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>用途</th><th>选型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>异步运行时</td><td class="k">tokio</td><td>SessionActor、turn task、subagent 统一在一个运行时下</td></tr>
+      <tr><td>取消传播</td><td class="k">tokio-util · CancellationToken</td><td>父子 token 表达任务层级，一次 cancel 收敛整棵</td></tr>
+      <tr><td>模型调用</td><td class="k">reqwest + serde_json</td><td>自封 <code>ModelClient</code> trait，多 provider 可换，记账点统一在这一层</td></tr>
+      <tr><td>流式解析</td><td class="k">eventsource-stream</td><td>SSE 增量输出</td></tr>
+      <tr><td>配置与持久层</td><td class="k">toml + serde，Markdown</td><td>场景目录用 TOML，记忆用 Markdown；三个模型角色各自配 provider / model / 参数</td></tr>
+      <tr><td>会话持久化</td><td class="k">serde_json + jsonl，原子重写</td><td>history 追加、state 原子重写，崩溃不损坏</td></tr>
+      <tr><td>仓库检索</td><td class="k">ignore + grep-searcher</td><td>尊重 .gitignore 的遍历与搜索</td></tr>
+      <tr><td>代码结构提取</td><td class="k">tree-sitter</td><td>抽函数签名与调用关系，填充推断图</td></tr>
+      <tr><td>论文获取</td><td class="k">arXiv API + pdf-extract</td><td></td></tr>
+      <tr><td>计费</td><td class="k">API usage 优先，估算兜底</td><td>流式被打断时按已发出的 prompt 与已收到的正文估算，单独标记</td></tr>
+      <tr><td>服务与界面</td><td class="k">axum + WebSocket + 单页前端</td><td>前端产物由 rust-embed 打进二进制，用户侧一条命令启动</td></tr>
+      <tr><td>图渲染</td><td class="k">elkjs / dagre 布局 + 自绘 SVG</td><td>节点需点选与就地编辑</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2><span class="num">七</span>课程要求对照</h2>
+  <div class="tbl"><table>
+    <thead><tr><th></th><th>要求</th><th>落在哪里</th></tr></thead>
+    <tbody>
+      <tr><td class="k">R1</td><td>核心逻辑用 Rust 实现</td><td>SessionActor 与事件循环、写权仲裁、turn 事务与快照、场景判定与材料注入、上下文分层与压缩、推断图结构与来源校验、记账</td></tr>
+      <tr><td class="k">R2</td><td>用户交互界面</td><td>axum + WebSocket + 单页前端；主区对话、可编辑侧栏、场景条与一键更换、成本条、一键蒸馏</td></tr>
+      <tr><td class="k">R3</td><td>模型与参数可配置</td><td>判断 / 回答 / subagent 三个角色在 TOML 中分别配置 provider、model、温度与上限</td></tr>
+      <tr><td class="k">R4</td><td>实时展示进度，支持打断</td><td>Event 流推送每个任务的进度与心跳；CancellationToken 树支持打断整个 turn 或单个 subagent；打断分两段反馈</td></tr>
+      <tr><td class="k">R5</td><td>上下文历史管理，可保存 / 加载</td><td>workspace 目录：append-only history、state 快照、持久层文件；支持 resume 与重放</td></tr>
+      <tr><td class="k">R6</td><td>统计 Token 用量与费用</td><td><code>ModelClient</code> 层统一记账，按角色与任务归集，界面实时显示单轮与累计</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2><span class="num">八</span>验收方案</h2>
+  <ul>
+    <li><strong>提前命中率。</strong>以真实实验设计记录作为标准答案，同一个模糊想法分别交给本 agent 与通用编码 agent，检验本系统是否在动手之前提出了切实的问题。该指标与干预次数一并报告。</li>
+    <li><strong>真实论文实验方法对照。</strong>将真实论文的场景与模糊 idea 交给 agent，验证 agent 设计方案与论文实验方案的匹配度。</li>
+    <li><strong>冷启动可用性。</strong>内置一组脱敏的 bootstrap 场景与案例，保证在没有个人积累的情况下首次打开即可用。</li>
+  </ul>
+</section>
+
+</div>
+</body>
+</html>
