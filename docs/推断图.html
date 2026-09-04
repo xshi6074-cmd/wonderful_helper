@@ -1,0 +1,523 @@
+<title>实验流程推断图</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --ground:#eceff1; --surface:#ffffff; --surface-2:#f4f7f8; --surface-3:#e6ebee;
+  --ink:#14181d; --ink-2:#37424d; --muted:#5c6773;
+  --rule:#ccd4d9; --rule-2:#e0e6e9;
+  --ok:#0a6b62; --bad:#9c2e44; --warn:#87680f; --info:#2f5580;
+  --ok-bg:#e0efed; --bad-bg:#f8e7ea; --warn-bg:#f5efdb; --info-bg:#e6edf5;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0f1418; --surface:#161c22; --surface-2:#1b2229; --surface-3:#222b33;
+    --ink:#dee5eb; --ink-2:#b4c0ca; --muted:#8794a1;
+    --rule:#2a333c; --rule-2:#212930;
+    --ok:#54c2b4; --bad:#e8879a; --warn:#d5ac4d; --info:#7fa9d8;
+    --ok-bg:#122c29; --bad-bg:#301b21; --warn-bg:#2c2515; --info-bg:#17222e;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0f1418; --surface:#161c22; --surface-2:#1b2229; --surface-3:#222b33;
+  --ink:#dee5eb; --ink-2:#b4c0ca; --muted:#8794a1;
+  --rule:#2a333c; --rule-2:#212930;
+  --ok:#54c2b4; --bad:#e8879a; --warn:#d5ac4d; --info:#7fa9d8;
+  --ok-bg:#122c29; --bad-bg:#301b21; --warn-bg:#2c2515; --info-bg:#17222e;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4","Songti SC",Georgia,serif;
+  font-size:16px; line-height:1.65; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px}
+h1,h2,h3,h4{font-family:Archivo,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;text-wrap:balance;margin:0}
+code,kbd,.mono,th,td,.eyebrow,.tag{font-family:"IBM Plex Mono","Sarasa Mono SC",ui-monospace,Menlo,monospace}
+code{font-size:.86em;background:var(--surface-3);padding:.1em .34em;border-radius:2px;color:var(--ink-2)}
+a{color:var(--ok)}
+a:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+
+header.mast{border-bottom:1px solid var(--rule);background:var(--surface)}
+.mast-in{max-width:1180px;margin:0 auto;padding:44px 28px 34px;display:flex;flex-direction:column;gap:18px}
+.eyebrow{font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(30px,4.4vw,46px);font-weight:700;letter-spacing:-.02em;line-height:1.08}
+.dek{max-width:66ch;color:var(--ink-2);font-size:17px;margin:0}
+.mast-meta{display:flex;flex-wrap:wrap;gap:10px 26px;font-size:12.5px;color:var(--muted);font-family:"IBM Plex Mono",ui-monospace,monospace;padding-top:6px;border-top:1px solid var(--rule-2)}
+.mast-meta b{color:var(--ink-2);font-weight:500}
+
+nav.toc{background:var(--surface-2);border-bottom:1px solid var(--rule)}
+.toc-in{max-width:1180px;margin:0 auto;padding:16px 28px;display:flex;flex-wrap:wrap;gap:4px 0}
+.toc-in a{display:flex;gap:8px;align-items:baseline;text-decoration:none;color:var(--ink-2);padding:5px 18px 5px 0;font-size:13.5px}
+.toc-in a:hover{color:var(--ok)}
+.toc-in a span{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;color:var(--muted)}
+
+section{padding:52px 0 8px;border-bottom:1px solid var(--rule-2)}
+section:last-of-type{border-bottom:0;padding-bottom:64px}
+.h-row{display:flex;gap:14px;align-items:baseline;margin-bottom:6px}
+.h-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13px;color:var(--muted)}
+h2{font-size:25px;font-weight:600;letter-spacing:-.015em}
+h3{font-size:17px;font-weight:600;margin:30px 0 8px}
+h4{font-size:14.5px;font-weight:600;margin:20px 0 6px;color:var(--ink-2)}
+p{margin:12px 0;max-width:74ch}
+ul,ol{margin:12px 0;padding-left:22px;max-width:74ch}
+li{margin:5px 0}
+strong,b{font-weight:600}
+
+.lede{font-size:17.5px;color:var(--ink-2);max-width:68ch;margin-top:14px}
+.tw{overflow-x:auto;margin:20px 0;border:1px solid var(--rule);border-radius:3px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th{text-align:left;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+   padding:10px 14px;border-bottom:1px solid var(--rule);background:var(--surface-2);white-space:nowrap}
+td{padding:9px 14px;border-bottom:1px solid var(--rule-2);vertical-align:top;color:var(--ink-2);line-height:1.5}
+tr:last-child td{border-bottom:0}
+td b{color:var(--ink);font-weight:500}
+td.k{white-space:nowrap;color:var(--ink)}
+
+pre{background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:16px 18px;overflow-x:auto;
+    font-family:"IBM Plex Mono","Sarasa Mono SC",ui-monospace,monospace;font-size:12.5px;line-height:1.62;margin:18px 0;color:var(--ink-2)}
+pre b{color:var(--ink);font-weight:500}
+pre i{color:var(--muted);font-style:normal}
+pre em{color:var(--ok);font-style:normal}
+pre s{color:var(--bad);text-decoration:none}
+
+.note{border-left:3px solid var(--rule);background:var(--surface-2);padding:14px 18px;margin:20px 0;font-size:15px;color:var(--ink-2);max-width:78ch}
+.note.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+.note.bad{border-left-color:var(--bad);background:var(--bad-bg)}
+.note.ok{border-left-color:var(--ok);background:var(--ok-bg)}
+.note.info{border-left-color:var(--info);background:var(--info-bg)}
+.note p{margin:8px 0;max-width:none}
+.note p:first-child{margin-top:0}
+.note p:last-child{margin-bottom:0}
+.note h4{margin-top:0}
+
+.tag{display:inline-block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:2px;
+     background:var(--surface-3);color:var(--muted);vertical-align:2px;font-weight:500}
+.tag.ok{background:var(--ok-bg);color:var(--ok)}
+.tag.bad{background:var(--bad-bg);color:var(--bad)}
+.tag.warn{background:var(--warn-bg);color:var(--warn)}
+
+.duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:20px;margin:22px 0;align-items:start}
+.panel{border:1px solid var(--rule);border-radius:3px;background:var(--surface);overflow:hidden}
+.panel .cap{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+   color:var(--muted);padding:9px 16px;border-bottom:1px solid var(--rule-2);background:var(--surface-2)}
+.panel .pad{padding:14px 18px;font-size:14.5px;color:var(--ink-2)}
+.panel .pad p{margin:8px 0;max-width:none}
+.panel .pad p:first-child{margin-top:0}
+.panel .pad p:last-child{margin-bottom:0}
+
+.mer{border:1px solid var(--rule);border-radius:3px;background:var(--surface);padding:20px;overflow-x:auto;margin:22px 0}
+pre.mermaid{border:0;background:transparent;margin:0;padding:0}
+
+.decide{border:1px solid var(--rule);border-radius:3px;overflow:hidden;margin:22px 0;background:var(--surface)}
+.decide > div{padding:16px 20px;border-bottom:1px solid var(--rule-2)}
+.decide > div:last-child{border-bottom:0}
+.decide h4{margin:0 0 6px;font-size:15px;color:var(--ink);display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.decide p{margin:6px 0 0;font-size:14.5px;color:var(--ink-2);max-width:80ch}
+.q > div{border-left:3px solid var(--warn)}
+
+.mini{font-size:13px;color:var(--muted);margin-top:8px;max-width:78ch}
+hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
+</style>
+
+<header class="mast">
+  <div class="mast-in">
+    <div class="eyebrow">premortem · 数据结构设计 · 承接《数据契约》</div>
+    <h1>实验流程推断图</h1>
+    <p class="dek">模型对「这个实验到底怎么做」的当前推断，是一张有稳定身份的语义图；mermaid 是它的产物，不是它本身。这份定死：图的类型、id 谁铸、用户在图上改一笔会变成什么事件、以及模型想绕过用户改动时被什么挡住。</p>
+    <div class="mast-meta">
+      <span><b>状态</b> 设计，未实现</span>
+      <span><b>基线</b> a6e8e5d · core-timeline</span>
+      <span><b>新增事件类型</b> 0</span>
+      <span><b>新增表</b> 0</span>
+      <span><b>要你拍的</b> 3 条（见 10）</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="toc-in">
+    <a href="#s1"><span>01</span>要担的四件事</a>
+    <a href="#s2"><span>02</span>图是数据，mermaid 是产物</a>
+    <a href="#s3"><span>03</span>类型</a>
+    <a href="#s4"><span>04</span>id</a>
+    <a href="#s5"><span>05</span>仲裁与三个漏洞</a>
+    <a href="#s6"><span>06</span>op 集合</a>
+    <a href="#s7"><span>07</span>用户的一笔</a>
+    <a href="#s8"><span>08</span>模型看到的那份</a>
+    <a href="#s9"><span>09</span>删除与放弃的路线</a>
+    <a href="#s10"><span>10</span>不变量 · 欠账 · 待拍</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<section id="s1">
+  <div class="h-row"><span class="h-num">01</span><h2>这张图要担的四件事</h2></div>
+  <p class="lede">功能需求先写清楚，类型才有约束。四件事里任意一件被牺牲，这个结构就白设计了。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:14%">职责</th><th style="width:44%">具体是什么</th><th>它对结构提的硬要求</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><b>1 产物</b></td>
+        <td>模型当前推断的<b>实验流程</b>：步骤、顺序、分支、并行臂、对照组、测量点。要能画出来给人看。</td>
+        <td>拓扑必须是一等公民 —— 节点、边、嵌套。不能是平铺的键值表。</td></tr>
+      <tr><td class="k"><b>2 可改</b></td>
+        <td>用户<b>直接在图上</b>改：改名、加步骤、连线、断线、拖进分组、删掉。</td>
+        <td>每个可点选的东西必须有<b>稳定 id</b>。没有 id 就没有「改哪一个」。</td></tr>
+      <tr><td class="k"><b>3 可仲裁</b></td>
+        <td>同一轮里模型也在改。用户碰过的地方，模型基于旧值算出的结果作废。</td>
+        <td>每条 op 要能算出一组<b>仲裁键</b>，且键必须堵得住「换个 id 绕过去」。</td></tr>
+      <tr><td class="k"><b>4 可溯源</b></td>
+        <td>点开任一节点：谁写的、依据什么、多大把握、第几轮写的。没依据的<b>画成虚线</b> —— 那正是盲区。</td>
+        <td>节点与边各自带一份 <code>Prov</code>，和图外推断共用同一套。</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>还有一句要求要单独拎出来：<b>「结构可能非常灵活，不能用 mermaid 模板」。</b>它约束的不是渲染，是<em>词表</em> —— 节点类型、边类型、形状映射都不能写死在 Rust 的 enum 里，否则模型一想画「先并行三个配比、再挑一个往下走」就撞墙。灵活性的落点见第 2 节末。</p>
+</section>
+
+<section id="s2">
+  <div class="h-row"><span class="h-num">02</span><h2>中心决定：图是数据，mermaid 是产物</h2></div>
+
+  <p class="lede">模型不画图 —— 它发<b>图操作</b>。mermaid 由我们从图纯函数地渲染出来，UI 和 prompt 拿的是同一份。</p>
+
+  <h3>为什么不能让模型直接吐 mermaid</h3>
+  <p>「模型每轮重画一张 mermaid」这条路走不通，不是因为难，是因为它和第 2、3 件事直接冲突：</p>
+  <ul>
+    <li><b>身份没了。</b>第 N 轮模型写 <code>B[退火]</code>，用户把它改成「退火 400℃ 2h」，第 N+1 轮模型重画时又写 <code>B[退火]</code>。要认出这是同一个节点只能靠文本匹配 —— 而用户改的恰恰就是文本。<b>用户一编辑，身份就断。</b></li>
+    <li><b>仲裁退化成文本 diff。</b>全量重写会让整张图看起来「哪儿都改了」，仲裁只能整份丢或整份收，「用户碰过的那一处」这个粒度不存在了。</li>
+    <li><b>贵，而且越用越贵。</b>图会长到几十个节点，每轮重画一遍是纯浪费的输出 token，还带着重写引入的伪改动。</li>
+  </ul>
+
+  <div class="note ok">
+    <h4>所以：语义图是真相，渲染是它的纯函数</h4>
+    <p><code>render::mermaid(&amp;Graph) -&gt; String</code> 放在库里，<b>Core 和 UI 调的是同一个函数</b>。用户改个名字，图变了，渲染立刻变，不需要一次模型调用；重启之后渲染逐字节相同。模型的自由度在<em>图</em>上，不在像素上。</p>
+  </div>
+
+  <h3>那「灵活」放哪</h3>
+  <p>放在<b>词表开放</b>，不在<b>文本自由</b>。三个落点：</p>
+  <div class="tw"><table>
+    <thead><tr><th style="width:20%">落点</th><th style="width:32%">形式</th><th>为什么够用</th></tr></thead>
+    <tbody>
+      <tr><td class="k">节点/边的类型</td><td><code>kind: String</code>，不是 enum</td>
+        <td>模型可以现造 <code>parallel-arm</code>、<code>control</code>、<code>gate</code>、<code>abandoned</code>。Rust 一个字都不用改。</td></tr>
+      <tr><td class="k">形状与配色映射</td><td><code>memory/prompts.toml</code> 里的 <code>[graph.shape]</code> / <code>[graph.class]</code></td>
+        <td><b>词表在持久层，用户随时可改</b>，未知 kind 落到默认形状。这才是「不用模板」的真正落点 —— 改词表不用重编译。</td></tr>
+      <tr><td class="k">渲染意向</td><td><code>Graph.render: BTreeMap&lt;String,String&gt;</code></td>
+        <td>方言（<code>flowchart</code> / <code>stateDiagram</code>）、方向、自定义 <code>classDef</code>。渲染器不认识的键<b>直接忽略</b>，不报错。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>逃生舱：模型确实要自由画的时候</h3>
+  <p>总会有渲染器表达不了的东西（一张时序图、一段解释性 HTML）。给它一个旁挂位 <code>Graph.asides</code>：模型可以塞整段 mermaid 或 HTML，我们原样渲染。</p>
+  <div class="note warn">
+    <p><b>代价说死：能被结构化编辑的部分必须有稳定 id；模型要完全自由地画的部分，就放弃结构化编辑。</b>旁挂图在 UI 上明确标注「不可点选」，用户只能整段改文本，它也不参与仲裁。主图<b>永远</b>是结构化的 —— 逃生舱是旁挂的一张附图，不是主图的替代品。</p>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="h-row"><span class="h-num">03</span><h2>类型</h2></div>
+  <p class="lede">在 <code>src/state.rs</code>。<code>Workspace</code> 长出一个 <code>flow</code> 字段，其余原样保留。</p>
+
+<pre><i>// 溯源三件套从 Field 里提出来，节点、边、图外推断共用一份。
+// 这样 UI 的「点开看出处」对图内图外是同一段代码。</i>
+<b>pub struct</b> Prov {
+    <b>pub</b> origin:     Origin,          <i>// User / Model —— 由写它的事件类型决定，不可能丢</i>
+    <b>pub</b> source:     Option&lt;Source&gt;,  <i>// Repo / Paper / User / Guess；None 视同 Guess</i>
+    <b>pub</b> confidence: Option&lt;f32&gt;,
+    <b>pub</b> seq:        Seq,             <i>// 最后一次写它的那条事件 —— 溯源，不是版本号</i>
+}
+
+<b>pub struct</b> Node {
+    <b>pub</b> id:     NodeId,                       <i>// "n41_0"，见第 4 节</i>
+    <b>pub</b> kind:   String,                       <i>// 开放词表：step / gate / measure / control / abandoned ...</i>
+    <b>pub</b> label:  String,                       <i>// 图上显示的那行字</i>
+    <b>pub</b> body:   String,                       <i>// 细节：这一步具体怎么做。图上折起来，点开才看</i>
+    <b>pub</b> attrs:  BTreeMap&lt;String, String&gt;,    <i>// 参数：温度 / 转速 / 时长 / 样本量 / 仪器</i>
+    <b>pub</b> parent: Option&lt;NodeId&gt;,               <i>// 分组、泳道、并行臂、对照组 —— 全靠它</i>
+    <b>pub</b> prov:   Prov,
+}
+
+<b>pub struct</b> Edge {
+    <b>pub</b> id:    EdgeId,
+    <b>pub</b> from:  NodeId,
+    <b>pub</b> to:    NodeId,
+    <b>pub</b> kind:  String,                        <i>// next / branch / feeds / depends / alternative / invalidates</i>
+    <b>pub</b> label: String,                        <i>// 条件：「若 XRD 无钙钛矿峰」</i>
+    <b>pub</b> attrs: BTreeMap&lt;String, String&gt;,
+    <b>pub</b> prov:  Prov,
+}
+
+<b>pub struct</b> Graph {
+    <b>pub</b> nodes:  BTreeMap&lt;NodeId, Node&gt;,       <i>// BTree 而非 Hash：渲染必须逐字节确定</i>
+    <b>pub</b> edges:  BTreeMap&lt;EdgeId, Edge&gt;,
+    <b>pub</b> render: BTreeMap&lt;String, String&gt;,    <i>// 图级渲染意向，渲染器忽略不认识的键</i>
+    <b>pub</b> asides: Vec&lt;Aside&gt;,                   <i>// 逃生舱：模型自由绘制，只读，不参与仲裁</i>
+}
+
+<b>pub struct</b> Workspace {
+    <b>pub</b> phase:  Phase,
+    <em><b>pub</b> flow:   Graph,</em>                          <i><em>// 新增。图内：有拓扑的东西</em></i>
+    <b>pub</b> fields: BTreeMap&lt;Path, Field&gt;,       <i>// 图外：没有拓扑的判断（第 9 节）</i>
+    <b>pub</b> open:   Vec&lt;String&gt;,
+    <b>pub</b> parked: Vec&lt;String&gt;,
+}</pre>
+
+  <div class="note ok">
+    <h4>这个设计的最强论据：新增 0 个事件类型、0 张表</h4>
+    <p>图的改动骑在已有的 <code>Body::Edited{ops}</code> / <code>Body::Inferred{ops,dropped}</code> 上，<code>Graph</code> 是 <code>Workspace</code> 的一部分因而自动进 checkpoint。<b>折叠、恢复、分叉、去重、降级、仲裁一行都不用动。</b>你上一轮担心的「图改得频繁、只存 diff 会重组很慢」也已经被现有机制答掉了：事件是 diff，checkpoint 是全量，从最近 checkpoint 重放只花 <code>checkpoint_every</code> 条事件。</p>
+  </div>
+</section>
+
+<section id="s4">
+  <div class="h-row"><span class="h-num">04</span><h2>id：Core 铸，形状自带溯源，永不复用</h2></div>
+
+  <p>模型不许自己起 id —— 它会撞号，也会复活删掉的东西。分配 id 和分配 <code>Seq</code> 是同一类事：<b>只有 Core 这个单线程信箱能做。</b></p>
+
+  <div class="duo">
+    <div class="panel">
+      <div class="cap">形状</div>
+      <div class="pad">
+        <p><code>NodeId("n41_0")</code> = <b>创建它的那条事件的 seq</b> + 批内序号。<code>EdgeId("e41_1")</code> 同理。</p>
+        <p>白拿两个性质：id 本身就说明「它是第 41 号事件写下的」，点它就能跳到那条事件；而 seq 单调 ⇒ <b>删掉的 id 永远不会被重新铸出来</b>，「模型换个 id 把用户删掉的步骤原样加回来」这条路从形状上就断了。</p>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="cap">别名：模型怎么引用还不存在的节点</div>
+      <div class="pad">
+        <p>模型发 <code>$anneal</code> 这样的别名，<b>只在同一批 op 内有效</b>，同批的边可以拿它当端点。<code>commit</code> 分配到 seq 的同时把批内所有 <code>$</code> 引用替换成真 id，<b>落进事件的只有真 id</b>（不变量 I11）。</p>
+        <p>引用了一个不存在的真 id，或用了一个批内没定义过的别名 ⇒ <b>整条 op 丢弃并计入 <code>dropped</code></b>，不凭空创建。模型记错 id 是常事，凭空创建会造出一地没人要的孤儿节点。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="note info">
+    <p><b>分叉的角落：</b>两条分支可能各自铸出 <code>n41_0</code>。它们在不同 session、永不共享一个 <code>Workspace</code>，所以运行时无害；但将来若要做「跨分支对比」，<code>(session, id)</code> 才是全局身份。先记着。</p>
+  </div>
+</section>
+
+<section id="s5">
+  <div class="h-row"><span class="h-num">05</span><h2>仲裁：键怎么算，三个漏洞怎么堵</h2></div>
+
+  <p class="lede">现有机制不变：<code>turn_edits</code> 每轮清空，用户的 op <b>占键</b>，模型的 op <b>查键</b>，撞上就丢并计入 <code>Inferred.dropped</code>。要改的只有一件事 —— <code>Op::path()</code> 变成 <code>Op::keys()</code>，因为一条 op 可能占多个键。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:28%">op</th><th style="width:36%">占用 / 查询的键</th><th>为什么是这些</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><code>Set{path}</code> · <code>Remove{path}</code></td><td><code>path</code></td><td>图外推断，原样。</td></tr>
+      <tr><td class="k"><code>Node{id}</code></td><td><code>flow/&lt;id&gt;</code></td><td>元素级，见下方粒度决定。</td></tr>
+      <tr><td class="k"><code>Edge{id, from, to}</code></td><td><code>flow/&lt;id&gt;</code><br><code>flow/&lt;from&gt;-&gt;&lt;to&gt;</code></td><td><b>第二个键堵漏洞 1。</b>端点从 op 取，op 没带就从当前图里查。</td></tr>
+      <tr><td class="k"><code>Drop{Node(id)}</code></td><td><code>flow/&lt;id&gt;</code><br><code>flow/label:&lt;归一化 label&gt;</code></td><td><b>第二个键堵漏洞 2。</b>归一化 = trim + 去内部空白 + 小写。</td></tr>
+      <tr><td class="k"><code>Drop{Edge(id)}</code></td><td><code>flow/&lt;id&gt;</code><br><code>flow/&lt;from&gt;-&gt;&lt;to&gt;</code></td><td>同上，端点从图里查。</td></tr>
+      <tr><td class="k"><code>Render{key}</code> · <code>Aside{id}</code></td><td><code>flow/render/&lt;key&gt;</code> · <code>flow/aside/&lt;id&gt;</code></td><td>渲染意向也可能被用户调，同样走仲裁。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>三个漏洞</h3>
+  <div class="decide">
+    <div>
+      <h4><span class="tag bad">漏洞 1</span> 用户删了一条边，模型用新 id 把同样的连接加回来</h4>
+      <p>只按 id 比对完全挡不住 —— 新边的 id 从来没被占过。<b>堵法：</b>边的仲裁键里加一条有序端点对 <code>flow/n12_2-&gt;n14_0</code>。用户断开这条线时占的是这个键，模型换几个 id 都撞得上。</p>
+    </div>
+    <div>
+      <h4><span class="tag bad">漏洞 2</span> 用户删了一个步骤，模型新建一个同名节点把它复活</h4>
+      <p>id 不复用挡住了「原样加回来」，挡不住「换个 id 重写一遍」。<b>堵法：</b>删节点时额外占一个归一化 label 键。这是<b>启发式</b>，模型换个措辞就绕过去了 —— 但代价方向是安全的：宁可多丢一条 op（模型下一轮从 <code>dropped</code> 里看得到、可以重提），也不要静默盖掉用户的删除。<span class="tag warn">待你拍</span></p>
+    </div>
+    <div>
+      <h4><span class="tag ok">漏洞 3</span> 模型加一条边指向用户刚删掉的节点</h4>
+      <p>不需要新机制：端点不存在的边在 <code>Workspace::apply</code> 里直接落不下去（不变量 I9）。已经堵住了。</p>
+    </div>
+  </div>
+
+  <h3>粒度：到元素，不到属性</h3>
+  <p>用户只改了 <code>n14_0</code> 的名字，模型同轮想给它加一条 <code>temp=400℃</code> —— <b>一起丢。</b>理由：用户改一个步骤的名字，往往意味着他对这一步的判断变了；让模型接着改它的参数会拼出一个前后不一致的节点。而且仲裁的误伤方向是安全的（模型能从 <code>dropped</code> 里看到、下一轮重提），漏判的方向不是。</p>
+
+  <div class="note">
+    <p><b>不加 pin（永久锁）。</b><code>locked: HashSet&lt;Path&gt;</code> 已经被删过一次，理由现在仍然成立：用户填错一次就永久挡住模型。跨轮的保护本来就有 —— <code>Prov.origin = User</code> 会让 prompt 里出现 <code>[用户设定]</code> 标记，加上 system 段那句「改用户设定的东西之前先问」。那是约束，不是拒绝，改错了模型还能商量回来。</p>
+  </div>
+</section>
+
+<section id="s6">
+  <div class="h-row"><span class="h-num">06</span><h2>op 集合</h2></div>
+  <p class="lede">图内的 op <b>全部是 patch</b>：<code>None</code> = 这一项不改。这是「只改 label 不动 body」能成立的前提，也是把重写压到最小的地方。</p>
+
+<pre><b>pub enum</b> Op {
+    <i>// ----- 图外（已有，只多一个 anchor）-----</i>
+    Set { path: Path, value: Value, <em>anchor: Option&lt;NodeId&gt;</em>,
+          source: Option&lt;Source&gt;, confidence: Option&lt;f32&gt;,
+          open: Option&lt;Vec&lt;String&gt;&gt;, parked: Option&lt;Vec&lt;String&gt;&gt; },
+    Remove { path: Path },
+
+    <i>// ----- 图内（新增）-----</i>
+    Node  { id: NodeId, kind: Option&lt;String&gt;, label: Option&lt;String&gt;, body: Option&lt;String&gt;,
+            parent: Option&lt;Option&lt;NodeId&gt;&gt;,          <i>// Some(None) = 从分组里挪出来</i>
+            attrs: Vec&lt;(String, Option&lt;String&gt;)&gt;,     <i>// 值为 None = 删这个 attr</i>
+            source: Option&lt;Source&gt;, confidence: Option&lt;f32&gt; },
+    Edge  { id: EdgeId, from: Option&lt;NodeId&gt;, to: Option&lt;NodeId&gt;,
+            kind: Option&lt;String&gt;, label: Option&lt;String&gt;,
+            attrs: Vec&lt;(String, Option&lt;String&gt;)&gt;,
+            source: Option&lt;Source&gt;, confidence: Option&lt;f32&gt; },
+    Drop  { id: ElemId, <em>why: Option&lt;String&gt;</em> },        <i>// why 见第 9 节</i>
+    Render{ key: String, value: Option&lt;String&gt; },
+    Aside { id: String, title: String, lang: String, src: String },
+}
+
+<b>pub enum</b> ElemId { Node(NodeId), Edge(EdgeId) }</pre>
+
+  <h4>删除的连带效果（写在 <code>apply</code> 里，因而重放确定）</h4>
+  <ul>
+    <li>删节点 ⇒ <b>连带删掉以它为端点的所有边</b>。</li>
+    <li>删节点 ⇒ <b>它的子节点提升到它的 parent，不级联删除。</b>删一个「对照组」不该把组里三个步骤一起带走 —— 那是用户最不想要的意外。</li>
+    <li><code>parent</code> 赋值若会成环，<b>拒绝这一项</b>（同批其余项照常生效）。嵌套深度上限 8。</li>
+  </ul>
+</section>
+
+<section id="s7">
+  <div class="h-row"><span class="h-num">07</span><h2>用户在图上的一笔，变成什么</h2></div>
+  <p class="lede">手势只在 <b>apply</b> 之后才产生真实改动 —— apply 之前是纯 UI 本地态，这条不变。apply 时走已有的 <code>CoreMsg::Edit{ops}</code>，落成一条 <code>Body::Edited</code>。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th style="width:24%">用户做的事</th><th style="width:46%">op</th><th>占的键</th></tr></thead>
+    <tbody>
+      <tr><td>改节点标题</td><td class="k"><code>Node{ id, label: Some(..) }</code></td><td class="k"><code>flow/n14_0</code></td></tr>
+      <tr><td>编辑细节 / 参数</td><td class="k"><code>Node{ id, body }</code> · <code>Node{ id, attrs }</code></td><td class="k"><code>flow/n14_0</code></td></tr>
+      <tr><td>拖出一个新步骤</td><td class="k"><code>Node{ id: $new1, label, kind: "step" }</code></td><td class="k">—（新的，无从冲突）</td></tr>
+      <tr><td>连一条线</td><td class="k"><code>Edge{ id: $e1, from, to }</code></td><td class="k"><code>flow/n12_2-&gt;n14_0</code></td></tr>
+      <tr><td>改接到别处</td><td class="k"><code>Edge{ id, to: Some(..) }</code></td><td class="k">旧端点对 + 新端点对</td></tr>
+      <tr><td>断开</td><td class="k"><code>Drop{ Edge(id) }</code></td><td class="k"><code>flow/e13_0</code> + 端点对</td></tr>
+      <tr><td>删掉一个步骤</td><td class="k"><code>Drop{ Node(id), why }</code></td><td class="k"><code>flow/n17_0</code> + label 键</td></tr>
+      <tr><td>拖进 / 拖出分组</td><td class="k"><code>Node{ id, parent: Some(Some(g)) }</code> · <code>Some(None)</code></td><td class="k"><code>flow/n16_1</code></td></tr>
+      <tr><td>标注来源、调置信度</td><td class="k"><code>Node{ id, source, confidence }</code></td><td class="k"><code>flow/n14_0</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note info">
+    <p><b>一次 apply = 一条 <code>Edited</code> 事件 = 一次原子写入。</b>用户在图上连拖带改十下再按 apply，落盘的是一条事件、一个 seq、一个回滚点。这也是除 turn 之外，用户唯一能自己划的回滚边界。</p>
+  </div>
+</section>
+
+<section id="s8">
+  <div class="h-row"><span class="h-num">08</span><h2>模型看到的那份 = 用户看到的那张</h2></div>
+
+  <p class="lede">同一个 <code>render::mermaid</code>。让模型读另一种表示会造出「模型以为的图」和「用户看到的图」两份认知，那是这个项目最不该有的东西。</p>
+
+  <div class="mer">
+<pre class="mermaid">
+flowchart TD
+  n12_0["前驱体溶液配制"] --> n12_1["旋涂 4000rpm/30s"]
+  n12_1 --> n12_2["反溶剂滴加"]
+  n12_2 --> n14_0["退火 100℃ 10min"]
+  n14_0 -.-> n14_1{"XRD 出现钙钛矿峰?"}
+  n14_1 -->|是| n15_0["J-V 曲线测试"]
+  n14_1 -.->|否| n17_0["改用两步法"]
+  subgraph g16_0["对照组 · 只换退火温度"]
+    n16_1["退火 85℃"]
+    n16_2["退火 130℃"]
+  end
+  n12_2 --> g16_0
+  classDef guess stroke-dasharray: 5 3
+  class n14_0,n14_1,n17_0,n16_1,n16_2 guess
+</pre>
+  </div>
+
+  <p class="mini">实线 = 有实证来源（用户口述 / 论文章节 / 仓库位置）。虚线 = <code>Source::Guess</code> 或没标来源 —— 上图里模型自己猜的退火条件、判据、整个对照组都是虚的，这一眼就是要给用户看的盲区。</p>
+
+  <h3>prompt 里怎么拼</h3>
+  <p>mermaid 之后跟一段<b>明细</b>，只写 mermaid 装不下的东西，且<b>只写有内容的节点</b> —— 标题不重复第二遍，省 token：</p>
+
+<pre><i>== 实验流程 ==</i>
+&lt;上面那段 mermaid，逐字节相同&gt;
+
+<i>== 节点明细（只列有细节的）==</i>
+<b>n14_0</b>  [模型推断 · 模型推测 · conf 0.4] <em>(本轮)</em>
+  temp = 100℃    time = 10min
+  body: 手套箱内热台，退火时盖培养皿
+  <i>挂在这里的图外推断：这一步的温度依据不足，用户没说过热台型号</i>
+<b>n17_0</b>  [模型推断 · 模型推测 · conf 0.2]
+  body: 若一步法始终不结晶，换 PbI2 先旋涂再浸 MAI
+
+<i>== 本轮用户改过、你的改动被丢弃的位置 ==</i>
+<s>flow/n14_0</s>  <i>（用户本轮刚改过它的标题）</i></pre>
+
+  <div class="note">
+    <p><b>图会涨，而折对话救不了图。</b>渲染后的图算进 <code>plan_compaction</code> 的 <code>fixed</code>，图长到几十个节点会让折叠触发得越来越早，最后折无可折。答案不是折数据，是<b>给模型的那份图按 detail 级别裁剪</b>：已完成的分组只出标题、不出内部节点。数据一个字不动，只有渲染层多一个参数。列进欠账。</p>
+  </div>
+</section>
+
+<section id="s9">
+  <div class="h-row"><span class="h-num">09</span><h2>图外推断、锚点，以及放弃的路线</h2></div>
+
+  <h3>什么进图，什么不进</h3>
+  <div class="duo">
+    <div class="panel">
+      <div class="cap">图内 · flow</div>
+      <div class="pad"><p><b>有拓扑的。</b>步骤、顺序、分支条件、并行臂、对照组、测量点、依赖。判据是一句话：<em>它和别的东西之间有没有一条边</em>。</p></div>
+    </div>
+    <div class="panel">
+      <div class="cap">图外 · fields</div>
+      <div class="pad"><p><b>没有拓扑的判断。</b>领域、目标、资源约束、样本量口径、用户偏好、风险。原来的 <code>path → Field</code> 原样保留，它没有被图取代。</p></div>
+    </div>
+  </div>
+
+  <p><code>Field</code> 多一个 <code>anchor: Option&lt;NodeId&gt;</code>：一条图外推断可以挂到某个节点上（「这一步的温度依据不足」）。UI 在该节点旁显示一个角标，prompt 里跟在该节点的明细后面（见第 8 节）。<b>不必二选一</b> —— 强行把所有判断塞进图，图会变成一张便签墙。</p>
+
+  <hr class="soft">
+
+  <h3>放弃的路线</h3>
+  <div class="note bad">
+    <p><code>memory/project.md</code> 里写着：<b>「试过没成立的方法」是这个项目最值钱的数据。</b>而图上「删掉一个步骤」恰恰就是在产生这种数据。所以删除不能只是消失。</p>
+  </div>
+
+  <p>两条路，我倾向第一条：</p>
+  <div class="decide">
+    <div>
+      <h4><span class="tag ok">推荐</span> 留在图上</h4>
+      <p>不删，改成 <code>kind: "abandoned"</code>，用一条 <code>kind: "invalidates"</code> 的边连到否掉它的那个观察，渲染成灰色。蒸馏直接读图就有；模型每轮也看得见「这条路走过了，别再提」。代价是图更大 —— 但这正是第 8 节那个 detail 裁剪要解决的事。</p>
+    </div>
+    <div>
+      <h4>兜底 · 无论如何都做</h4>
+      <p><code>Drop{ why: Option&lt;String&gt; }</code>：用户删掉一个步骤后，UI 在原地留一个<b>可跳过的单行输入</b>「为什么去掉？」—— 不弹窗、不阻断。那一句话是最值钱的一行。蒸馏另外扫时间线上的 <code>Drop</code> 事件，<b>图上删掉不等于历史里删掉</b>。</p>
+    </div>
+  </div>
+</section>
+
+<section id="s10">
+  <div class="h-row"><span class="h-num">10</span><h2>不变量 · 欠账 · 要你拍的三件事</h2></div>
+
+  <h3>三条新不变量（每个场景收尾时验，与 I1–I8 同处）</h3>
+  <div class="tw"><table>
+    <thead><tr><th style="width:14%">编号</th><th style="width:34%">内容</th><th>它能抓住什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k"><b>I9</b> 图完整</td><td>每条边的两端都在 <code>nodes</code> 里；<code>parent</code> 链无环、深度 ≤ 8。</td><td>悬边、删节点后的残留、模型造出的环形分组。</td></tr>
+      <tr><td class="k"><b>I10</b> 渲染是纯函数</td><td>同一个 <code>Graph</code> 渲染两次逐字节相同；且 mermaid 里出现的 id 集合 <b>等于</b> <code>nodes</code> 的 id 集合。</td><td><b>「图上悄悄少了一个节点」</b> —— 没有这条，渲染吞掉一个节点是完全不可见的。</td></tr>
+      <tr><td class="k"><b>I11</b> 无未解析别名</td><td>时间线上任何一条 op 里都不存在 <code>$</code> 前缀的 id。</td><td>别名解析漏了一处，会在重放时变成一个永远指不到的引用。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>这个设计新欠的账</h3>
+  <ul>
+    <li><b>给模型的图要按 detail 裁剪。</b>图涨到几十节点之前不痛，但迟早痛。</li>
+    <li><b>HTML 渲染器。</b>先只做 mermaid；<code>Aside.lang</code> 已经留好位置。</li>
+    <li><b>UI 侧的图编辑器</b>本身属于 R2，这份只定到「一笔手势等于哪条 op」为止。</li>
+    <li><b>归一化 label 键的误伤率</b>没有数据支撑，得跑起来看 <code>dropped</code> 里有多少是冤的。</li>
+  </ul>
+
+  <h3>要你拍的三件事</h3>
+  <div class="decide q">
+    <div>
+      <h4><span class="tag warn">拍 1</span> 主图结构化 + 旁挂自由图，还是整张图都让模型自由画？</h4>
+      <p>我选了前者（第 2 节）。<b>如果你要的是后者</b> —— 模型直接写 mermaid、用户在那份 mermaid 上改 —— 那么「点选节点改一个字段、拖一条线」要降级成整段文本编辑，turn 级仲裁要退化成文本 diff。这两条是<b>连带的</b>，不能只要自由不要代价。这是这份设计里最该你定的一条。</p>
+    </div>
+    <div>
+      <h4><span class="tag warn">拍 2</span> 归一化 label 键要不要开？</h4>
+      <p>开了能挡住「模型换个 id 把用户删掉的步骤复活」，代价是模型本轮想新建一个同名节点会被误伤。我倾向<b>开</b>：误伤会通过 <code>dropped</code> 反馈给模型、下一轮能重提；漏判则是静默盖掉用户的删除。</p>
+    </div>
+    <div>
+      <h4><span class="tag warn">拍 3</span> 放弃的路线留在图上，还是只留在时间线里？</h4>
+      <p>我倾向<b>留在图上</b>（<code>kind: "abandoned"</code> 加 <code>invalidates</code> 边）。埋在时间线里等蒸馏去捞太脆 —— 而且模型看不见，会一遍遍重提同一条走不通的路。</p>
+    </div>
+  </div>
+</section>
+
+</div>
