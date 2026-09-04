@@ -239,11 +239,10 @@ pub fn plan_compaction(events: &[Event], fixed: u32, limit: &ContextLimit) -> Co
 pub fn split_at_recent(events: &[Event], k_turns: usize) -> usize {
     let mut turns: Vec<crate::ids::TurnId> = Vec::new();
     for e in events {
-        if let Some(t) = e.turn {
-            if turns.last() != Some(&t) {
+        if let Some(t) = e.turn
+            && turns.last() != Some(&t) {
                 turns.push(t);
             }
-        }
     }
     if turns.len() <= k_turns {
         return 0;

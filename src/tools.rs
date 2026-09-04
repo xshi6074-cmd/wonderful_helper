@@ -322,11 +322,10 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
         }
     }
     // 串行队列同一时刻只放一个在跑。
-    if let Some(i) = serial_queue.pop_front() {
-        if let Some(tool) = ctx.registry.get(&calls[i].name) {
+    if let Some(i) = serial_queue.pop_front()
+        && let Some(tool) = ctx.registry.get(&calls[i].name) {
             running.push(run_one(i, tool, calls[i].clone(), ctx.token.child_token()));
         }
-    }
 
     let start = Instant::now();
     let mut tick = tokio::time::interval(ctx.config.heartbeat);
@@ -343,13 +342,11 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
 
             Some((idx, res)) = running.next() => {
                 // 完成的是串行任务 ⇒ 放下一个进去
-                if serial_idx.contains(&idx) {
-                    if let Some(j) = serial_queue.pop_front() {
-                        if let Some(tool) = ctx.registry.get(&calls[j].name) {
+                if serial_idx.contains(&idx)
+                    && let Some(j) = serial_queue.pop_front()
+                        && let Some(tool) = ctx.registry.get(&calls[j].name) {
                             running.push(run_one(j, tool, calls[j].clone(), ctx.token.child_token()));
                         }
-                    }
-                }
                 if res.kind == ToolResultKind::Failed {
                     stats.failed += 1;
                 }

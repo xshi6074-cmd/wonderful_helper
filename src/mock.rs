@@ -262,6 +262,11 @@ pub fn call(id: &str, name: &str) -> Call {
     Call { id: id.into(), name: name.into(), args: serde_json::json!({}) }
 }
 
+/// 带参数的调用。图/工具链的场景要给工具真的传东西。
+pub fn call_with(id: &str, name: &str, args: serde_json::Value) -> Call {
+    Call { id: id.into(), name: name.into(), args }
+}
+
 pub fn ask_call(id: &str, question: &str, options: &[&str]) -> Call {
     Call {
         id: id.into(),

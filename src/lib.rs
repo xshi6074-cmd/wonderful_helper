@@ -32,6 +32,7 @@
 //!   abort 会在任意 await 点撕掉 task，[`turn::close_open_calls`] 的收尾根本跑不到。
 //! - 每个长 await 都要过 [`turn::guarded`]，否则 cancel 之后任务还在跑，钱照烧。
 
+pub mod config;
 pub mod context;
 pub mod core;
 pub mod cost;
@@ -43,12 +44,17 @@ pub mod mock;
 pub mod model;
 pub mod msg;
 pub mod persist;
+pub mod policy;
 pub mod render;
+pub mod scratch;
+pub mod shell;
 pub mod scene;
 pub mod state;
 pub mod store;
+pub mod toolkit;
 pub mod tools;
 pub mod turn;
+pub mod web;
 
 pub use handle::CoreHandle;
 pub use ids::{QuestionId, Seq, TaskId, TurnId};

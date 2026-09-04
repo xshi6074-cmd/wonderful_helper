@@ -14,23 +14,29 @@
 //!
 //! 跑法：`cargo run`。全部在内存 SQLite 上跑，不碰真磁盘（除了显式指定目录的几个）。
 
+use premortem::config::{Secrets, Settings, Src};
 use premortem::context::ContextLimit;
 use premortem::core::{CoreDeps, CoreSummary, start};
 use premortem::event::{Body, Event, assemble, crashed_turns, open_questions, unclosed_calls};
 use premortem::handle::CoreHandle;
 use premortem::ids::{NodeId, Seq, SessionId, TurnId};
 use premortem::memory::Memory;
-use premortem::mock::{EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, default_judge};
+use premortem::mock::{
+    EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, call_with, default_judge,
+};
+use premortem::policy::{Policy, PolicyCfg};
 use premortem::model::{JudgeOut, Message, Mode, Models, MsgRole, Role, StreamEvent, Usage};
 use premortem::msg::{SendMode, UiEvent};
 use premortem::persist::{restore, spawn_writer};
 use premortem::scene::Playbook;
 use premortem::state::{FlowView, Lang, Op, Origin, Phase, Source, Workspace};
 use premortem::store::{FaultStore, MemStore, SqliteStore, Store};
+use premortem::toolkit;
 use premortem::tools::{Registry, ToolConfig};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 static PASS: AtomicUsize = AtomicUsize::new(0);
 static FAIL: AtomicUsize = AtomicUsize::new(0);
@@ -369,6 +375,10 @@ fn chunks(parts: &[&str]) -> Vec<StreamEvent> {
         parts.iter().map(|p| StreamEvent::Chunk((*p).to_string())).collect();
     v.push(StreamEvent::Done(Usage { prompt: 400, completion: 60, estimated: false }));
     v
+}
+
+fn ok_kind(r: &premortem::tools::ToolResult) -> bool {
+    r.kind == premortem::tools::ToolResultKind::Ok
 }
 
 fn judge_with(scene: &str, ops: Vec<Op>) -> JudgeOut {
@@ -1433,6 +1443,328 @@ async fn s31_two_ways_to_draw() {
     inv::all(&s.events, &s.ws, &s.cost);
 }
 
+
+// ══════════════════════════ 配置与工具链 ══════════════════════════
+
+fn tmpdir(tag: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir()
+        .join(format!("premortem-{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn envmap(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+const NO_ENV: &dyn Fn(&str) -> Option<String> = &|_: &str| None;
+
+/// 一套跑得起来的工具链：mock 联网后端 + 只读授权到 `dir`。
+fn toolchain(dir: &std::path::Path, web: Option<Arc<dyn premortem::web::WebBackend>>)
+    -> (toolkit::Deps, Registry)
+{
+    let cfg = PolicyCfg {
+        roots: vec![dir.to_string_lossy().into_owned()],
+        ..Default::default()
+    };
+    let d = toolkit::deps(cfg, dir, &dir.join("workspace"), web).unwrap();
+    let reg = toolkit::register(Registry::new(), &d);
+    (d, reg)
+}
+
+async fn fire(reg: &Registry, name: &str, args: serde_json::Value) -> premortem::tools::ToolResult {
+    let t = reg.get(name).unwrap_or_else(|| panic!("没注册 {name}"));
+    t.run(call_with("t1", name, args), CancellationToken::new()).await
+}
+
+async fn s32_config_layers() {
+    head("S32", "★ 模型配置：默认 → config.json → 环境变量，且来源查得到");
+    let dir = tmpdir("cfg");
+
+    let s = Settings::load(&dir, NO_ENV);
+    ok(s.roles.answer.provider == "anthropic", "什么都没有时用内置默认");
+    ok(s.warnings.is_empty(), "干净启动没有告警");
+
+    let mut w = Settings::default();
+    w.roles.answer.model = "文件里写的".into();
+    w.save(&dir).unwrap();
+    let s = Settings::load(&dir, NO_ENV);
+    ok(s.roles.answer.model == "文件里写的", "config.json 覆盖默认");
+    ok(
+        s.describe(&Secrets::default(), NO_ENV).contains("config.json"),
+        "describe 标出来源是 config.json",
+    );
+
+    let e = envmap(&[("PREMORTEM_ANSWER_MODEL", "环境变量赢"), ("PREMORTEM_JUDGE_MAX_TOKENS", "77")]);
+    let env = |k: &str| e.get(k).cloned();
+    let s = Settings::load(&dir, &env);
+    ok(s.roles.answer.model == "环境变量赢", "★ 环境变量优先级最高");
+    ok(s.roles.judge.max_tokens == 77, "数值型的也能覆盖");
+    ok(s.roles.subagent.model == Settings::default().roles.subagent.model, "没被碰的角色不受影响");
+    ok(s.describe(&Secrets::default(), &env).contains("环境变量"), "★ describe 说得清哪个值被 env 盖了");
+
+    let bad = envmap(&[("PREMORTEM_JUDGE_MAX_TOKENS", "不是数字")]);
+    let s = Settings::load(&dir, &|k: &str| bad.get(k).cloned());
+    ok(s.warnings.iter().any(|w| w.contains("不是数字")), "环境变量写错了会报警，不是静默用默认");
+
+    let e2 = envmap(&[("PREMORTEM_JUDGE_PROVIDER", "根本没这个")]);
+    let s = Settings::load(&dir, &|k: &str| e2.get(k).cloned());
+    ok(
+        s.warnings.iter().any(|w| w.contains("根本没这个")),
+        "★ provider 引用不存在会报警 —— 否则症状是「模型没反应」，查不到这里",
+    );
+
+    std::fs::write(dir.join("config.json"), "{ 这不是 json").unwrap();
+    let s = Settings::load(&dir, NO_ENV);
+    ok(s.roles.answer.provider == "anthropic", "★ 配置文件坏了回退默认，不是起不来");
+    ok(s.warnings.iter().any(|w| w.contains("解析失败")), "而且报出来了");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s33_secrets_separate() {
+    head("S33", "★ 密钥单独存：不进 config.json、不进日志、环境变量优先");
+    let dir = tmpdir("sec");
+    let cfg = Settings::default();
+    cfg.save(&dir).unwrap();
+    let mut sec = Secrets::default();
+    sec.put("anthropic", "sk-FILEKEY-0001");
+    sec.save(&dir).unwrap();
+
+    let raw = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    ok(!raw.contains("FILEKEY"), "★ config.json 里没有密钥（靠没这个字段，不靠脱敏）");
+    let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap_or_default();
+    ok(gi.contains("secrets.json"), "★ secrets.json 被自动写进 .gitignore");
+
+    let (loaded, warn) = Secrets::load(&dir);
+    ok(warn.is_empty() && loaded.has("anthropic"), "密钥读得回来");
+    let p = cfg.providers.get("anthropic").unwrap();
+    let (k, from) = loaded.resolve("anthropic", p, NO_ENV).unwrap();
+    ok(k == "sk-FILEKEY-0001" && from == Src::File, "没有环境变量时用文件里的");
+
+    let e = envmap(&[("ANTHROPIC_API_KEY", "sk-ENVKEY-0002")]);
+    let (k, from) = loaded.resolve("anthropic", p, &|x: &str| e.get(x).cloned()).unwrap();
+    ok(k == "sk-ENVKEY-0002" && from == Src::Env, "★ 环境变量盖过文件（CI 不用改文件）");
+
+    let text = cfg.describe(&loaded, NO_ENV);
+    ok(!text.contains("FILEKEY") && !text.contains("sk-"), "★ describe 一个密钥字符都不印");
+    ok(text.contains("密钥有"), "但说得清「有没有」和从哪来");
+    ok(
+        cfg.missing_keys(&Secrets::default(), NO_ENV).contains(&"anthropic".to_string()),
+        "缺密钥点得出来是哪个 provider",
+    );
+
+    let mut sec2 = loaded.clone();
+    sec2.put("anthropic", "");
+    ok(!sec2.has("anthropic"), "填空字符串等于删掉");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s34_path_gate() {
+    head("S34", "★ 路径闸门：越界 / 软链接 / 受保护的名字，一律拒");
+    let base = tmpdir("fsgate");
+    let inside = base.join("proj");
+    std::fs::create_dir_all(inside.join("sub")).unwrap();
+    std::fs::write(inside.join("sub/a.txt"), "hello").unwrap();
+    std::fs::create_dir_all(inside.join(".git")).unwrap();
+    std::fs::write(inside.join(".git/config"), "机密").unwrap();
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("boom.txt"), "不该被读到").unwrap();
+
+    let cfg = PolicyCfg { roots: vec![inside.to_string_lossy().into_owned()], ..Default::default() };
+    let pol = Policy::new(cfg, &base);
+
+    ok(pol.check_path(std::path::Path::new("sub/a.txt")).is_ok(), "授权目录内正常放行");
+    ok(pol.check_path(std::path::Path::new("../outside/boom.txt")).is_err(), "★ .. 逃逸被拒");
+    ok(pol.check_path(&outside.join("boom.txt")).is_err(), "★ 目录外的绝对路径被拒");
+    ok(pol.check_path(std::path::Path::new(".git/config")).is_err(), "★ 受保护的名字被拒");
+
+    #[cfg(unix)]
+    {
+        // 这一条是纯字符串前缀比对**挡不住**的：链接名在授权目录里，
+        // 指向的地方在外面。canonicalize 之后才看得见。
+        let link = inside.join("escape");
+        let _ = std::os::unix::fs::symlink(&outside, &link);
+        ok(
+            pol.check_path(std::path::Path::new("escape/boom.txt")).is_err(),
+            "★ 指向目录外的软链接被拒（这条只有 canonicalize 挡得住）",
+        );
+    }
+
+    ok(pol.denied_count() >= 4, "★ 拒绝有计数 —— 一直涨说明模型在反复撞白名单");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+async fn s35_url_gate() {
+    head("S35", "★ 网址闸门：协议 / 内网 / 白名单，别被相似域名骗了");
+    let dir = tmpdir("urlgate");
+    let pol = Policy::new(PolicyCfg::default(), &dir);
+
+    ok(pol.check_url("https://arxiv.org/abs/2103.00020").is_ok(), "白名单域名放行");
+    ok(pol.check_url("https://www.arxiv.org/abs/1").is_ok(), "子域名放行");
+    ok(pol.check_url("https://evilarxiv.org/x").is_err(), "★ 后缀匹配卡在点上，evilarxiv.org 骗不过去");
+    ok(pol.check_url("https://example.com/x").is_err(), "不在白名单里的被拒");
+    ok(pol.check_url("http://127.0.0.1:8080/x").is_err(), "★ 回环地址被拒（SSRF）");
+    ok(pol.check_url("http://192.168.1.1/admin").is_err(), "★ 内网段被拒");
+    ok(pol.check_url("http://169.254.169.254/latest/meta-data/").is_err(), "★ 云元数据地址被拒");
+    ok(pol.check_url("http://localhost/x").is_err(), "★ localhost 被拒");
+    ok(pol.check_url("http://internal-svc/x").is_err(), "★ 不带点的内网主机名被拒");
+    ok(pol.check_url("file:///etc/passwd").is_err(), "★ 非 http 协议被拒");
+    ok(pol.check_url("https://user@arxiv.org/x").is_err(), "★ user@host 这种绕过写法被拒");
+
+    let off = Policy::new(PolicyCfg { net: false, ..Default::default() }, &dir);
+    ok(off.check_url("https://arxiv.org/x").is_err(), "总开关关掉后一律不放行");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s36_context_safety() {
+    head("S36", "★ 上下文安全：大文件 / 长行 / 海量匹配都不会撑爆一轮");
+    let dir = tmpdir("ctx");
+    let big: String = (1..=2000).map(|i| format!("第 {i} 行 needle\n")).collect();
+    std::fs::write(dir.join("big.txt"), &big).unwrap();
+    std::fs::write(dir.join("wide.txt"), "x".repeat(5000)).unwrap();
+    let (d, reg) = toolchain(&dir, None);
+
+    let r = fire(&reg, "fs_read", serde_json::json!({"path": "big.txt"})).await;
+    ok(r.content.contains("共 2000 行"), "先说清总共多少行");
+    ok(r.content.contains("已截断") || r.content.contains("还有"), "★ 超上限会截断");
+    ok(r.content.contains("offset="), "★ 截断时给了续读的 offset —— 只说「已截断」模型会卡住");
+    ok(r.content.len() < 40_000, "★ 返回值有上限，不会把 2000 行灌进 prompt");
+
+    let r2 = fire(&reg, "fs_read", serde_json::json!({"path": "big.txt", "offset": 1990})).await;
+    ok(r2.content.contains("第 2000 行"), "★ 按 offset 续读能拿到后面的内容");
+
+    let r3 = fire(&reg, "fs_read", serde_json::json!({"path": "wide.txt"})).await;
+    ok(r3.content.contains("本行过长已截断"), "★ 单行过长也截断（压缩过的代码一行能几百 KB）");
+
+    let r4 = fire(&reg, "fs_grep", serde_json::json!({"pattern": "needle"})).await;
+    ok(r4.content.contains("只列了前"), "★ 海量匹配只给前 N 条并说明");
+    ok(r4.content.len() < 40_000, "检索结果同样有上限");
+
+    let r5 = fire(&reg, "fs_read", serde_json::json!({"path": "big.txt", "offset": 99999})).await;
+    ok(!ok_kind(&r5), "越界的 offset 报错");
+    ok(r5.content.contains("2000"), "而且告诉模型一共多少行");
+
+    ok(d.metrics.get("clipped") >= 3, "★ 截断有计数（截断率高说明上限设小了或模型在乱用）");
+    ok(d.metrics.get("calls") == 5, "调用有计数");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s37_fetch_lands_in_workspace() {
+    head("S37", "★ 抓取先落盘再返回摘要 —— 页面大小不决定上下文用量");
+    let dir = tmpdir("fetch");
+    let long: String =
+        (1..=300).map(|i| format!("正文第 {i} 行")).collect::<Vec<_>>().join("\n");
+    let web = premortem::web::MockWeb::new()
+        .page("https://arxiv.org/abs/2103.00020", "CLIP 论文", &long);
+    let (d, reg) = toolchain(&dir, Some(Arc::new(web)));
+
+    let r = fire(&reg, "web_fetch", serde_json::json!({"url": "https://arxiv.org/abs/2103.00020"})).await;
+    ok(ok_kind(&r), "抓取成功");
+    ok(r.content.contains("CLIP 论文"), "返回值里有标题");
+    ok(r.content.contains("共 300 行"), "说清了全文有多大");
+    ok(!r.content.contains("正文第 300 行"), "★ 全文没有直接灌进返回值");
+    ok(r.content.contains("workspace/"), "★ 给了落盘路径");
+    ok(r.content.contains("fs_read"), "★ 告诉模型怎么接着看");
+    ok(d.scratch.count() == 1, "workspace 里确实多了一个文件");
+
+    let name = d.scratch.list()[0].0.clone();
+    let rel = format!("workspace/{name}");
+    let r2 = fire(&reg, "fs_read", serde_json::json!({"path": rel, "offset": 280})).await;
+    ok(r2.content.contains("正文第 300 行"), "★ 全文在 workspace 里，按需读得到");
+
+    let r3 = fire(&reg, "fs_grep", serde_json::json!({"pattern": "第 250 行", "path": "workspace"})).await;
+    ok(r3.content.contains("正文第 250 行"), "★ 抓回来的东西也能 grep");
+
+    let bad = fire(&reg, "web_fetch", serde_json::json!({"url": "http://127.0.0.1/x"})).await;
+    ok(!ok_kind(&bad), "★ 抓内网地址被闸门拦住");
+    ok(d.metrics.get("denied") == 1, "拒绝计入指标");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s38_toolchain_in_a_turn() {
+    head("S38", "★ 端到端：模型在一轮里抓网页，产物落盘、结果进时间线");
+    let dir = tmpdir("e2e");
+    let long: String =
+        (1..=200).map(|i| format!("摘要第 {i} 行")).collect::<Vec<_>>().join("\n");
+    let web = premortem::web::MockWeb::new()
+        .page("https://arxiv.org/abs/2103.00020", "CLIP", &long)
+        .hit("CLIP", "https://arxiv.org/abs/2103.00020", "对比学习的图文预训练");
+    let (d, reg) = toolchain(&dir, Some(Arc::new(web)));
+
+    let m = MockModel::new()
+        .on_judge(default_judge())
+        .on_answer(vec![
+            StreamEvent::Chunk("我查一下".into()),
+            StreamEvent::ToolCalls(vec![call_with(
+                "c1",
+                "web_fetch",
+                serde_json::json!({"url": "https://arxiv.org/abs/2103.00020"}),
+            )]),
+        ])
+        .on_judge(default_judge())
+        .on_answer(chunks(&["查完了"]));
+    let r = Rig::new(m, reg).await;
+    r.handle.session_send("CLIP 是怎么做的", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let tl = r.timeline().await;
+    let ret = tl.iter().find_map(|e| match &e.body {
+        Body::Returned { content, name, .. } if name == "web_fetch" => Some(content.clone()),
+        _ => None,
+    });
+    ok(ret.is_some(), "工具返回落进了时间线");
+    let ret = ret.unwrap_or_default();
+    ok(ret.contains("workspace/"), "★ 时间线上记的是摘要 + 路径，不是全文");
+    ok(!ret.contains("摘要第 200 行"), "★ 全文没有进对话历史");
+    ok(d.scratch.count() == 1, "★ 产物真的落在 workspace 里");
+    println!("      · {}", d.metrics.line());
+
+    let s = r.finish().await;
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s39_config_reaches_the_gate() {
+    head("S39", "★ config.json 改一行，工具的行为跟着变（配置不是装饰）");
+    let dir = tmpdir("wire");
+
+    // 用户在 config.json 里把可抓域名改成只剩 example.com
+    let mut w = Settings::default();
+    w.tools.allow_hosts = vec!["example.com".into()];
+    w.tools.roots = vec![dir.to_string_lossy().into_owned()];
+    w.save(&dir).unwrap();
+
+    let loaded = Settings::load(&dir, NO_ENV);
+    ok(loaded.tools.allow_hosts == vec!["example.com".to_string()], "策略从文件读回来了");
+
+    let web = premortem::web::MockWeb::new()
+        .page("https://example.com/x", "允许的", "内容")
+        .page("https://arxiv.org/abs/1", "本来允许的", "内容");
+    let d = toolkit::from_settings(&loaded, &dir, Some(Arc::new(web))).unwrap();
+    let reg = toolkit::register(Registry::new(), &d);
+
+    let good = fire(&reg, "web_fetch", serde_json::json!({"url": "https://example.com/x"})).await;
+    ok(ok_kind(&good), "改成允许的域名能抓");
+    let bad = fire(&reg, "web_fetch", serde_json::json!({"url": "https://arxiv.org/abs/1"})).await;
+    ok(!ok_kind(&bad), "★ 默认允许的 arxiv 现在抓不了 —— 文件真的管住了闸门");
+    ok(bad.content.contains("config.json"), "★ 拒绝时告诉模型去哪儿改");
+
+    // 后端选择：没有 curl 的机器上应该干脆不给联网工具，而不是给一个会报错的
+    let has_curl = premortem::shell::which("curl").is_some();
+    let picked = premortem::web::pick(&loaded.tools, None);
+    ok(picked.is_some() == has_curl, "没有 curl 就不注册联网工具");
+    if has_curl {
+        ok(picked.as_ref().unwrap().name() == "curl", "没密钥时降级到裸 curl");
+        ok(!picked.as_ref().unwrap().can_search(), "★ 裸 curl 不假装能搜索");
+        let fc = premortem::web::pick(&loaded.tools, Some("sk-x".into())).unwrap();
+        ok(fc.name() == "firecrawl" && fc.can_search(), "★ 填了密钥就升级成 firecrawl");
+    }
+    let off = premortem::policy::PolicyCfg { net: false, ..loaded.tools.clone() };
+    ok(premortem::web::pick(&off, Some("sk-x".into())).is_none(), "总开关关掉时连后端都不建");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     println!("Premortem 链路测试 —— 主时间线版");
@@ -1469,11 +1801,19 @@ async fn main() {
     s29_node_resurrect_blocked().await;
     s30_phantom_ids_rejected().await;
     s31_two_ways_to_draw().await;
+    s32_config_layers().await;
+    s33_secrets_separate().await;
+    s34_path_gate().await;
+    s35_url_gate().await;
+    s36_context_safety().await;
+    s37_fetch_lands_in_workspace().await;
+    s38_toolchain_in_a_turn().await;
+    s39_config_reaches_the_gate().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);
     println!("\n{}", "═".repeat(64));
-    println!("31 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
+    println!("39 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
     if f > 0 {
         std::process::exit(1);
     }

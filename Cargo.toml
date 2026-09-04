@@ -20,6 +20,14 @@ toml        = "0.9"
 # 主时间线的存储。bundled 直接编进来，避开 WSL/Windows 上系统 sqlite 版本不一的麻烦。
 # 同步 API 正合适：写连接本来就独占给 writer 一个 task。
 rusqlite    = { version = "0.37", features = ["bundled"] }
+# 本地检索直接用 ripgrep 自己的那套 crate。手写目录遍历 + .gitignore 解析
+# 是典型的「看着简单、边界条件能写一年」的活：嵌套 ignore 文件、否定规则、
+# 符号链接、二进制探测、编码嗅探。这几个 crate 就是 ripgrep 的实现本体。
+ignore        = "0.4"   # gitignore 感知的目录遍历
+globset       = "0.4"   # --glob 过滤
+grep-searcher = "0.1"   # 行搜索 + 上下文行 + 二进制检测
+grep-regex    = "0.1"   # 搜索用的正则匹配器
+grep-matcher  = "0.1"   # Matcher trait
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "test-util"] }
