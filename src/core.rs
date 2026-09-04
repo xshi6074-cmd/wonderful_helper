@@ -36,7 +36,7 @@ use crate::context::{ContextLimit, toks};
 use crate::cost::CostLedger;
 use crate::event::{Body, Draft, Event, now_ms};
 use crate::handle::CoreHandle;
-use crate::ids::{LruSet, Seq, Session, SessionId, TurnId};
+use crate::ids::{Seq, Session, SessionId, TurnId};
 use crate::memory::Memory;
 use crate::model::{Message, Mode, Models, Role, complete};
 use crate::msg::{
@@ -235,6 +235,13 @@ pub struct Core {
     scene: Option<SceneId>,
     /// 本轮的视图有没有被取过。`scene_override` 只在第一次给出，之后就消费掉了。
     view_taken: bool,
+    /// 收到了退出请求、正在等当前 turn 收尾。
+    ///
+    /// **退出必须等 turn 把东西吐完**：cancel 之后 turn 还要落半截正文、
+    /// 补未闭合的调用、发 `Finished`。上一版收到 Shutdown 就直接跳出循环，
+    /// 于是这些全发给了一个已经没人接的 Core —— 用户看着正文吐了一半退出应用，
+    /// 回来一片空白，正是这条路径。
+    shutdown: Option<oneshot::Sender<()>>,
     /// 用户点了换场景，等下一轮生效。
     ///
     /// **不在轮中生效**：轮中改会重新引入「同一份输入在轮中变了」那类 bug，
@@ -243,7 +250,9 @@ pub struct Core {
 
     /// 待处理的用户输入。**存的就是时间线上那几条事件本身**，不是一份副本。
     inbox: VecDeque<Event>,
-    seen: LruSet<String>,
+    /// 已见过的 client_id。启动时用整条链预热，所以跨重启的重发也挡得住。
+    /// 一次会话的用户输入条数天然有界，不需要定容淘汰。
+    seen: HashSet<String>,
 
     ui: broadcast::Sender<UiEvent>,
     cost: CostLedger,
@@ -263,6 +272,10 @@ pub struct Core {
     last_checkpoint: Seq,
     metrics: CoreMetrics,
 }
+
+/// 退出时等 turn 收尾的宽限期。到点还没收完就丢下它走 —— 卡住的 turn
+/// 不能变成「应用退不出去」。
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// 一键蒸馏的指令。产出是给**下一个新对话**快速入手用的。
 const DISTILL_PROMPT: &str = "把这段会话沉淀成持久记忆的更新草稿。输出四节 Markdown：\n\
@@ -294,9 +307,10 @@ pub fn start(deps: CoreDeps) -> Started {
         open_questions: Vec::new(),
         scene: None,
         view_taken: false,
+        shutdown: None,
         pending_scene: None,
         inbox: VecDeque::new(),
-        seen: LruSet::new(512),
+        seen: HashSet::new(),
         ui: ui_tx,
         cost: CostLedger::default(),
         writer: deps.writer,
@@ -338,7 +352,20 @@ impl Core {
             Body::Judged { scene, .. } => Some(scene.clone()),
             _ => None,
         });
-        for c in &r.recent_clients {
+        // 用户点了换场景、还没有哪一轮把它消费掉，进程就没了 ⇒ 重开之后它仍然有效。
+        // 判据是「这条 SceneOverridden 之后再没开过轮」—— 开过轮就说明被读走了。
+        // 和未回答的提问同一个道理：那是一份还没兑现的用户意图，不该随进程消失。
+        self.pending_scene = r
+            .events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                Body::TurnOpened { .. } => Some(None),
+                Body::SceneOverridden { to, .. } => Some(Some(to.clone())),
+                _ => None,
+            })
+            .flatten();
+        for c in &r.client_ids {
             self.seen.insert(c.clone());
         }
         self.next_turn = r
@@ -504,19 +531,37 @@ impl Core {
             }
 
             CoreMsg::Shutdown { reply } => {
-                // 优雅退出与被 kill 的全部差别就在这里：cancel、补齐未闭合的调用、
-                // 把攒着的事件冲干净，然后才回执。
-                if let TurnPhase::Running { token, .. } = &self.turn {
-                    token.cancel();
+                // 优雅退出与被 kill 的全部差别：cancel → **等 turn 收尾** →
+                // 补齐未闭合的调用 → 把攒着的事件冲干净 → 才回执。
+                match &self.turn {
+                    TurnPhase::Idle => {
+                        self.finish_shutdown(reply);
+                        return false;
+                    }
+                    TurnPhase::Running { id, token } => {
+                        let id = *id;
+                        token.cancel();
+                        let _ = self.ui.send(UiEvent::Stopping { turn: id });
+                        self.turn = TurnPhase::Closing { id };
+                    }
+                    TurnPhase::Closing { .. } => {}
                 }
-                self.close_open_calls("[interrupted] 应用退出，工具未返回");
-                let (wtx, wrx) = oneshot::channel();
-                let _ = self.writer.send(WriteJob::Shutdown { ack: wtx });
+                self.shutdown = Some(reply);
+                // 兜底：turn 卡住也不能永远退不出去。
+                let tx = self.self_tx.clone();
                 tokio::spawn(async move {
-                    let _ = wrx.await;
-                    let _ = reply.send(());
+                    tokio::time::sleep(SHUTDOWN_GRACE).await;
+                    let _ = tx.send(CoreMsg::ShutdownNow).await;
                 });
-                return false;
+            }
+
+            CoreMsg::ShutdownNow => {
+                // turn 在宽限期内没收完。它已经 cancel 过了，剩下的产物只能不要。
+                if let Some(reply) = self.shutdown.take() {
+                    eprintln!("[core] turn 收尾超时，强制退出");
+                    self.finish_shutdown(reply);
+                    return false;
+                }
             }
 
             // ──────────────────────── 来自 TurnTask ────────────────────────
@@ -609,6 +654,11 @@ impl Core {
                 }
                 let _ = self.ui.send(UiEvent::TurnClosed { turn, aborted: outcome.aborted });
 
+                // 正在退出 ⇒ turn 已经收完了，现在才是真的可以走。
+                if let Some(reply) = self.shutdown.take() {
+                    self.finish_shutdown(reply);
+                    return false;
+                }
                 // 注入必有响应：收敛期间排队的话，现在开一轮去处理。
                 if !self.inbox.is_empty() {
                     self.start_turn();
@@ -830,6 +880,17 @@ impl Core {
     }
 
     // ────────────────────────────── 其它 ──────────────────────────────
+
+    /// 退出的最后一步：补齐未闭合的调用、让 writer 把攒着的全冲掉、然后才回执。
+    fn finish_shutdown(&mut self, reply: oneshot::Sender<()>) {
+        self.close_open_calls("[interrupted] 应用退出，工具未返回");
+        let (wtx, wrx) = oneshot::channel();
+        let _ = self.writer.send(WriteJob::Shutdown { ack: wtx });
+        tokio::spawn(async move {
+            let _ = wrx.await;
+            let _ = reply.send(());
+        });
+    }
 
     /// 把落盘回执转成 UI 的 ack。**开一个一次性 task**，因为 Core 自己不能 await。
     fn ack_later(

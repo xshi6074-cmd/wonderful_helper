@@ -103,6 +103,13 @@ async fn run_writer(
                 }
             }
             WriteJob::Checkpoint { session, seq, ws } => {
+                // ★ 先把攒着的事件写掉再打 checkpoint。
+                //
+                // Append 是攒批的、Checkpoint 是立即写的，不先冲一遍的话
+                // checkpoint 会记到一个盘上还不存在的 seq。重启时 restore 从那个
+                // checkpoint 起跳，却找不到它之后（其实是之前）的事件，
+                // 于是 Core 会从一个比 checkpoint 还小的位置继续分配 seq —— 直接撞号。
+                flush(&store, &mut pending, &mut fails, &mut degraded, &ui).await;
                 // 纯功能性：失败只记一行，不影响正确性，也不触发降级提示。
                 let s = store.clone();
                 let r =
@@ -199,7 +206,9 @@ pub struct Restored {
     /// 还要再判一次「上次是不是崩了」，而且中间任何一次组装 prompt 都会缺 tool 消息。
     pub repairs: Vec<Draft>,
     pub open_questions: Vec<OpenQuestion>,
-    pub recent_clients: Vec<String>,
+    /// 本链上出现过的**全部** client_id。会话里的用户输入条数天然有界，
+    /// 全量预热才能挡住「重发一条很旧的消息」。
+    pub client_ids: Vec<String>,
     pub crashed: usize,
 }
 
@@ -266,14 +275,12 @@ pub fn restore(store: &dyn Store, session: &SessionId) -> Result<Restored, Store
         .map(|(id, question, options)| OpenQuestion { id, question, options })
         .collect();
 
-    let recent_clients = events
+    let client_ids = events
         .iter()
-        .rev()
         .filter_map(|e| match &e.body {
             Body::Said { client_id, .. } => Some(client_id.clone()),
             _ => None,
         })
-        .take(256)
         .collect();
 
     Ok(Restored {
@@ -283,7 +290,7 @@ pub fn restore(store: &dyn Store, session: &SessionId) -> Result<Restored, Store
         events,
         repairs,
         open_questions,
-        recent_clients,
+        client_ids,
         crashed: crashed.len(),
     })
 }

@@ -13,8 +13,6 @@
 //! 冲突裁决不再用它 —— 那个降级成了 turn 内的一个 path 集合，见 `core::Core::arbitrate`。
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
-use std::hash::Hash;
 
 /// 一个会话。**回滚就是从某一轮分叉出一个新会话**，所以它必须是一等公民。
 ///
@@ -143,47 +141,13 @@ impl std::fmt::Display for QuestionId {
     }
 }
 
-/// 定容去重集合：`insert` 返回 true 表示这是新元素。
-///
-/// # 为什么内存里还留一份，明明库里已经有 UNIQUE 约束
-///
-/// 用户手抖点两次发送，UI 会发两条 `client_id` 相同的输入。库上的唯一约束能挡住，
-/// 但那要一次磁盘往返，而 Core 不能 await。所以这里是**快路径**：
-/// 内存命中就直接丢弃，未命中才让它往下走，最终由库上的约束兜底。
-///
-/// 启动时用最近若干条事件的 client_id 预热，跨重启的重发也能挡住。
-#[derive(Debug)]
-pub struct LruSet<T: Hash + Eq + Clone> {
-    set: HashSet<T>,
-    order: VecDeque<T>,
-    cap: usize,
-}
-
-impl<T: Hash + Eq + Clone> LruSet<T> {
-    pub fn new(cap: usize) -> Self {
-        Self { set: HashSet::new(), order: VecDeque::new(), cap: cap.max(1) }
-    }
-
-    /// 返回 true 表示这是**新**元素（即：应当处理）。false 表示重复，调用方应丢弃。
-    pub fn insert(&mut self, v: T) -> bool {
-        if self.set.contains(&v) {
-            return false;
-        }
-        if self.order.len() >= self.cap {
-            if let Some(old) = self.order.pop_front() {
-                self.set.remove(&old);
-            }
-        }
-        self.order.push_back(v.clone());
-        self.set.insert(v);
-        true
-    }
-
-    pub fn len(&self) -> usize {
-        self.set.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.set.is_empty()
-    }
-}
+// 去重集合曾经是个定容 LRU（cap 512，启动时用最近 256 条预热）。删掉了，理由：
+//
+// 库上的 `UNIQUE(session, client_id)` 本来是当兜底用的，但它**兜不住** ——
+// 唯一约束一旦被违反，`append` 整批返回 Err，writer 无限重试，
+// 整条落盘流水线就此卡死。一个「用户重发了一条很旧的消息」把持久化打挂，
+// 这个代价比多存几百个字符串大得多。
+//
+// 而一次会话里的用户输入条数天然有界（人手打字），所以现在直接用
+// `HashSet<String>`，启动时用**整条会话链**上的全部 client_id 预热。
+// 去重在 Core 里就判完了，库上的约束从「兜底」降级成「永远不该触发的断言」。

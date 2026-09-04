@@ -332,6 +332,10 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
     let mut tick = tokio::time::interval(ctx.config.heartbeat);
     // interval 的第一次 tick 立即就绪，先吃掉，否则一进来就发一次无意义的心跳。
     tick.tick().await;
+    // 硬上限是**独立的绝对期限**，不搭在心跳上。
+    // 上一版只在心跳分支里判 `elapsed > hard_limit`，于是心跳周期一旦大于硬上限
+    // （比如心跳 250ms、硬上限 20ms），硬上限就完全失效 —— 实测要等满 250ms。
+    let deadline = tokio::time::Instant::now() + ctx.config.hard_limit;
 
     while out.iter().any(Option::is_none) {
         tokio::select! {
@@ -365,16 +369,17 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
                     pending,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                 });
+            }
 
-                if start.elapsed() > ctx.config.hard_limit {
-                    for (i, slot) in out.iter_mut().enumerate() {
-                        if slot.is_none() {
-                            *slot = Some(ToolResult::timeout(&calls[i]));
-                            stats.timeout += 1;
-                        }
+            _ = tokio::time::sleep_until(deadline) => {
+                // 到点把未完成的填成 timeout 结果**继续**，不是整轮失败。
+                for (i, slot) in out.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        *slot = Some(ToolResult::timeout(&calls[i]));
+                        stats.timeout += 1;
                     }
-                    break;
                 }
+                break;
             }
         }
     }

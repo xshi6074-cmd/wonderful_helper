@@ -215,8 +215,14 @@ pub fn plan_compaction(events: &[Event], fixed: u32, limit: &ContextLimit) -> Co
 
 /// 找「保留最近 k 轮」的分界下标。
 ///
-/// 轮次由事件自己带（`Event::turn`），不需要靠扫消息角色去猜边界 ——
-/// 上一版就是靠数 user 消息猜的，插话一多就数错。
+/// 轮次由事件自己带（`Event::turn`），不需要靠扫消息角色去猜边界。
+///
+/// # 分界要往前退到那一轮的**触发输入**
+///
+/// 用户那句话是在 `TurnOpened` **之前**落盘的（按下发送就写，然后才开轮），
+/// 而且它的 `turn` 是 `None`。只按 `TurnOpened` 切，会把提问折进摘要、
+/// 把回答留在外面 —— 模型看到一个没有问题的答案。所以分界点要继续往前退，
+/// 越过紧挨着的那几条轮外事件（用户输入、回答、侧栏编辑）。
 pub fn split_at_recent(events: &[Event], k_turns: usize) -> usize {
     let mut turns: Vec<crate::ids::TurnId> = Vec::new();
     for e in events {
@@ -230,7 +236,15 @@ pub fn split_at_recent(events: &[Event], k_turns: usize) -> usize {
         return 0;
     }
     let boundary = turns[turns.len() - k_turns];
-    events.iter().position(|e| e.turn == Some(boundary)).unwrap_or(0)
+    let mut i = match events.iter().position(|e| e.turn == Some(boundary)) {
+        Some(i) => i,
+        None => return 0,
+    };
+    // 往前退过属于这一轮但还没被打上轮号的用户动作
+    while i > 0 && events[i - 1].turn.is_none() {
+        i -= 1;
+    }
+    i
 }
 
 /// 摘要指令。正文来自持久层的 `prompts.toml`，用户可改；这里只负责把推断图拼上去。

@@ -606,7 +606,25 @@ async fn s11_fold() {
         let msgs = assemble(&tl);
         ok(
             msgs.iter().any(|m| m.content.contains("已折叠早期对话")),
-            "组装时用摘要代替了那一段",
+            "组装时注入了摘要",
+        );
+        // ★ 之前这里只断言「摘要出现了」，没断言「原文不见了」——
+        // 于是「摘要和原文同时进 prompt、一个 token 没省下」这个 bug 溜了过去。
+        let folded_texts: Vec<String> = tl
+            .iter()
+            .filter(|e| e.seq >= *from && e.seq <= *to)
+            .filter_map(|e| match &e.body {
+                Body::Said { text, .. } => Some(text.clone()),
+                Body::Wrote { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        ok(!folded_texts.is_empty(), "折叠区间里确实有对话");
+        ok(
+            !folded_texts
+                .iter()
+                .any(|t| msgs.iter().any(|m| m.content.contains(t.as_str()))),
+            "★ 被折叠的原文不再出现在 prompt 里（摘要是代替，不是追加）",
         );
     }
     let s = r.finish().await;

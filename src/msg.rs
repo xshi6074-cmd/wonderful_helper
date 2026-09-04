@@ -280,6 +280,8 @@ pub enum CoreMsg {
     /// 测试里用于在断言盘上内容之前消除攒批带来的时序不确定。
     Flush { reply: tokio::sync::oneshot::Sender<bool> },
     Shutdown { reply: tokio::sync::oneshot::Sender<()> },
+    /// 退出宽限期到了，不再等 turn 收尾。由 Core 自己的超时 task 发。
+    ShutdownNow,
 
     // ── 来自 TurnTask ──
     /// 取**当前**视图。turn 每次拼 prompt 前调一次。

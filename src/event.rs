@@ -234,20 +234,29 @@ pub fn now_ms() -> u64 {
 /// 代之以摘要本身。**原始事件仍在时间线上**，所以 UI 能展开、蒸馏能读全程 ——
 /// 折叠只影响「拼给模型看的那份」。
 ///
-/// 嵌套折叠（折叠区间里还有更早的折叠）按最外层生效：跳过区间时连同里面的
-/// `Folded` 一起跳过，不会重复注入两份摘要。
+/// # 必须先扫一遍区间，不能边走边跳
+///
+/// `Folded` 事件是在它覆盖的区间**之后**才追加的（先折叠、再记录折了什么）。
+/// 上一版边走边设 `skip_until`，等读到 `Folded` 时被折的那几条早就吐出去了 ——
+/// 结果是摘要和原文同时进 prompt，折叠一个 token 都没省下，而且模型会看到
+/// 同一段话说了两遍。所以这里先收区间再过滤。
+///
+/// 嵌套折叠自然按最外层生效：内层那条 `Folded` 的 seq 落在外层区间里，
+/// 会连同被它覆盖的原文一起被跳过，不会重复注入两份摘要。
 pub fn assemble(events: &[Event]) -> Vec<Message> {
+    let folds: Vec<(Seq, Seq)> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Folded { from, to, .. } => Some((*from, *to)),
+            _ => None,
+        })
+        .collect();
+    let covered = |s: Seq| folds.iter().any(|(f, t)| s >= *f && s <= *t);
+
     let mut out = Vec::with_capacity(events.len());
-    let mut skip_until: Option<Seq> = None;
     for e in events {
-        if let Some(end) = skip_until {
-            if e.seq <= end {
-                continue;
-            }
-            skip_until = None;
-        }
-        if let Body::Folded { to, .. } = &e.body {
-            skip_until = Some(*to);
+        if covered(e.seq) {
+            continue;
         }
         if let Some(m) = e.body.as_message(e.seq, e.corr) {
             out.push(m);
