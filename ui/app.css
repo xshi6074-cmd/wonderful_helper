@@ -7,14 +7,18 @@
 
 :root{
   color-scheme:light;
-  --ground:#f2f4f5; --surface:#ffffff; --raise:#fbfcfc;
-  --sunk:#e9edee; --line:#dfe4e6; --line-2:#eceff0;
-  --ink:#171b1e; --ink-2:#454e54; --muted:#79848b;
-  --accent:#0d6e63; --accent-soft:#e2efed;
+  /* 中性色**不是纯灰**：往紫偏了一点点（色相 265 左右，饱和度个位数）。
+     纯灰配紫会显脏 —— 灰里带一丝同色相，整套才像是一起选的。 */
+  --ground:#f4f3f8; --surface:#ffffff; --raise:#fbfaff;
+  --sunk:#ecebf3; --line:#e1dfec; --line-2:#eeedf5;
+  --ink:#1a1822; --ink-2:#4a4658; --muted:#7d7891;
+  --accent:#6f57cf; --accent-soft:#eeeaff;
   --bad:#a3304a; --bad-soft:#fae9ec;
   --warn:#8a6a12; --warn-soft:#f7f0da;
-  --info:#2f5580; --info-soft:#e8eef5;
-  --shadow:0 1px 2px rgba(20,30,35,.05), 0 6px 18px -8px rgba(20,30,35,.14);
+  /* info 挪成青绿：紫做主色之后再用蓝当次要色，两个在余光里分不开。
+     以前那个绿色降级成语义色，正好用在「模型在问你」这种地方。 */
+  --info:#0f6f73; --info-soft:#e0f1f1;
+  --shadow:0 1px 2px rgba(26,24,34,.05), 0 6px 18px -8px rgba(26,24,34,.16);
   --mono:ui-monospace,"SF Mono","IBM Plex Mono","Sarasa Mono SC",Menlo,Consolas,monospace;
   --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
   --serif:ui-serif,Charter,Georgia,"Songti SC","Source Han Serif SC",serif;
@@ -24,14 +28,14 @@
 @media (prefers-color-scheme:dark){
   :root{
     color-scheme:dark;
-    --ground:#101417; --surface:#171c20; --raise:#1c2226;
-    --sunk:#0c1013; --line:#262d33; --line-2:#1e252a;
-    --ink:#e2e7ea; --ink-2:#b3bcc2; --muted:#7f8b93;
-    --accent:#4fc0b1; --accent-soft:#14302c;
+    --ground:#131218; --surface:#1a1922; --raise:#201f2a;
+    --sunk:#0e0d13; --line:#2b2937; --line-2:#221f2c;
+    --ink:#e6e4ee; --ink-2:#b6b2c6; --muted:#837e96;
+    --accent:#b3a4f5; --accent-soft:#26214a;
     --bad:#e28b9d; --bad-soft:#2f1a20;
     --warn:#d6ad52; --warn-soft:#2b2414;
-    --info:#84acd8; --info-soft:#16212c;
-    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px -10px rgba(0,0,0,.6);
+    --info:#5cc4c4; --info-soft:#0f2a2b;
+    --shadow:0 1px 2px rgba(0,0,0,.34), 0 8px 24px -10px rgba(0,0,0,.62);
   }
 }
 
@@ -128,6 +132,7 @@ body.no-right #right,body.no-right #rgrip{display:none}
 #banner .note.info{background:var(--info-soft);color:var(--info)}
 
 /* ───────── 消息流 ───────── */
+#scroll-wrap{position:relative;flex:1;min-height:0;display:flex}
 #stream{flex:1;overflow:auto;padding:26px 0 36px;scroll-behavior:smooth}
 .turn{max-width:730px;margin:0 auto;padding:0 28px}
 .msg{margin:20px 0}
@@ -323,3 +328,53 @@ mark.hit.cur{background:var(--accent);color:#fff}
   *{animation-duration:.01ms!important;transition-duration:.01ms!important}
   #stream{scroll-behavior:auto}
 }
+
+
+/* ───────── 小东西 ───────── */
+
+/* 深色下主色是浅紫，白字压不住 —— 按钮文字改用深底色。 */
+@media (prefers-color-scheme:dark){
+  button.primary{color:#171522}
+  mark.hit.cur{color:#171522}
+}
+
+/* 图例：虚线是这张图里信息量最大的一笔，值得单独说一句。 */
+.legend{display:flex;gap:14px;align-items:center;margin:8px 2px 0;font-size:11px;
+  color:var(--muted);flex-wrap:wrap}
+.legend i{display:inline-flex;gap:5px;align-items:center;font-style:normal}
+.legend i::before{content:"";width:16px;height:0;border-top:1.4px solid var(--muted)}
+.legend i.guess::before{border-top-style:dashed;border-color:var(--warn)}
+.legend i.user::before{border-top-width:2.4px;border-color:var(--accent)}
+
+/* 本轮刚被模型改过的节点：亮一下再褪去。
+   「本轮新增」这个语义一直在数据里（Prov.seq），只是从没在图上体现过。 */
+@keyframes freshglow{
+  0%{stroke:var(--accent);stroke-width:2.4}
+  70%{stroke:var(--accent);stroke-width:2.4}
+  100%{}
+}
+#graph .n.fresh rect{animation:freshglow 7s ease-out forwards}
+
+/* 代码块的复制按钮：hover 才出现，不占视觉。 */
+.md pre{position:relative}
+.md pre .copy{position:absolute;top:7px;right:7px;opacity:0;transition:opacity .13s;
+  font-size:11px;padding:2px 8px;background:var(--surface);border-color:var(--line)}
+.md pre:hover .copy,.md pre .copy:focus-visible{opacity:1}
+.md pre .copy.done{color:var(--accent);border-color:var(--accent)}
+
+/* 往上翻的时候给条回来的路。 */
+#to-bottom{position:absolute;left:50%;transform:translateX(-50%);bottom:14px;z-index:12;
+  font-size:12px;padding:5px 13px;border-radius:20px;background:var(--surface);
+  box-shadow:var(--shadow);color:var(--muted)}
+#to-bottom:hover{color:var(--ink)}
+#center{position:relative}
+
+/* 分支在会话列表里画成一条支线，不用读文字就知道谁挂在谁下面。 */
+.list li.child{margin-left:12px;position:relative}
+.list li.child::before{content:"";position:absolute;left:-8px;top:0;bottom:50%;
+  width:8px;border-left:1px solid var(--line);border-bottom:1px solid var(--line);
+  border-bottom-left-radius:5px}
+
+/* 上下文占用逼近上限时，chip 自己变色。数字要人去比对，颜色不用。 */
+#token-chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+#token-chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}

@@ -37,6 +37,7 @@ const S = {
   mode: 'explore', phase: 'designing', tokens: 0, queued: 0,
   scene: null, running: false, connected: false,
   stream: null,           // { turn, text }
+  fresh: new Set(),       // 刚被改过的图元素 id，画一次高亮就够
   banners: [],            // { level, text, key }
 };
 
@@ -92,7 +93,11 @@ function onMsg(m) {
       break;
     case 'stopping': banner('info', '正在停止…', 'stop'); break;
     case 'queued': S.queued = m.pending; renderTop(); break;
-    case 'state_changed': send('snap'); break;
+    case 'state_changed':
+      // 记下这一批动过的图元素，画图时让它们亮一下再褪去
+      for (const o of m.ops || []) if (o.id && typeof o.id === 'string') S.fresh.add(o.id);
+      send('snap');
+      break;
     case 'snap':
       S.snap = m.snap; S.mode = m.snap.mode; S.phase = m.snap.phase;
       S.scene = m.snap.scene; S.queued = m.snap.queued;
@@ -142,7 +147,12 @@ function renderTop() {
   sc.hidden = !S.scene || S.scene === 'none';
   if (!sc.hidden) sc.textContent = '场景 ' + S.scene;
   const foot = S.foot ? `　·　上下文 ${S.foot.total} tok` : '';
-  $('#token-chip').textContent = `${S.tokens} tok${foot}`;
+  const tc = $('#token-chip');
+  tc.textContent = `${S.tokens} tok${foot}`;
+  // 逼近上限时自己变色。数字要人去比对，颜色不用。
+  const frac = S.foot ? S.foot.total / 128000 : 0;
+  tc.className = 'chip ghost' + (frac > 0.9 ? ' bad' : frac > 0.7 ? ' warn' : '');
+  tc.title = frac > 0.7 ? '上下文快满了，下一轮会自动折叠早期对话' : '本会话累计 token';
   const c = $('#conn-chip');
   c.textContent = S.connected ? (S.session ? S.session.slice(0, 8) : '无会话') : '断线重连中…';
   c.className = 'chip ' + (S.connected ? 'ghost' : 'bad');
@@ -249,9 +259,42 @@ function renderStream() {
             h('button', { onclick: () => send('open', { session: '' }) }, '再试一次')))
       : h('div', { class: 'blank' },
           h('h2', {}, '说点什么开始'),
-          h('p', {}, '把你想做的实验讲一遍就行。右栏会随着对话长出一张推断图，你可以直接改它。')));
+          h('p', {}, '把你想做的实验讲一遍就行。右栏会跟着长出一张推断图 —— ',
+            h('b', { style: 'color:var(--warn)' }, '虚线的部分是模型自己猜的'),
+            '，那才是值得先聊的地方。')));
   }
   if (stick) st.scrollTop = st.scrollHeight;
+  addCopyButtons();
+  updateToBottom();
+}
+
+/** 代码块的复制按钮。聊天 UI 的基本便利，没有它就得手动框选。 */
+function addCopyButtons() {
+  for (const pre of $$('#stream .md pre')) {
+    if ($('.copy', pre)) continue;
+    const b = h('button', {
+      class: 'copy', title: '复制',
+      onclick: async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(pre.textContent.replace(/复制$/, ''));
+          b.textContent = '已复制'; b.classList.add('done');
+          setTimeout(() => { b.textContent = '复制'; b.classList.remove('done'); }, 1400);
+        } catch { b.textContent = '复制不了'; }
+      },
+    }, '复制');
+    pre.append(b);
+  }
+}
+
+function updateToBottom() {
+  const st = $('#stream'), btn = $('#to-bottom');
+  if (!btn) return;
+  // 两个条件都要：内容够长**而且**确实翻上去了。少了前一个，
+  // 短对话时按钮会一直挂在那儿，点了什么也不会发生。
+  const scrollable = st.scrollHeight - st.clientHeight > 120;
+  const nearBottom = st.scrollTop + st.clientHeight > st.scrollHeight - 160;
+  btn.hidden = !scrollable || nearBottom;
 }
 
 /** 流式只改那一个文本节点，不重画整条流 —— 否则每来一个 delta 都会滚动跳一下。 */
@@ -375,6 +418,7 @@ function drawGraph(g) {
   const box = $('#graph'); box.textContent = '';
   const nodes = g?.nodes || {}, edges = g?.edges || {};
   const ids = Object.keys(nodes);
+  $('.legend').hidden = !ids.length;
   if (!ids.length) {
     box.append(h('div', { class: 'empty' }, g?.sketch ? '模型画的图见下方源码' : '还没有推断图'));
     return;
@@ -450,7 +494,8 @@ function drawGraph(g) {
 
   for (const id of flat) {
     const n = nodes[id], p = pos[id];
-    const cls = 'n' + (isGuess(n.prov) ? ' guess' : '') + (n.prov?.origin === 'User' ? ' user' : '');
+    const cls = 'n' + (isGuess(n.prov) ? ' guess' : '') +
+      (n.prov?.origin === 'User' ? ' user' : '') + (S.fresh.has(id) ? ' fresh' : '');
     const gg = mk('g', { class: cls });
     gg.addEventListener('click', () => editNode(id, n));
     const title = document.createElementNS(NS, 'title');
@@ -545,7 +590,7 @@ function renderSessions() {
   if (!S.sessions.length) ul.append(h('li', { class: 'hint' }, '还没有对话'));
   for (const s of S.sessions) {
     ul.append(h('li', {
-      class: s.id === S.session ? 'on' : '',
+      class: (s.id === S.session ? 'on' : '') + (s.parent ? ' child' : ''),
       onclick: () => send('open', { session: s.id }),
     },
       h('span', {}, s.title || (s.parent ? '空分支' : '空对话')),
@@ -789,6 +834,10 @@ function boot() {
   $('#new-chat').onclick = () => send('open', { session: '' });
   $('#graph-refresh').onclick = () => send('snap');
   $('#stop').onclick = () => send('interrupt');
+  $('#stream').addEventListener('scroll', updateToBottom, { passive: true });
+  $('#to-bottom').onclick = () => {
+    const st = $('#stream'); st.scrollTop = st.scrollHeight;
+  };
 
   const input = $('#input');
   const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; };

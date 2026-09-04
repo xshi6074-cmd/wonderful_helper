@@ -37,7 +37,7 @@ use crate::store::{SqliteStore, Store};
 use crate::tools::Registry;
 use crate::{render, toolkit, web};
 use axum::extract::ws::{Message as Ws, WebSocket, WebSocketUpgrade};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, extract::State};
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ impl App {
 
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
-            .route("/", get(|| async { Html(INDEX) }))
+            .route("/", get(|| async { no_cache("text/html; charset=utf-8", INDEX) }))
             .route("/app.js", get(|| async { js(APP_JS) }))
             .route("/app.css", get(|| async { css(APP_CSS) }))
             .route("/ws", get(ws_upgrade))
@@ -660,12 +660,27 @@ impl App {
     }
 }
 
+/// 前端三个文件都带 `no-cache`。
+///
+/// 它们是 `include_str!` 进来的，换一版就要重新编译；不加这条，浏览器会拿着
+/// 上一版的 js/css 不放，改完看不到效果 —— 而那个症状看起来像是改错了地方。
+/// 反正是本机回环，省这点带宽没有意义。
+fn no_cache(ct: &'static str, s: &'static str) -> impl IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, ct),
+            (axum::http::header::CACHE_CONTROL, "no-cache, must-revalidate"),
+        ],
+        s,
+    )
+}
+
 fn js(s: &'static str) -> impl IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8")], s)
+    no_cache("text/javascript; charset=utf-8", s)
 }
 
 fn css(s: &'static str) -> impl IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")], s)
+    no_cache("text/css; charset=utf-8", s)
 }
 
 /// 起服务。返回实际监听的地址（端口写 0 时由系统分配）。
