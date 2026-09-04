@@ -65,6 +65,95 @@ pub struct Session {
     pub created_ms: u64,
 }
 
+/// 图上一个节点的身份。**形如 `n41_0`：铸出它的那条事件的 seq + 批内序号。**
+///
+/// # 为什么由 Core 铸，而且形状里带 seq
+///
+/// 模型不许自己起 id —— 它会撞号，也会把删掉的东西复活。铸 id 和分配 [`Seq`]
+/// 是同一类事：只有 Core 这个单线程信箱能做。形状里带 seq 白拿两件事：
+///
+/// 1. **id 自带溯源** —— 看见 `n41_0` 就知道它是第 41 号事件写下的，点它能跳过去。
+/// 2. **删掉的 id 永不重铸** —— seq 单调，所以「模型换个 id 把用户删掉的步骤
+///    原样加回来」这条路从形状上就断了。
+///
+/// # 别名
+///
+/// 模型要引用同一批 op 里刚建的节点时，用 `$name` 形式的别名（[`NodeId::is_alias`]）。
+/// **别名只在一批内有效**，Core 在 `commit` 里把它替换成真 id，
+/// 落进时间线的只有真 id —— 不变量 I11 验这一条。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(pub String);
+
+impl NodeId {
+    /// `$name` = 还没解析的批内别名。
+    pub fn is_alias(&self) -> bool {
+        self.0.starts_with('$')
+    }
+    /// 铸一个真 id。
+    pub fn mint(seq: Seq, i: usize) -> NodeId {
+        NodeId(format!("n{}_{}", seq.0, i))
+    }
+}
+
+impl From<&str> for NodeId {
+    fn from(s: &str) -> Self {
+        NodeId(s.to_string())
+    }
+}
+
+impl From<String> for NodeId {
+    fn from(s: String) -> Self {
+        NodeId(s)
+    }
+}
+
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// 图上一条边的身份。形如 `e41_1`，规则同 [`NodeId`]。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EdgeId(pub String);
+
+impl EdgeId {
+    pub fn is_alias(&self) -> bool {
+        self.0.starts_with('$')
+    }
+    pub fn mint(seq: Seq, i: usize) -> EdgeId {
+        EdgeId(format!("e{}_{}", seq.0, i))
+    }
+}
+
+impl From<&str> for EdgeId {
+    fn from(s: &str) -> Self {
+        EdgeId(s.to_string())
+    }
+}
+
+impl From<String> for EdgeId {
+    fn from(s: String) -> Self {
+        EdgeId(s)
+    }
+}
+
+impl std::fmt::Display for EdgeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// 删除的目标：节点或边。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElemId {
+    Node(NodeId),
+    Edge(EdgeId),
+}
+
 /// 主时间线上的位置。**由 Core 单调分配，在一条会话链内单调。**
 ///
 /// # 为什么是 Core 分配而不是数据库 AUTOINCREMENT

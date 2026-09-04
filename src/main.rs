@@ -18,14 +18,14 @@ use premortem::context::ContextLimit;
 use premortem::core::{CoreDeps, CoreSummary, start};
 use premortem::event::{Body, Event, assemble, crashed_turns, open_questions, unclosed_calls};
 use premortem::handle::CoreHandle;
-use premortem::ids::{Seq, SessionId, TurnId};
+use premortem::ids::{NodeId, Seq, SessionId, TurnId};
 use premortem::memory::Memory;
 use premortem::mock::{EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, default_judge};
 use premortem::model::{JudgeOut, Message, Mode, Models, MsgRole, Role, StreamEvent, Usage};
 use premortem::msg::{SendMode, UiEvent};
 use premortem::persist::{restore, spawn_writer};
 use premortem::scene::Playbook;
-use premortem::state::{Op, Origin, Phase, Source, Workspace};
+use premortem::state::{FlowView, Lang, Op, Origin, Phase, Source, Workspace};
 use premortem::store::{FaultStore, MemStore, SqliteStore, Store};
 use premortem::tools::{Registry, ToolConfig};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,7 +113,7 @@ mod inv {
         let all = paths.iter().all(|p| {
             ws.fields
                 .get(&premortem::state::Path::new(*p))
-                .map(|f| f.origin == Origin::User)
+                .map(|f| f.prov.origin == Origin::User)
                 .unwrap_or(false)
         });
         ok(all, "I7 恢复后 [用户设定] 标记不丢");
@@ -138,12 +138,67 @@ mod inv {
     }
 
     /// 全套。
+    /// I9 图完整：无悬边、parent 链无环且不过深。
+    ///
+    /// 悬边是删节点之后最容易留下的残渣，而它在 UI 上根本看不见 ——
+    /// mermaid 会替你把端点凭空画出来，图看着好好的，数据已经烂了。
+    pub fn i9_graph_sound(ws: &Workspace) {
+        let g = &ws.flow;
+        let dangling = g
+            .edges
+            .values()
+            .filter(|e| !g.nodes.contains_key(&e.from) || !g.nodes.contains_key(&e.to))
+            .count();
+        ok(dangling == 0, "I9 图上没有悬边");
+        let bad = g.nodes.keys().filter(|id| g.depth_of(id).is_none()).count();
+        ok(bad == 0, "I9 parent 链无环且深度合法");
+    }
+
+    /// I10 渲染是纯函数，而且**不吞节点**。
+    ///
+    /// 后半条是重点：渲染少画一个节点是完全静默的 —— 用户看到的图缺一块，
+    /// 模型看到的图也缺同一块，两边一致所以谁都发现不了。
+    pub fn i10_render_faithful(ws: &Workspace) {
+        let style = premortem::memory::GraphStyle::default();
+        let a = premortem::render::mermaid(&ws.flow, &style);
+        let b = premortem::render::mermaid(&ws.flow, &style);
+        ok(a == b, "I10 同一张图渲染两次逐字节相同");
+        let missing = ws.flow.nodes.keys().filter(|k| !a.contains(k.0.as_str())).count();
+        ok(missing == 0, "I10 每个节点都出现在渲染结果里（渲染不吞节点）");
+    }
+
+    /// I11 时间线上不存在未解析的别名。
+    ///
+    /// 漏一处的症状不是当场报错，而是重放到那里时多出一个永远指不到的引用。
+    pub fn i11_no_alias(events: &[Event]) {
+        let mut bad = 0;
+        for e in events {
+            let ops: &[Op] = match &e.body {
+                Body::Edited { ops } => ops,
+                Body::Inferred { ops, .. } => ops,
+                _ => continue,
+            };
+            for op in ops {
+                let mut op = op.clone();
+                if op.node_refs_mut().iter().any(|r| r.is_alias())
+                    || op.edge_refs_mut().iter().any(|r| r.is_alias())
+                {
+                    bad += 1;
+                }
+            }
+        }
+        ok(bad == 0, "I11 时间线上没有未解析的别名");
+    }
+
     pub fn all(events: &[Event], live_ws: &Workspace, cost: &premortem::cost::CostLedger) {
         i1_replay_matches(events, live_ws);
         i3_calls_paired(events);
         i4_seq_dense(events);
         i5_cost_matches(events, cost);
         i8_folded_kept(events);
+        i9_graph_sound(live_ws);
+        i10_render_faithful(live_ws);
+        i11_no_alias(events);
     }
 }
 
@@ -482,10 +537,14 @@ async fn s07_arbitration() {
 
     let tl = r.timeline().await;
     let inferred: Vec<&Event> = tl.iter().filter(|e| e.body.tag() == "inferred").collect();
+    // 这一场只有图外 op，键就是 path 本身，所以拿一张空图查就够了。
+    let g = premortem::state::Graph::default();
     let recorded_paths: Vec<String> = inferred
         .iter()
         .filter_map(|e| match &e.body {
-            Body::Inferred { ops, .. } => Some(ops.iter().map(|o| o.path().to_string()).collect::<Vec<_>>()),
+            Body::Inferred { ops, .. } => {
+                Some(ops.iter().map(|o| o.key(&g).to_string()).collect::<Vec<_>>())
+            }
             _ => None,
         })
         .flatten()
@@ -509,7 +568,7 @@ async fn s07_arbitration() {
     let s = r.finish().await;
     let claim = s.ws.fields.get(&premortem::state::Path::new("spec.claim")).unwrap();
     ok(claim.value == serde_json::json!("用户写的"), "最终值是用户的");
-    ok(claim.origin == Origin::User, "origin 是 User");
+    ok(claim.prov.origin == Origin::User, "origin 是 User");
     inv::all(&s.events, &s.ws, &s.cost);
     inv::i7_origin_kept(&s.events, &["spec.claim"]);
 }
@@ -667,9 +726,9 @@ async fn s12_graceful_restart() {
         "推断图恢复了",
     );
     let claim = snap.ws.fields.get(&premortem::state::Path::new("spec.claim")).unwrap();
-    ok(claim.origin == Origin::User, "★ 用户填的字段恢复后仍是 [用户设定]");
+    ok(claim.prov.origin == Origin::User, "★ 用户填的字段恢复后仍是 [用户设定]");
     ok(
-        claim.source == Some(Source::User),
+        claim.prov.source == Some(Source::User),
         "★ 来源也没丢",
     );
     r.handle.session_send("接着说", SendMode::Queue).await;
@@ -1157,6 +1216,223 @@ async fn s26_answer_sees_injection_and_drop() {
     inv::all(&s.events, &s.ws, &s.cost);
 }
 
+async fn s27_model_builds_graph() {
+    head("S27", "★ 模型建图：别名铸成真 id，图与明细都进 prompt");
+    let m = MockModel::new()
+        .on_judge(judge_with(
+            "none",
+            vec![
+                Op::node("$enc", "module", "对比编码器"),
+                Op::node("$loss", "loss", "InfoNCE"),
+                Op::edge("$e1", "$enc", "$loss"),
+                Op::anchored("risk.negatives", "负样本数可能不够", "$loss"),
+            ],
+        ))
+        .on_answer(chunks(&["好"]));
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("我想做对比学习", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    let g = &snap.ws.flow;
+    ok(g.nodes.len() == 2 && g.edges.len() == 1, "两个节点一条边落地了");
+    ok(g.nodes.keys().all(|k| !k.0.starts_with('$')), "★ 别名全部铸成了真 id");
+    ok(
+        g.nodes.keys().all(|k| k.0.starts_with('n') && k.0.contains('_')),
+        "id 形如 n<seq>_<i>，自带溯源",
+    );
+    let e = g.edges.values().next().unwrap();
+    ok(
+        g.nodes.contains_key(&e.from) && g.nodes.contains_key(&e.to),
+        "★ 边的两端指向真节点（批内别名也解析了）",
+    );
+    let f = snap.ws.fields.values().next().unwrap();
+    ok(
+        f.anchor.as_ref().is_some_and(|a| g.nodes.contains_key(a)),
+        "★ 图外推断挂到了真节点上",
+    );
+
+    let ap = r.model.answer_prompt(0);
+    ok(ap.contains("flowchart"), "回答段 prompt 里有 mermaid");
+    ok(ap.contains("对比编码器") && ap.contains("InfoNCE"), "两个节点的标签都在");
+    ok(
+        ap.contains("{{\"InfoNCE\"}}"),
+        "★ loss 用了 loss 的形状（词表来自持久层，不是写死的）",
+    );
+    ok(ap.contains("guess"), "★ 没标来源的节点画成虚线 —— 盲区要看得见");
+    ok(ap.contains("负样本数可能不够"), "★ 挂在节点上的图外推断跟着节点走");
+    let s = r.finish().await;
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s28_edge_relink_blocked() {
+    head("S28", "★ 漏洞 1：用户断开一条线，模型换个 edge id 也加不回来");
+    let m = MockModel::new()
+        .judge_delay(Duration::from_millis(80))
+        .on_judge(judge_with(
+            "none",
+            vec![
+                Op::node("$a", "data", "原始语料"),
+                Op::node("$b", "module", "分词器"),
+                Op::edge("$e", "$a", "$b"),
+            ],
+        ))
+        .on_answer(chunks(&["建好了"]));
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("建图", SendMode::Queue).await;
+    ok(r.quiet(1).await, "第一轮建出图");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    let ids: Vec<NodeId> = snap.ws.flow.nodes.keys().cloned().collect();
+    let eid = snap.ws.flow.edges.keys().next().cloned().unwrap();
+    ok(ids.len() == 2 && snap.ws.flow.edges.len() == 1, "两个节点一条边");
+
+    // 第二轮：模型用一个**全新的 edge id** 把同样的连接加回来
+    r.model.push_judge(judge_with(
+        "none",
+        vec![Op::edge("$again", ids[0].clone(), ids[1].clone())],
+    ));
+    r.model.push_answer(chunks(&["继续"]));
+    r.handle.session_send("继续", SendMode::Queue).await;
+    r.wait(|e| matches!(e, UiEvent::TurnStarted { turn, .. } if turn.0 == 2), 1000)
+        .await;
+    // 用户在这一轮里把那条线断开
+    r.handle.session_edit(vec![Op::drop_edge(eid)]).await;
+    ok(r.quiet(2).await, "第二轮跑完");
+
+    let s = r.finish().await;
+    ok(s.ws.flow.edges.is_empty(), "★ 断了就是断了 —— 换 id 绕不过有序端点对这个键");
+    ok(s.ws.flow.nodes.len() == 2, "两个节点没被牵连");
+    ok(s.metrics.ops_dropped >= 1, "被丢的那条记进了 dropped（模型下一轮看得到）");
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s29_node_resurrect_blocked() {
+    head("S29", "★ 漏洞 2：用户删掉一个节点，模型换 id 新建同名的也复活不了");
+    let m = MockModel::new()
+        .judge_delay(Duration::from_millis(80))
+        .on_judge(judge_with(
+            "none",
+            vec![
+                Op::node("$a", "data", "原始语料"),
+                Op::node("$b", "module", "分词器"),
+            ],
+        ))
+        .on_answer(chunks(&["建好了"]));
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("建图", SendMode::Queue).await;
+    ok(r.quiet(1).await, "第一轮建出图");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    let victim = snap
+        .ws
+        .flow
+        .nodes
+        .values()
+        .find(|n| n.label == "分词器")
+        .map(|n| n.id.clone())
+        .unwrap();
+
+    // 第二轮：模型新建一个 label 一模一样的节点
+    r.model
+        .push_judge(judge_with("none", vec![Op::node("$dup", "module", "分词器")]));
+    r.model.push_answer(chunks(&["继续"]));
+    r.handle.session_send("继续", SendMode::Queue).await;
+    r.wait(|e| matches!(e, UiEvent::TurnStarted { turn, .. } if turn.0 == 2), 1000)
+        .await;
+    r.handle.session_edit(vec![Op::drop_node(victim)]).await;
+    ok(r.quiet(2).await, "第二轮跑完");
+
+    let s = r.finish().await;
+    ok(
+        !s.ws.flow.nodes.values().any(|n| n.label == "分词器"),
+        "★ 删掉的节点没被同名新建复活（撞的是归一化标签键）",
+    );
+    ok(s.ws.flow.nodes.len() == 1, "只剩另一个节点");
+    ok(s.metrics.ops_dropped >= 1, "记进了 dropped");
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s30_phantom_ids_rejected() {
+    head("S30", "★ 幽灵 id 拦在门外；删节点连带收掉它的边");
+    let m = MockModel::new()
+        .on_judge(judge_with(
+            "none",
+            vec![
+                Op::node("$a", "data", "训练集"),
+                Op::node("$b", "module", "主干"),
+                Op::edge("$ok", "$a", "$b"),
+                // 端点是模型记错的 id
+                Op::edge("$bad", "n99_9", "n88_8"),
+                // 新元素直接用真 id：不拦的话会造出一个没人要的孤儿节点
+                Op::node("n77_7", "module", "凭空冒出来的"),
+                // 删一个不存在的东西
+                Op::drop_node("n66_6"),
+            ],
+        ))
+        .on_answer(chunks(&["好"]));
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("建图", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    ok(snap.ws.flow.nodes.len() == 2, "★ 只有走别名建的两个落地了");
+    ok(snap.ws.flow.edges.len() == 1, "★ 端点不存在的边没落地");
+    ok(
+        !snap.ws.flow.nodes.values().any(|n| n.label == "凭空冒出来的"),
+        "★ 幽灵 id 没造出孤儿节点",
+    );
+
+    // 用户删掉一端 ⇒ 那条边跟着消失，不能留成悬边
+    let a = snap.ws.flow.nodes.values().find(|n| n.label == "训练集").unwrap().id.clone();
+    r.handle.session_edit(vec![Op::drop_node(a)]).await;
+    let after = r.handle.session_snapshot().await.unwrap();
+    ok(after.ws.flow.edges.is_empty(), "★ 删掉一端，边跟着收掉（I9 不靠自觉）");
+
+    let s = r.finish().await;
+    ok(s.metrics.ops_dropped >= 3, "三条坏 op 都记进了 dropped");
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s31_two_ways_to_draw() {
+    head("S31", "★ 两种画法并存：程序画的图与模型自己画的图");
+    let sketch = "graph LR\n  X[\"自己画的编码器\"] --> Y[\"自己画的投影头\"]";
+    let m = MockModel::new()
+        .on_judge(judge_with("none", vec![Op::node("$a", "module", "程序画的编码器")]))
+        .on_answer(chunks(&["先结构化"]));
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("开始", SendMode::Queue).await;
+    ok(r.quiet(1).await, "第一轮");
+    let ap0 = r.model.answer_prompt(0);
+    ok(
+        ap0.contains("flowchart") && ap0.contains("程序画的编码器"),
+        "第一轮 prompt 里是程序渲染的那份",
+    );
+
+    // 第二轮：模型自己画一张，并且切过去
+    r.model.push_judge(judge_with(
+        "none",
+        vec![Op::sketch(Lang::Mermaid, sketch), Op::view(FlowView::Sketch)],
+    ));
+    r.model.push_answer(chunks(&["换成我画的"]));
+    r.handle.session_send("你自己画", SendMode::Queue).await;
+    ok(r.quiet(2).await, "第二轮");
+
+    let ap1 = r.model.answer_prompt(1);
+    ok(ap1.contains("自己画的编码器"), "★ 切到 Sketch 后 prompt 里是模型自己写的源码");
+    ok(!ap1.contains("程序画的编码器"), "结构化那份这一轮不进 prompt");
+    ok(ap1.contains("不能点选"), "★ prompt 里说清了这张图放弃了结构化编辑");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    ok(!snap.ws.flow.nodes.is_empty(), "★ 结构化那份没被销毁，两种画法同时存在");
+    r.handle.session_edit(vec![Op::view(FlowView::Built)]).await;
+    let back = r.handle.session_snapshot().await.unwrap();
+    ok(back.ws.flow.view == FlowView::Built, "用户随时切得回来");
+
+    let s = r.finish().await;
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     println!("Premortem 链路测试 —— 主时间线版");
@@ -1188,11 +1464,16 @@ async fn main() {
     s24_message_assembly().await;
     s25_answer_sees_judge().await;
     s26_answer_sees_injection_and_drop().await;
+    s27_model_builds_graph().await;
+    s28_edge_relink_blocked().await;
+    s29_node_resurrect_blocked().await;
+    s30_phantom_ids_rejected().await;
+    s31_two_ways_to_draw().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);
     println!("\n{}", "═".repeat(64));
-    println!("26 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
+    println!("31 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
     if f > 0 {
         std::process::exit(1);
     }

@@ -17,7 +17,7 @@
 //! ① system 规则        ┐
 //! ② 持久层             ├ 跨轮不变 ⇒ 命中 prompt cache
 //! ③ 场景目录           ┘
-//! ④ 推断图 + 待落定     每轮变
+//! ④ 流程图 + 图外推断 + 待落定  每轮变
 //! ⑤ 完整对话           每轮追加
 //! ```
 //!
@@ -31,6 +31,10 @@ use crate::memory::Memory;
 use crate::model::Message;
 use crate::scene::Scene;
 use crate::state::Workspace;
+
+/// 推断段的小标题。有图时说「图外」，没图时说「当前」。
+const HEAD_ALL: &str = "== 当前推断 ==\n";
+const HEAD_OFF: &str = "== 图外推断 ==\n";
 
 /// 3 字符 ≈ 1 token，中英混排的折中。宁可高估。
 pub fn toks(s: &str) -> u32 {
@@ -67,7 +71,16 @@ impl Context {
         system.push_str(mode_note.trim());
         system.push_str(&format!("\n\n当前阶段：{}。", ws.phase.label()));
 
-        let mut inference = String::from("== 当前推断 ==\n");
+        // 图在最前：拓扑是这段 metadata 里信息密度最高的东西，而且后面的图外推断
+        // 要靠它才知道自己挂在哪儿。两种画法（程序画 / 模型画）在这里都收敛成源码。
+        let flow = crate::render::flow_block(ws, &memory.prompts.graph, turn_start);
+        let mut inference = String::new();
+        if !flow.is_empty() {
+            inference.push_str(&flow);
+            inference.push('\n');
+        }
+        // 有图时说清楚这一段是「图外」的，免得模型以为图里少了东西。
+        inference.push_str(if flow.is_empty() { HEAD_ALL } else { HEAD_OFF });
         let lines = ws.prompt_lines(turn_start);
         if lines.is_empty() {
             inference.push_str("（还没有任何推断）\n");

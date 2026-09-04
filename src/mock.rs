@@ -65,6 +65,18 @@ impl MockModel {
         self
     }
 
+    /// 跑起来之后再往脚本里追加。
+    ///
+    /// 图的场景需要它：第二轮的 op 要引用第一轮铸出来的真 id，而那个 id
+    /// 在建脚本的时刻还不存在。把它写死等于把 `n<seq>_<i>` 的铸法钉进测试。
+    pub fn push_judge(&self, out: JudgeOut) {
+        self.judge_script.lock().unwrap().push_back(Ok(out));
+    }
+
+    pub fn push_answer(&self, events: Vec<StreamEvent>) {
+        self.answer_script.lock().unwrap().push_back(events);
+    }
+
     pub fn judge_delay(mut self, d: Duration) -> Self {
         self.judge_delay = d;
         self

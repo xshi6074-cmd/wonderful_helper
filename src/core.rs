@@ -45,7 +45,7 @@ use crate::msg::{
 };
 use crate::persist::{Restored, seal};
 use crate::scene::SceneId;
-use crate::state::{Path, Workspace};
+use crate::state::{self, Op, Path, Workspace};
 use crate::tools::{Registry, ToolConfig};
 use crate::turn::{TurnCtx, run_turn};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -273,6 +273,24 @@ pub struct Core {
     metrics: CoreMetrics,
 }
 
+/// 这条事件体里还有没有未解析的别名。**不变量 I11 的运行时兜底。**
+///
+/// 别名（`$name`）只在一批 op 内有效，Core 在提交前把它换成真 id。漏一处的话
+/// 症状不是当场报错，而是重放到那里时多出一个永远指不到的引用 —— 那种 bug
+/// 事后极难定位，所以在源头 debug_assert 掉。
+fn has_alias(body: &Body) -> bool {
+    let ops: &[Op] = match body {
+        Body::Edited { ops } => ops,
+        Body::Inferred { ops, .. } => ops,
+        _ => return false,
+    };
+    ops.iter().any(|op| {
+        let mut op = op.clone();
+        op.node_refs_mut().iter().any(|r| r.is_alias())
+            || op.edge_refs_mut().iter().any(|r| r.is_alias())
+    })
+}
+
 /// 退出时等 turn 收尾的宽限期。到点还没收完就丢下它走 —— 卡住的 turn
 /// 不能变成「应用退不出去」。
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
@@ -480,12 +498,28 @@ impl Core {
                     let _ = reply.send(None);
                     return true;
                 }
+                // 别名解析必须在占键与提交之前：仲裁比的是真 id，
+                // 而落进时间线的也只能是真 id（不变量 I11）。
+                let (ops, bad) = state::resolve(ops, &self.ws.flow, self.peek_seq());
+                if !bad.is_empty() {
+                    // UI 是照着当前图生成这些 op 的，理论上引用不到目标只会是 bug。
+                    eprintln!("[core] 用户编辑有 {} 条引用不到目标，已丢弃：{bad:?}", bad.len());
+                }
+                if ops.is_empty() {
+                    let _ = reply.send(None);
+                    return true;
+                }
                 // 只有 turn 正在跑时才进仲裁集：仲裁的范围就是一个 turn。
                 // 空闲时的编辑不需要仲裁 —— 下一轮模型看到的本来就是用户的值，
                 // 约束由 prompt 里的 `[用户设定]` 标记承担。
+                //
+                // **必须在 apply 之前算键**：删除类 op 的键（端点对、归一化标签）
+                // 要从当前图里查，图一变就查不到了。
                 if !matches!(self.turn, TurnPhase::Idle) {
                     for op in &ops {
-                        self.turn_edits.insert(op.path().clone());
+                        for k in op.keys(&self.ws.flow) {
+                            self.turn_edits.insert(k);
+                        }
                     }
                 }
                 self.metrics.ops_user += ops.len() as u64;
@@ -673,6 +707,15 @@ impl Core {
     /// 把 draft 变成事件：分配 seq → 物化 → 更新派生态 → 推 UI → 丢给 writer。
     ///
     /// **全项目只有这一个地方能推进 `seq`**，也只有这一个地方能改 `ws`。
+    /// 下一条事件会落到的位置。
+    ///
+    /// 图 id 从它铸出来，而铸 id 必须发生在 `commit` **之前**（仲裁比的是真 id）。
+    /// 带 ops 的 draft（`Edited` / `Inferred`）在两个调用点都是**单独提交**的，
+    /// 所以它拿到的一定是这个值 —— `commit` 里的 `debug_assert` 兜底验这一条。
+    fn peek_seq(&self) -> Seq {
+        Seq(self.seq.0 + 1)
+    }
+
     fn commit(
         &mut self,
         drafts: Vec<Draft>,
@@ -686,6 +729,10 @@ impl Core {
         }
         let mut evs = Vec::with_capacity(drafts.len());
         for d in drafts {
+            debug_assert!(
+                !has_alias(&d.body),
+                "I11：未解析的别名不许进时间线 —— 它在重放时会变成永远指不到的引用"
+            );
             let e = Event {
                 session: self.session.clone(),
                 seq: self.seq.bump(),
@@ -831,11 +878,18 @@ impl Core {
                 // 不是策略（不是「用户的字段不许模型改」），是「用户在这一轮里
                 // 刚动过这个位置，模型基于旧值算出来的结果作废」。范围是一个 turn，
                 // 跨轮的保护是 prompt 里的 `[用户设定]` 标记，不是硬拒绝。
+                //
+                // 一条 op 可能占**多个**键 —— 那正是堵漏洞的地方：边除了自己的 id
+                // 还占一条有序端点对（模型换个新 id 把用户断开的连接加回来，撞的是
+                // 这一条）；删节点除了 id 还占一条归一化标签键（模型换个 id 新建同名
+                // 节点复活它，撞的是这一条）。撞上任意一个就整条丢。
+                let (ops, mut dropped) =
+                    state::resolve(ops, &self.ws.flow, self.peek_seq());
                 let mut kept = Vec::new();
-                let mut dropped = Vec::new();
                 for op in ops {
-                    if self.turn_edits.contains(op.path()) {
-                        dropped.push(op.path().clone());
+                    let keys = op.keys(&self.ws.flow);
+                    if keys.iter().any(|k| self.turn_edits.contains(k)) {
+                        dropped.extend(keys.into_iter().next());
                     } else {
                         kept.push(op);
                     }

@@ -43,6 +43,7 @@ pub mod mock;
 pub mod model;
 pub mod msg;
 pub mod persist;
+pub mod render;
 pub mod scene;
 pub mod state;
 pub mod store;

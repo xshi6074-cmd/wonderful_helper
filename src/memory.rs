@@ -40,6 +40,7 @@
 
 use crate::scene::Playbook;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 
 const PROJECT: &str = "project.md";
@@ -95,6 +96,84 @@ pub struct Prompts {
     pub mode_explore: String,
     /// 行动 mode 的一句话。
     pub mode_go: String,
+    /// 流程图的形状与配色词表。
+    #[serde(default)]
+    pub graph: GraphStyle,
+}
+
+/// 图的词表：kind → 形状 / 配色 / 连接符。
+///
+/// # 这是「不能用 mermaid 模板」的落点
+///
+/// 词表放在持久层而不是 Rust 的 enum 里，所以**用户随时能加一种节点类型、
+/// 改一个形状，不用重编译**；模型也能现造 kind，未知的落到默认形状，不报错。
+/// 灵活性放在词表开放，不放在让模型自由写文本 —— 后者会让节点失去稳定 id。
+///
+/// # 默认这套是给 ML 架构图的
+///
+/// 主场景是 ML，最有信息量的是架构图：数据 → 模块 → 算子 → 损失 → 指标 → 消融臂。
+/// 不是实验步骤流水，也不是决策树 —— 决策树本来就难画好，`gate` 留了个形状但不主推。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphStyle {
+    /// kind → mermaid 形状模板，`%s` 是标签的位置。
+    #[serde(default)]
+    pub shape: BTreeMap<String, String>,
+    /// kind → `classDef` 正文。没有条目就不生成 classDef。
+    #[serde(default)]
+    pub class: BTreeMap<String, String>,
+    /// 边 kind → **实线**连接符。虚线不查这里 —— 那由 `prov` 决定，见 `crate::render`。
+    #[serde(default)]
+    pub edge: BTreeMap<String, String>,
+}
+
+/// 内置形状。用户的 toml 只覆盖它列到的那些 kind，剩下的仍走这里 ——
+/// 否则用户加一个 `[graph.shape]` 小节就会把其余全部清空。
+const BUILTIN_SHAPE: &[(&str, &str)] = &[
+    ("data", "[(%s)]"),      // 数据集 / 张量存储
+    ("module", "[%s]"),      // 模块
+    ("op", "([%s])"),        // 算子 / 变换
+    ("loss", "{{%s}}"),      // 损失
+    ("metric", "[/%s/]"),    // 指标
+    ("ablation", "[[%s]]"),  // 消融臂
+    ("baseline", "[[%s]]"),  // 对照
+    ("gate", "{%s}"),        // 判定（不主推）
+    ("note", "(%s)"),
+];
+
+const BUILTIN_EDGE: &[(&str, &str)] = &[
+    ("flow", "-->"),        // 张量 / 数据流
+    ("feeds", "-->"),
+    ("supervises", "==>"),  // 监督信号，加粗
+    ("compares", "---"),    // 对比关系，无向
+    ("depends", "-->"),
+];
+
+impl Default for GraphStyle {
+    fn default() -> Self {
+        GraphStyle {
+            shape: BUILTIN_SHAPE.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            class: BTreeMap::new(),
+            edge: BUILTIN_EDGE.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        }
+    }
+}
+
+impl GraphStyle {
+    /// 查形状：用户词表 → 内置 → 方框。**任何 kind 都渲染得出来，不会失败。**
+    pub fn shape_for(&self, kind: &str) -> &str {
+        if let Some(s) = self.shape.get(kind) {
+            return s;
+        }
+        BUILTIN_SHAPE.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v).unwrap_or("[%s]")
+    }
+
+    /// 查连接符：同上，兜底是普通箭头。
+    pub fn edge_for(&self, kind: &str) -> &str {
+        if let Some(s) = self.edge.get(kind) {
+            return s;
+        }
+        BUILTIN_EDGE.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v).unwrap_or("-->")
+    }
 }
 
 impl Default for Prompts {
@@ -119,6 +198,7 @@ impl Default for Prompts {
             mode_go: "当前是行动 mode：用户想往前推进，回答直接一些，不要倒回去讲基础。\
                       抽取资料时关注方法、超参、实现细节。"
                 .into(),
+            graph: GraphStyle::default(),
         }
     }
 }
