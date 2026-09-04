@@ -7,6 +7,7 @@
 //! `estimated_*` 单独计数是因为被打断的轮次拿不到服务端 usage，只能估算。
 //! 把估算量和实测量混在一起会让账目看起来比实际精确，评审问一句就露馅。
 
+use crate::event::{Body, Event};
 use crate::model::{Role, Usage};
 use std::collections::BTreeMap;
 
@@ -19,6 +20,20 @@ pub struct CostLedger {
 }
 
 impl CostLedger {
+    /// 从时间线重建账本。
+    ///
+    /// 上一版账本只活在进程内，重启归零、跨会话总花费拿不到。现在成本是
+    /// 时间线上的事件，恢复与回滚都只是把它重放一遍 —— 不需要单独持久化账本。
+    pub fn from_events(events: &[Event]) -> CostLedger {
+        let mut l = CostLedger::default();
+        for e in events {
+            if let Body::Cost { role, usage, .. } = &e.body {
+                l.add(*role, *usage);
+            }
+        }
+        l
+    }
+
     pub fn add(&mut self, role: Role, u: Usage) {
         let slot = self.by_role.entry(role).or_default();
         slot.prompt += u.prompt;

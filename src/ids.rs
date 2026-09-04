@@ -1,46 +1,113 @@
-//! 标识符与一个极小的 LRU 集合。
+//! 标识符。
 //!
-//! 这些 newtype 存在的唯一理由是**防止串号**：`TurnId` 和 `TaskId` 都是 u64，
-//! 混用不会报错但会导致「陈旧事件被当成当前事件处理」——那是这套设计里最常见的 bug。
+//! 这些 newtype 存在的唯一理由是**防止串号**：全是 u64，混用不会报错但会导致
+//! 「陈旧事件被当成当前事件处理」——那是这套设计里最常见的 bug。
+//!
+//! # 只剩一个序号了
+//!
+//! 上一版有 `Version`：既是 CAS 令牌、又是崩溃恢复游标、又是 UI 版本显示，
+//! 三个用途耦合在一个计数上，而且有几处 bump 了却不落盘，盘上版本长期落后于内存。
+//!
+//! 现在只有 [`Seq`]：**主时间线上的第几条事件**。它不是「版本」，是「位置」。
+//! 恢复从某个位置开始重放、UI 引用某个位置、回滚到某个位置，都是同一件事的不同说法。
+//! 冲突裁决不再用它 —— 那个降级成了 turn 内的一个 path 集合，见 `core::Core::arbitrate`。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
-/// Core 状态的单调版本号。**只有 Core 能递增它**。
+/// 一个会话。**回滚就是从某一轮分叉出一个新会话**，所以它必须是一等公民。
 ///
-/// 用途有二：① 模型提交 patch 时带上取快照时的 `base_version`，
-/// Core 据此判断这期间用户有没有动过同一路径（见 `core::Core::apply`）；
-/// ② 崩溃恢复时用来决定 history 从哪条开始重放。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Version(pub u64);
+/// # 分叉语义
+///
+/// 从 t7 回滚 ⇒ 新建一个 session，`parent` 指向当前会话、`forked_at` = t7 起点的前一位。
+/// **原会话一条事件都不动**：那条路走过就走过了，它是「试过没成立的方法」的原始记录，
+/// 而这恰恰是这个项目里最值钱的一类数据（见 `memory/project.md` 的「试过但没成立的」一栏）。
+///
+/// 读一个会话 = 沿 `parent` 链往上走，每段取 `seq <= 该段的 forked_at`，
+/// 从根往叶拼起来。因为每段的 seq 区间首尾相接，拼出来天然按 seq 升序。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(pub String);
 
-impl Version {
-    pub const ZERO: Version = Version(0);
-    pub fn bump(&mut self) -> Version {
+impl SessionId {
+    pub fn new() -> SessionId {
+        SessionId(uuid::Uuid::new_v4().simple().to_string()[..12].to_string())
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        SessionId::new()
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        SessionId(s.to_string())
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// 会话元信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub id: SessionId,
+    /// 从哪个会话分叉出来的。`None` = 根会话。
+    pub parent: Option<SessionId>,
+    /// 分叉点：父会话上 `seq <= forked_at` 的事件属于这条链。
+    pub forked_at: Seq,
+    /// 给用户看的名字，比如「t7 · 换成先做小规模复现」。
+    pub title: String,
+    pub created_ms: u64,
+}
+
+/// 主时间线上的位置。**由 Core 单调分配，在一条会话链内单调。**
+///
+/// # 为什么是 Core 分配而不是数据库 AUTOINCREMENT
+///
+/// Core 是唯一写权、单线程 mailbox，事件的先后本来就由它决定。让数据库分配意味着
+/// Core 在发出事件时还不知道自己发的是第几条 —— 那它就没法同步更新物化视图、
+/// 没法同步推 UI，只能等一次磁盘往返。而 Core 不能 await 磁盘。
+///
+/// 代价是启动时要先把本链的事件读回来、从最后一条接着往下，仅此而已。
+///
+/// **在链内单调，跨链不比较。** 两个从同一点分叉出去的会话，各自的下一条都是
+/// `forked_at + 1` —— 它们是同一段历史的两种续法，本来就不该有先后。
+/// 所以事件的主键是 `(session, seq)`，不是 `seq`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Seq(pub u64);
+
+impl Seq {
+    pub const ZERO: Seq = Seq(0);
+    /// 返回**新**值。Core 里的用法是 `let s = self.next_seq();`。
+    pub fn bump(&mut self) -> Seq {
         self.0 += 1;
         *self
     }
-}
-
-impl std::fmt::Display for Version {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "v{}", self.0)
+    pub fn is_zero(&self) -> bool {
+        self.0 == 0
     }
 }
 
-/// 一轮对话的代际标识。
-///
-/// **每一个从 turn task 发回 Core 的消息都必须带上它**；对不上就丢弃。
-/// 被取消的 subagent 仍然会跑完并把事件发回来，这是唯一的防线。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TurnId(pub u64);
-
-impl TurnId {
-    /// 用户编辑不属于任何一轮。用这个哨兵值而不是 `Option<TurnId>`，
-    /// 是为了让 `Patch` 保持一个平坦的结构；Core 在 User 分支里根本不看 turn。
-    pub const NONE: TurnId = TurnId(u64::MAX);
+impl std::fmt::Display for Seq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.0)
+    }
 }
+
+/// 一轮对话。**turn 只有两个职责**：代际判断（丢弃陈旧消息）与回滚粒度。
+///
+/// 它不再是状态的事务边界 —— 模型的推断当场生效，不攒到轮末（见 `state` 头部）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TurnId(pub u64);
 
 impl std::fmt::Display for TurnId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,14 +115,43 @@ impl std::fmt::Display for TurnId {
     }
 }
 
-/// 单个工具/子任务的标识，用于 R6 分账到具体调用。
+/// 单次工具/子任务调用。R6 把 token 分账到这一级。
+///
+/// 与模型给的 `call_id` 不是一回事：`call_id` 是模型的字符串、必须原样回填给 API；
+/// `TaskId` 是本地序号，用来在账本和 UI 任务列表里指认同一次调用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TaskId(pub u64);
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "k{}", self.0)
+    }
+}
+
+/// 一次 `ask_user` 提问。
+///
+/// **就是那条提问事件自己的 seq**，不另开 id 空间：提问本来就是主时间线上的一条，
+/// 用户的回答事件用 `corr` 指回来。多一套 id 就多一处要维护的对应关系。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QuestionId(pub Seq);
+
+impl std::fmt::Display for QuestionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Q{}", self.0.0)
+    }
+}
 
 /// 定容去重集合：`insert` 返回 true 表示这是新元素。
 ///
-/// 用于 `client_id` 去重——用户手抖点两次发送，UI 会发两条 `UserInput`，
-/// 两条的 `client_id` 相同。容量满时按插入顺序淘汰最旧的。
+/// # 为什么内存里还留一份，明明库里已经有 UNIQUE 约束
+///
+/// 用户手抖点两次发送，UI 会发两条 `client_id` 相同的输入。库上的唯一约束能挡住，
+/// 但那要一次磁盘往返，而 Core 不能 await。所以这里是**快路径**：
+/// 内存命中就直接丢弃，未命中才让它往下走，最终由库上的约束兜底。
+///
+/// 启动时用最近若干条事件的 client_id 预热，跨重启的重发也能挡住。
 #[derive(Debug)]
 pub struct LruSet<T: Hash + Eq + Clone> {
     set: HashSet<T>,

@@ -15,11 +15,13 @@
 //! 后面要优化成「先处理已经好了的部分」，改的是这个 `while` 的退出条件：
 //! 把「全部 Some」换成「关键项 Some」，其余降级成 timeout 结果继续。**结构不用动。**
 
+use crate::ids::TaskId;
 use crate::model::Call;
 use crate::msg::UiEvent;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -47,58 +49,63 @@ pub enum ToolResultKind {
     Failed,
 }
 
+impl ToolResultKind {
+    /// 落进时间线的字符串。R6 按它分类统计工具的成败分布。
+    pub fn tag(&self) -> &'static str {
+        match self {
+            ToolResultKind::Ok => "ok",
+            ToolResultKind::Timeout => "timeout",
+            ToolResultKind::Interrupted => "interrupted",
+            ToolResultKind::NotFound => "not_found",
+            ToolResultKind::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
     pub content: String,
     pub kind: ToolResultKind,
+    /// 本地调用序号。**R6「分账到具体调用」的落点** —— 上一版 `TaskId`
+    /// 定义了却没有任何地方用，成本只能按 role 聚合到底。
+    pub task: TaskId,
 }
 
 impl ToolResult {
-    pub fn ok(call: &Call, content: impl Into<String>) -> Self {
+    fn of(call: &Call, content: impl Into<String>, kind: ToolResultKind) -> Self {
         Self {
             call_id: call.id.clone(),
             name: call.name.clone(),
             content: content.into(),
-            kind: ToolResultKind::Ok,
+            kind,
+            task: TaskId(0),
         }
+    }
+
+    pub fn ok(call: &Call, content: impl Into<String>) -> Self {
+        Self::of(call, content, ToolResultKind::Ok)
     }
 
     pub fn timeout(call: &Call) -> Self {
-        Self {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content: "[timeout] 工具超过硬上限未返回，本轮按未完成处理".into(),
-            kind: ToolResultKind::Timeout,
-        }
+        Self::of(call, "[timeout] 工具超过硬上限未返回，本轮按未完成处理", ToolResultKind::Timeout)
     }
 
     pub fn interrupted(call: &Call) -> Self {
-        Self {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content: "[interrupted] 用户打断".into(),
-            kind: ToolResultKind::Interrupted,
-        }
+        Self::of(call, "[interrupted] 用户打断", ToolResultKind::Interrupted)
     }
 
     pub fn failed(call: &Call, why: impl Into<String>) -> Self {
-        Self {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content: format!("[failed] {}", why.into()),
-            kind: ToolResultKind::Failed,
-        }
+        Self::of(call, format!("[failed] {}", why.into()), ToolResultKind::Failed)
     }
 
     pub fn not_found(call: &Call) -> Self {
-        Self {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            content: format!("[not_found] 没有名为 {} 的工具", call.name),
-            kind: ToolResultKind::NotFound,
-        }
+        Self::of(
+            call,
+            format!("[not_found] 没有名为 {} 的工具", call.name),
+            ToolResultKind::NotFound,
+        )
     }
 }
 
@@ -196,24 +203,20 @@ impl Tool for AskUser {
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
             if q.is_empty() {
-                return ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    content: "[bad_args] 缺少 question".into(),
-                    kind: ToolResultKind::Failed,
-                };
+                return ToolResult::failed(&call, "缺少 question");
             }
             // 注意：这里不阻塞等待用户。阻塞会让 turn 挂在一个人类时间尺度的等待上，
             // 打断、插话、落盘全都得排队。用户的回答走下一轮的正常输入路径。
-            ToolResult {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                content: format!(
+            //
+            // 提问本身已经由 turn 在跑这个工具**之前**落成一条 `Asked` 事件了，
+            // 所以即使这一轮就此结束、界面刷新、进程重启，那道选择题也还在。
+            ToolResult::ok(
+                &call,
+                format!(
                     "已把问题和 {} 个候选项呈现给用户，等他回复。现在可以结束本轮了。",
                     opts.len()
                 ),
-                kind: ToolResultKind::Ok,
-            }
+            )
         })
     }
 }
@@ -252,6 +255,8 @@ pub struct ToolCtx {
     pub token: CancellationToken,
     pub ui: broadcast::Sender<UiEvent>,
     pub registry: Arc<Registry>,
+    /// 与 Core 共享的 TaskId 分配器。turn 侧直接取号，省一次往返。
+    pub next_task: Arc<AtomicU64>,
     pub config: ToolConfig,
 }
 
@@ -295,12 +300,11 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
     let mut serial_idx: HashSet<usize> = HashSet::new();
 
     for (i, c) in calls.iter().enumerate() {
-        // 模型选择用选择题的形式提问 ⇒ 让 UI 立刻把选项画出来，不等这一批工具全部跑完。
+        // 提问不在这里推给 UI：它是主时间线上的一条 `Asked` 事件，
+        // turn 在跑工具**之前**就已经落盘了（见 turn.rs）。这样界面刷新、
+        // turn 结束、进程重启，那道选择题都还在。
         if c.name == ASK_USER {
-            if let Some((question, options)) = AskUser::parse(c) {
-                stats.asked_user += 1;
-                let _ = ctx.ui.send(UiEvent::Choice { question, options });
-            }
+            stats.asked_user += 1;
         }
         match ctx.registry.get(&c.name) {
             None => out[i] = Some(ToolResult::not_found(c)),
@@ -380,10 +384,14 @@ pub async fn run_tools(calls: Vec<Call>, ctx: &ToolCtx) -> (Vec<ToolResult>, Too
         .into_iter()
         .enumerate()
         .map(|(i, o)| {
-            o.unwrap_or_else(|| {
+            let mut r = o.unwrap_or_else(|| {
                 stats.interrupted += 1;
                 ToolResult::interrupted(&calls[i])
-            })
+            });
+            // 每次调用（含失败与超时）都发一个号：失败的调用也花了时间和钱，
+            // 分账里少了它，「工具占多少开销」这个数就是假的。
+            r.task = TaskId(ctx.next_task.fetch_add(1, Ordering::Relaxed));
+            r
         })
         .collect();
     (results, stats)

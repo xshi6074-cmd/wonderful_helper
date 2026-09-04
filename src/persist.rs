@@ -1,176 +1,304 @@
-//! 单一 writer task：所有磁盘 IO 的唯一出口。
+//! 单一 writer task 与启动恢复。
 //!
-//! # 为什么必须是「单一」
+//! # writer 跑在阻塞线程上
 //!
-//! Core 不能 await 磁盘（会卡住打断响应），所以写盘必须异步出去。
-//! 但一旦有两个写者，落盘顺序就不再确定，而这套设计的崩溃安全**完全依赖顺序**：
+//! [`crate::store::Store`] 是同步 trait（rusqlite 就是同步的），所以 writer 用
+//! `spawn_blocking` 起一条专用线程，靠 `blocking_recv` 从 channel 取活。
+//! Core 依然一次磁盘都不碰。
 //!
-//! ```text
-//! turn 结束：① AppendHistory → ② 提交 pending → ③ WriteSnapshot
-//! 用户编辑：立即 apply + 立即 WriteSnapshot，不等 turn
-//! 恢复    ：读最新 snapshot + 重放 history 里 version 更大的记录
-//! ```
+//! # 两级落盘
 //!
-//! 先写日志再改状态，崩溃点的最坏情况是「历史里有但 state 没应用」，重放即可；
-//! 反过来就会丢。单一 writer + 有序 channel 是这个顺序的唯一保证。
+//! - **must-flush**：用户输入、用户 apply、turn 收尾、shutdown。这些是**用户付出过动作**
+//!   的数据，写入事务提交后才回执，UI 在此之前把气泡显示成「发送中」。
+//! - **best-effort**：正文、工具事件、成本、场景判定。攒到 [`BATCH`] 条或
+//!   [`LINGER`] 之后一并写。掉电最多丢最后这一小段模型产物，重生成即可。
 //!
-//! # 快照是原子替换
+//! 全部 must-flush 会让每个 delta 都开一次事务；全部 best-effort 就回到了
+//! 「用户输入还躺在内存里」的老问题。所以是两级。
 //!
-//! 写 `snapshot.json.tmp` 再 `rename`。直接覆写的话，崩在写一半就得到一个
-//! 语法都不完整的 json，连「回到上一个版本」都做不到。
+//! # 写失败不回滚内存
+//!
+//! Core 已经把事件当成生效的了（分配了 seq、更新了视图、推了 UI）。落盘失败时
+//! writer 无限重试，并在连续失败后发 [`UiEvent::PersistDegraded`]。
+//! **不回滚** —— 让用户刚打的字从屏幕上消失，比「暂时还没落盘」糟得多。
 
-use crate::ids::{TurnId, Version};
-use crate::model::Message;
-use crate::msg::WriteJob;
-use crate::state::{Op, Workspace};
-use serde::{Deserialize, Serialize};
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use crate::event::{Body, Draft, Event, crashed_turns, now_ms, open_questions, unclosed_calls};
+use crate::ids::{Seq, SessionId};
+use crate::msg::{OpenQuestion, UiEvent, WriteJob};
+use crate::state::Workspace;
+use crate::store::{Store, StoreError};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc};
 
-const SNAPSHOT: &str = "snapshot.json";
-const SNAPSHOT_TMP: &str = "snapshot.json.tmp";
-const HISTORY: &str = "history.jsonl";
+/// 攒批上限：条数。
+const BATCH: usize = 64;
+/// 攒批上限：时间。
+const LINGER: Duration = Duration::from_millis(200);
+/// 连续失败几次之后告诉用户。前几次多半是瞬时的（杀毒软件扫文件、盘忙）。
+const DEGRADE_AFTER: u32 = 3;
 
-/// history.jsonl 的一行。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HistoryRecord {
-    pub turn: TurnId,
-    /// 写这条记录时 Core 的版本（**提交之前**的版本）。
-    pub version: Version,
-    pub msgs: Vec<Message>,
-    /// 这一轮即将提交的状态改动。恢复时对 version 更大的记录重放它。
-    #[serde(default)]
-    pub commits: Vec<Op>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotFile {
-    pub version: Version,
-    pub ws: Workspace,
-}
-
-/// writer 的配置。`dir` 为 None 表示只记审计、不落盘（链路测试用）。
-#[derive(Clone, Default)]
-pub struct WriterCfg {
-    pub dir: Option<PathBuf>,
-    /// 按顺序记下每一次写操作的标签。链路测试靠它断言 ①②③ 的顺序。
-    pub audit: Option<Arc<Mutex<Vec<String>>>>,
-}
-
-pub fn spawn_writer(cfg: WriterCfg) -> (mpsc::UnboundedSender<WriteJob>, tokio::task::JoinHandle<()>) {
+pub fn spawn_writer(
+    store: Arc<dyn Store>,
+    ui: broadcast::Sender<UiEvent>,
+) -> (mpsc::UnboundedSender<WriteJob>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let join = tokio::spawn(run_writer(rx, cfg));
+    let join = tokio::spawn(run_writer(rx, store, ui));
     (tx, join)
 }
 
-async fn run_writer(mut rx: mpsc::UnboundedReceiver<WriteJob>, cfg: WriterCfg) {
-    if let Some(dir) = &cfg.dir {
-        let _ = tokio::fs::create_dir_all(dir).await;
-    }
-    while let Some(job) = rx.recv().await {
+/// # 为什么是 async 循环 + 每批一次 `spawn_blocking`
+///
+/// 攒批必须有个**兜底的时限**：只在「下一次有活来」时才检查攒够没有的话，
+/// 一批 best-effort 事件之后没有后续活动，它就永远躺在内存里 ——
+/// 而那正是「用户看着正文吐完、关掉应用、回来一片空白」的成因。
+/// async 循环拿得到 `sleep`，阻塞线程拿不到。
+///
+/// 每次真正写库时才 `spawn_blocking` 一下（≤5 次/秒），
+/// rusqlite 的同步调用不会卡住 runtime。
+async fn run_writer(
+    mut rx: mpsc::UnboundedReceiver<WriteJob>,
+    store: Arc<dyn Store>,
+    ui: broadcast::Sender<UiEvent>,
+) {
+    // 还没成功写进去的。**永远不丢**，只会越攒越多然后一起重试。
+    let mut pending: Vec<Event> = Vec::new();
+    let mut fails: u32 = 0;
+    let mut degraded = false;
+
+    loop {
+        let job = if pending.is_empty() {
+            // 没东西攒着就一直等，不用空转。
+            match rx.recv().await {
+                Some(j) => j,
+                None => break,
+            }
+        } else {
+            // 攒着东西 ⇒ 最多再等 LINGER 就落盘，不管有没有新活来。
+            match tokio::time::timeout(LINGER, rx.recv()).await {
+                Ok(Some(j)) => j,
+                Ok(None) => {
+                    flush(&store, &mut pending, &mut fails, &mut degraded, &ui).await;
+                    break;
+                }
+                Err(_) => {
+                    flush(&store, &mut pending, &mut fails, &mut degraded, &ui).await;
+                    continue;
+                }
+            }
+        };
+
         match job {
-            WriteJob::AppendHistory { turn, version, msgs, commits } => {
-                note(&cfg, format!("history(turn={turn},{}msgs,{}ops)", msgs.len(), commits.len()));
-                if let Some(dir) = &cfg.dir {
-                    let rec = HistoryRecord { turn, version, msgs, commits };
-                    if let Err(e) = append_line(dir, &rec).await {
-                        eprintln!("[writer] 写历史失败: {e}");
-                    }
+            WriteJob::Append { evs, ack } => {
+                pending.extend(evs);
+                // must-flush：用户付出过动作的数据，落盘确认之后才 ack。
+                let must = ack.is_some();
+                let ok = if must || pending.len() >= BATCH {
+                    flush(&store, &mut pending, &mut fails, &mut degraded, &ui).await
+                } else {
+                    true
+                };
+                if let Some(a) = ack {
+                    let _ = a.send(ok && pending.is_empty());
                 }
             }
-            WriteJob::WriteSnapshot { version, ws } => {
-                note(&cfg, format!("snapshot({version})"));
-                if let Some(dir) = &cfg.dir {
-                    let snap = SnapshotFile { version, ws: *ws };
-                    if let Err(e) = write_snapshot(dir, &snap).await {
-                        eprintln!("[writer] 写快照失败: {e}");
-                    }
+            WriteJob::Checkpoint { session, seq, ws } => {
+                // 纯功能性：失败只记一行，不影响正确性，也不触发降级提示。
+                let s = store.clone();
+                let r =
+                    tokio::task::spawn_blocking(move || s.put_checkpoint(&session, seq, &ws)).await;
+                if let Ok(Err(e)) = r {
+                    eprintln!("[writer] checkpoint({seq}) 失败，忽略: {e}");
                 }
             }
-            WriteJob::Shutdown => {
-                note(&cfg, "shutdown".to_string());
+            WriteJob::NewSession { session } => {
+                let s = store.clone();
+                let r = tokio::task::spawn_blocking(move || s.create_session(&session)).await;
+                if let Ok(Err(e)) = r {
+                    eprintln!("[writer] 建会话失败: {e}");
+                }
+            }
+            WriteJob::Shutdown { ack } => {
+                // 退出前把攒着的全写掉。**这一步是「优雅退出」与「被 kill」的全部差别。**
+                let mut tries = 0;
+                while !pending.is_empty() && tries < 10 {
+                    flush(&store, &mut pending, &mut fails, &mut degraded, &ui).await;
+                    tries += 1;
+                    if !pending.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+                if !pending.is_empty() {
+                    eprintln!("[writer] 退出时仍有 {} 条未落盘", pending.len());
+                }
+                let _ = ack.send(());
                 break;
             }
         }
     }
 }
 
-fn note(cfg: &WriterCfg, s: String) {
-    if let Some(a) = &cfg.audit {
-        if let Ok(mut v) = a.lock() {
-            v.push(s);
+/// 返回 true 表示这一批真的进库了。
+async fn flush(
+    store: &Arc<dyn Store>,
+    pending: &mut Vec<Event>,
+    fails: &mut u32,
+    degraded: &mut bool,
+    ui: &broadcast::Sender<UiEvent>,
+) -> bool {
+    if pending.is_empty() {
+        return true;
+    }
+    let s = store.clone();
+    let batch = pending.clone();
+    let r = tokio::task::spawn_blocking(move || s.append(&batch)).await;
+    match r {
+        Ok(Ok(())) => {
+            pending.clear();
+            *fails = 0;
+            if *degraded {
+                *degraded = false;
+                let _ = ui.send(UiEvent::PersistOk);
+            }
+            true
+        }
+        Ok(Err(e)) => {
+            *fails += 1;
+            // 前几次多半是瞬时的（杀毒软件扫文件、盘忙），不值得惊动用户。
+            if *fails >= DEGRADE_AFTER && !*degraded {
+                *degraded = true;
+                let _ = ui.send(UiEvent::PersistDegraded {
+                    why: e.to_string(),
+                    pending: pending.len(),
+                });
+            }
+            eprintln!("[writer] 落盘失败第 {} 次（{} 条待写）: {e}", *fails, pending.len());
+            false
+        }
+        Err(e) => {
+            eprintln!("[writer] 写盘任务 panic: {e}");
+            false
         }
     }
 }
 
-async fn append_line(dir: &FsPath, rec: &HistoryRecord) -> std::io::Result<()> {
-    let line = serde_json::to_string(rec).map_err(std::io::Error::other)?;
-    let mut f = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(HISTORY))
-        .await?;
-    f.write_all(line.as_bytes()).await?;
-    f.write_all(b"\n").await?;
-    // 历史是重放的依据，必须真的落到盘上，不能只躺在页缓存里
-    f.sync_data().await?;
-    Ok(())
-}
+// ───────────────────────────── 恢复 ─────────────────────────────
 
-async fn write_snapshot(dir: &FsPath, snap: &SnapshotFile) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(snap).map_err(std::io::Error::other)?;
-    let tmp = dir.join(SNAPSHOT_TMP);
-    {
-        let mut f = tokio::fs::File::create(&tmp).await?;
-        f.write_all(&bytes).await?;
-        f.sync_data().await?;
-    }
-    tokio::fs::rename(&tmp, dir.join(SNAPSHOT)).await
-}
-
-/// 恢复结果。
+/// 启动恢复的结果。
 pub struct Restored {
+    pub session: SessionId,
+    /// 物化好的推断图。
     pub ws: Workspace,
-    pub version: Version,
-    /// snapshot 之后的历史记录（消息用于重建对话，commits 已经重放进 ws）。
-    pub replayed: Vec<HistoryRecord>,
+    /// 时间线上最后一条的位置。Core 接着往下分配。
+    pub seq: Seq,
+    /// 完整时间线。
+    pub events: Vec<Event>,
+    /// 需要补进时间线的修补事件：未闭合的工具调用、开了没关的轮次。
+    ///
+    /// **它们是真正的事件，要写进去**，不是内存里的一个标记 —— 否则下次启动
+    /// 还要再判一次「上次是不是崩了」，而且中间任何一次组装 prompt 都会缺 tool 消息。
+    pub repairs: Vec<Draft>,
+    pub open_questions: Vec<OpenQuestion>,
+    pub recent_clients: Vec<String>,
+    pub crashed: usize,
 }
 
-/// 读最新 snapshot + 重放 history 里 version 更大的记录。
+/// 读 checkpoint + 重放其后的事件，并算出要补的修补事件。
 ///
-/// 没有 snapshot 就返回 None，调用方开一个新会话。
-pub async fn restore(dir: &FsPath) -> Option<Restored> {
-    let raw = tokio::fs::read(dir.join(SNAPSHOT)).await.ok()?;
-    let snap: SnapshotFile = serde_json::from_slice(&raw).ok()?;
-    let mut ws = snap.ws;
-    let mut version = snap.version;
+/// # 为什么物化走的是 `Workspace::apply`
+///
+/// 上一版恢复时另写了一段重放逻辑，里面把所有 op 一律记成 `Origin::Model` ——
+/// 于是重启后用户填的字段全变成模型推断，`[用户设定]` 标记消失。
+/// 现在恢复与运行时调的是同一个函数，不存在「两条路径实现不一致」的可能。
+pub fn restore(store: &dyn Store, session: &SessionId) -> Result<Restored, StoreError> {
+    // 读整条会话链：分叉出来的会话要把父会话分叉点之前的历史一起带上，
+    // 否则新分支一开口就失忆。
+    let events = store.load_chain(session)?;
+    let forked_at = store.get_session(session)?.map(|s| s.forked_at).unwrap_or(Seq::ZERO);
+    let seq = events.last().map(|e| e.seq).unwrap_or(forked_at);
 
-    let mut replayed = Vec::new();
-    if let Ok(text) = tokio::fs::read_to_string(dir.join(HISTORY)).await {
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            let Ok(rec) = serde_json::from_str::<HistoryRecord>(line) else { continue };
-            // 只重放快照之后的：崩溃点的最坏情况就是这几条「历史里有但 state 没应用」
-            if rec.version < version {
-                continue;
-            }
-            version.bump();
-            for op in &rec.commits {
-                match op {
-                    Op::Set { path, value, source, confidence } => ws.write(
-                        path.clone(),
-                        value.clone(),
-                        crate::state::Origin::Model,
-                        source.clone(),
-                        *confidence,
-                        version,
-                    ),
-                    Op::Remove { path } => ws.erase(path),
-                }
-            }
-            replayed.push(rec);
-        }
+    // checkpoint 只是加速：从它开始物化，而不是从 0 开始。丢了也只是慢一点。
+    let (mut ws, from) = match store.latest_checkpoint(session)? {
+        Some((cs, w)) => (w, cs),
+        None => (Workspace::new(), Seq::ZERO),
+    };
+    for e in events.iter().filter(|e| e.seq > from) {
+        ws.apply(e);
     }
-    Some(Restored { ws, version, replayed })
+
+    // 未闭合的工具调用 ⇒ 补 Aborted。与打断收尾 `close_open_calls` 是同一件事，
+    // 只是时机不同：进程还活着时由它补，进程没了就由这里补。
+    let mut repairs = Vec::new();
+    for (called_seq, call_id, name) in unclosed_calls(&events) {
+        // 只补本会话自己留下的烂摊子：父会话分叉点之前的未闭合调用是它自己的事，
+        // 分支不该去改写它的历史（也确实改不动 —— 那些事件属于另一条 session）。
+        if called_seq <= forked_at {
+            continue;
+        }
+        let turn = events.iter().find(|e| e.seq == called_seq).and_then(|e| e.turn);
+        repairs.push(Draft::reply_to(
+            turn,
+            called_seq,
+            Body::Aborted {
+                call_id,
+                why: format!("[interrupted] {name} 在返回前进程结束"),
+            },
+        ));
+    }
+    // 开了没关的轮次 ⇒ 补 TurnClosed，标成异常。
+    let crashed: Vec<_> = crashed_turns(&events)
+        .into_iter()
+        .filter(|t| {
+            events
+                .iter()
+                .any(|e| e.turn == Some(*t) && e.seq > forked_at)
+        })
+        .collect();
+    for t in &crashed {
+        repairs.push(Draft::new(
+            Some(*t),
+            Body::TurnClosed { aborted: true, stats: "{\"crashed\":true}".into() },
+        ));
+    }
+
+    let open_questions = open_questions(&events)
+        .into_iter()
+        .map(|(id, question, options)| OpenQuestion { id, question, options })
+        .collect();
+
+    let recent_clients = events
+        .iter()
+        .rev()
+        .filter_map(|e| match &e.body {
+            Body::Said { client_id, .. } => Some(client_id.clone()),
+            _ => None,
+        })
+        .take(256)
+        .collect();
+
+    Ok(Restored {
+        session: session.clone(),
+        ws,
+        seq,
+        events,
+        repairs,
+        open_questions,
+        recent_clients,
+        crashed: crashed.len(),
+    })
+}
+
+/// 把 draft 补成完整事件（恢复路径专用；正常路径由 Core 的 `commit` 做）。
+pub fn seal(session: &SessionId, drafts: Vec<Draft>, next: &mut Seq) -> Vec<Event> {
+    drafts
+        .into_iter()
+        .map(|d| Event {
+            session: session.clone(),
+            seq: next.bump(),
+            turn: d.turn,
+            at_ms: now_ms(),
+            corr: d.corr,
+            body: d.body,
+        })
+        .collect()
 }

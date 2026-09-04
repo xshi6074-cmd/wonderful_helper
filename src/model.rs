@@ -16,7 +16,7 @@
 
 use crate::ids::TurnId;
 use crate::scene::SceneId;
-use crate::state::{Op, Phase, StateView};
+use crate::state::{Op, Phase};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -172,9 +172,11 @@ pub struct JudgeReq {
     pub turn: TurnId,
     pub phase: Phase,
     pub mode: Mode,
-    pub view: Arc<StateView>,
     /// 由 [`crate::context::Context::for_judge`] 组装：共享层 + 完整对话，
     /// **不含任何场景的 guidance 与案例** —— 那些只给回答段。
+    ///
+    /// 上一版还带了一份 `StateView`，但推断图已经拼在 `msgs` 的共享层里了，
+    /// 多一份就是多一处可能不同步的副本。
     pub msgs: Vec<Message>,
     /// 传给客户端用于中止底层 HTTP 请求。
     /// turn task 侧另有 `guarded` 兜底，两者都要有：前者省钱，后者保证控制流。

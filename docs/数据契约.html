@@ -1,0 +1,1331 @@
+<title>Premortem 数据契约</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+:root{
+  --ground:#eceff1; --surface:#ffffff; --surface-2:#f4f7f8; --surface-3:#e6ebee;
+  --ink:#14181d; --ink-2:#37424d; --muted:#5c6773;
+  --rule:#ccd4d9; --rule-2:#e0e6e9;
+  --ok:#0a6b62; --bad:#9c2e44; --warn:#87680f; --info:#2f5580;
+  --ok-bg:#e0efed; --bad-bg:#f8e7ea; --warn-bg:#f5efdb; --info-bg:#e6edf5;
+  --pin-ink:#ffffff;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0f1418; --surface:#161c22; --surface-2:#1b2229; --surface-3:#222b33;
+    --ink:#dee5eb; --ink-2:#b4c0ca; --muted:#8794a1;
+    --rule:#2a333c; --rule-2:#212930;
+    --ok:#54c2b4; --bad:#e8879a; --warn:#d5ac4d; --info:#7fa9d8;
+    --ok-bg:#122c29; --bad-bg:#301b21; --warn-bg:#2c2515; --info-bg:#17222e;
+    --pin-ink:#161c22;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0f1418; --surface:#161c22; --surface-2:#1b2229; --surface-3:#222b33;
+  --ink:#dee5eb; --ink-2:#b4c0ca; --muted:#8794a1;
+  --rule:#2a333c; --rule-2:#212930;
+  --ok:#54c2b4; --bad:#e8879a; --warn:#d5ac4d; --info:#7fa9d8;
+  --ok-bg:#122c29; --bad-bg:#301b21; --warn-bg:#2c2515; --info-bg:#17222e;
+  --pin-ink:#161c22;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4","Songti SC",Georgia,serif;
+  font-size:16px; line-height:1.65; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px}
+.prose{max-width:70ch}
+h1,h2,h3,h4{font-family:Archivo,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;text-wrap:balance;margin:0}
+code,kbd,.mono,th,td,.pill,.eyebrow{font-family:"IBM Plex Mono","Sarasa Mono SC",ui-monospace,Menlo,monospace}
+code{font-size:.86em;background:var(--surface-3);padding:.1em .34em;border-radius:2px;color:var(--ink-2)}
+a{color:var(--ok)}
+
+/* ── masthead ─────────────────────────────── */
+header.mast{border-bottom:1px solid var(--rule);background:var(--surface);}
+.mast-in{max-width:1180px;margin:0 auto;padding:44px 28px 34px;display:flex;flex-direction:column;gap:18px}
+.eyebrow{font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(30px,4.4vw,46px);font-weight:700;letter-spacing:-.02em;line-height:1.08}
+.dek{max-width:66ch;color:var(--ink-2);font-size:17px}
+.mast-meta{display:flex;flex-wrap:wrap;gap:10px 26px;font-size:12.5px;color:var(--muted);font-family:"IBM Plex Mono",ui-monospace,monospace;padding-top:6px;border-top:1px solid var(--rule-2)}
+.mast-meta b{color:var(--ink-2);font-weight:500}
+
+/* ── index ─────────────────────────────── */
+nav.toc{background:var(--surface-2);border-bottom:1px solid var(--rule)}
+.toc-in{max-width:1180px;margin:0 auto;padding:16px 28px;display:flex;flex-wrap:wrap;gap:4px 0}
+.toc-in a{display:flex;gap:8px;align-items:baseline;text-decoration:none;color:var(--ink-2);padding:5px 16px 5px 0;font-size:13.5px}
+.toc-in a:hover{color:var(--ok)}
+.toc-in a span{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;color:var(--muted)}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--ok);outline-offset:3px;border-radius:2px}
+
+/* ── sections ─────────────────────────────── */
+section{padding:52px 0 8px}
+section+section{border-top:1px solid var(--rule-2)}
+.sec-head{display:flex;gap:16px;align-items:baseline;margin-bottom:8px}
+.sec-num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13px;color:var(--ok);font-weight:600;flex:none;padding-top:4px}
+h2{font-size:26px;font-weight:600;letter-spacing:-.015em}
+.sec-sub{color:var(--muted);font-size:14.5px;max-width:70ch;margin:0 0 26px 40px}
+h3{font-size:17px;font-weight:600;margin:34px 0 10px;letter-spacing:-.005em}
+h4{font-size:14px;font-weight:600;margin:22px 0 8px;color:var(--ink-2)}
+p{margin:0 0 14px}
+.prose ul{margin:0 0 16px;padding-left:20px}
+.prose li{margin-bottom:6px}
+
+/* ── figure ─────────────────────────────── */
+figure{margin:26px 0 34px}
+.scroll{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:3px}
+.scroll svg{display:block;min-width:980px;width:100%;height:auto}
+figcaption{font-size:12.5px;color:var(--muted);margin-top:10px;font-family:"IBM Plex Mono",ui-monospace,monospace;line-height:1.6}
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:12px;font-size:12px;color:var(--muted);font-family:"IBM Plex Mono",ui-monospace,monospace}
+.legend i{display:inline-flex;align-items:center;gap:7px;font-style:normal}
+.swatch{width:22px;height:0;border-top-width:2px;border-top-style:solid;display:inline-block}
+
+/* ── defect ledger ─────────────────────────────── */
+.ledger{border-top:1px solid var(--rule)}
+.d{display:grid;grid-template-columns:34px 1fr;gap:0 14px;padding:16px 0;border-bottom:1px solid var(--rule-2);align-items:start}
+.d-pin{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;font-weight:600;color:var(--pin-ink);background:var(--bad);
+  width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.d.cold .d-pin{background:var(--muted)}
+.d-t{font-family:Archivo,system-ui,sans-serif;font-weight:600;font-size:15.5px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:baseline}
+.loc{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;color:var(--muted);font-weight:400}
+.d-b{font-size:14.5px;color:var(--ink-2);margin-top:5px;max-width:78ch}
+.d-b b{color:var(--ink);font-weight:600}
+.fix{font-size:13.5px;margin-top:6px;color:var(--ok);max-width:78ch}
+.fix::before{content:"→ ";opacity:.6}
+.classhead{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin:32px 0 4px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
+.classhead:first-of-type{margin-top:18px}
+
+/* ── tables ─────────────────────────────── */
+table{border-collapse:collapse;font-size:12.5px;line-height:1.5;font-variant-numeric:tabular-nums;width:100%}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--rule-2);vertical-align:top}
+thead th{background:var(--surface-2);border-bottom:1px solid var(--rule);font-weight:600;color:var(--ink);
+  position:sticky;top:0;font-size:11.5px;letter-spacing:.03em;white-space:nowrap}
+tbody tr:hover{background:var(--surface-2)}
+td.k{font-weight:600;color:var(--ink);white-space:nowrap}
+.dict{min-width:1580px}
+.dict td{max-width:230px}
+.narrow{min-width:840px}
+.chip{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10.5px;font-family:"IBM Plex Mono",ui-monospace,monospace;
+  letter-spacing:.02em;white-space:nowrap;font-weight:500}
+.c-user{background:var(--info-bg);color:var(--info)}
+.c-core{background:var(--ok-bg);color:var(--ok)}
+.c-bad{background:var(--bad-bg);color:var(--bad)}
+.c-warn{background:var(--warn-bg);color:var(--warn)}
+
+/* ── code ─────────────────────────────── */
+pre{background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:18px 20px;overflow-x:auto;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12.5px;line-height:1.62;margin:16px 0;color:var(--ink-2)}
+pre b{color:var(--ok);font-weight:600}
+pre i{color:var(--muted);font-style:normal}
+pre u{color:var(--bad);text-decoration:none;font-weight:500}
+
+/* ── callout ─────────────────────────────── */
+.note{border-left:2px solid var(--ok);padding:2px 0 2px 18px;margin:22px 0;max-width:74ch;color:var(--ink-2);font-size:15px}
+.note.q{border-color:var(--warn)}
+.note strong{color:var(--ink)}
+
+footer{border-top:1px solid var(--rule);margin-top:56px;padding:26px 0 60px;color:var(--muted);font-size:12.5px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media (max-width:640px){
+  .wrap,.mast-in,.toc-in{padding-left:18px;padding-right:18px}
+  .d{grid-template-columns:28px 1fr;gap:0 10px}
+}
+</style>
+
+<header class="mast">
+  <div class="mast-in">
+    <div class="eyebrow">Premortem · core 第五轮 · 数据结构</div>
+    <h1>数据契约</h1>
+    <p class="dek">上一轮把控制流搭起来了，数据层是欠的。这份文档做四件事：把每个产生 / 消费数据的节点画出来，把语义对不上和没人消费的地方逐条记账，给出目标态的数据字典与 SQLite schema，以及把「退出 / 中断 / 插话 / 正常结束 / 回答提问」五种收尾的落盘语义定死。</p>
+    <div class="mast-meta">
+      <span><b>实现</b> 6424 行 / 18 文件 / 0 warning</span>
+      <span><b>验证</b> 24 场景 · 188 断言 · 全通过</span>
+      <span><b>缺陷</b> 25 条 → 已结 21 · 未做 4</span>
+      <span><b>状态</b> 已落实，§11 起是实现后的对照</span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="toc-in">
+  <a href="#f1"><span>§1</span>现状数据流</a>
+  <a href="#f2"><span>§2</span>缺陷账 · 25 条</a>
+  <a href="#f3"><span>§3</span>目标数据流</a>
+  <a href="#f4"><span>§4</span>数据字典</a>
+  <a href="#f5"><span>§5</span>SQLite schema</a>
+  <a href="#f6"><span>§6</span>落盘时机与 cache</a>
+  <a href="#f7"><span>§7</span>五种收尾语义</a>
+  <a href="#f8"><span>§8</span>接口封装</a>
+  <a href="#f9"><span>§9</span>验证矩阵</a>
+  <a href="#f10"><span>§10</span>决策与待拍板</a>
+  <a href="#f11"><span>§11</span>按实现重画</a>
+  <a href="#f12"><span>§12</span>设计 → 实现 diff</a>
+  <a href="#f13"><span>§13</span>缺陷结算与欠账</a>
+</div></nav>
+
+<div class="wrap">
+
+<!-- ══════════════════ §1 ══════════════════ -->
+<section id="f1">
+  <div class="sec-head"><div class="sec-num">§1</div><h2>现状数据流</h2></div>
+  <p class="sec-sub">每个产生或消费数据的节点都在图上。红色编号是缺陷钉，编号对应 §2 的账目 —— 图本身就是缺陷账的索引。</p>
+
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1060 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="现状数据流图">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+          </marker>
+          <marker id="arx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--bad)"/>
+          </marker>
+        </defs>
+        <style>
+          .bx{fill:var(--surface-2);stroke:var(--rule);stroke-width:1}
+          .bxc{fill:var(--surface-3);stroke:var(--rule);stroke-width:1}
+          .lbl{font-family:"IBM Plex Mono",monospace;font-size:11.5px;fill:var(--ink)}
+          .sub{font-family:"IBM Plex Mono",monospace;font-size:9.5px;fill:var(--muted)}
+          .lane{font-family:"IBM Plex Mono",monospace;font-size:10px;fill:var(--muted);letter-spacing:.1em}
+          .ed{stroke:var(--muted);stroke-width:1.2;fill:none;marker-end:url(#ar)}
+          .edx{stroke:var(--bad);stroke-width:1.4;fill:none;stroke-dasharray:5 4;marker-end:url(#arx)}
+          .pinc{fill:var(--bad)}
+          .pint{font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;fill:var(--pin-ink);text-anchor:middle}
+        </style>
+
+        <!-- lane 1 -->
+        <text class="lane" x="16" y="30">产生者</text>
+        <g>
+          <rect class="bx" x="16"  y="42" width="128" height="46" rx="2"/><text class="lbl" x="30" y="63">用户 / UI</text><text class="sub" x="30" y="78">输入·编辑·中断</text>
+          <rect class="bx" x="160" y="42" width="128" height="46" rx="2"/><text class="lbl" x="174" y="63">判断段</text><text class="sub" x="174" y="78">scene·ops·retrieve</text>
+          <rect class="bx" x="304" y="42" width="128" height="46" rx="2"/><text class="lbl" x="318" y="63">回答段流</text><text class="sub" x="318" y="78">delta·tool_calls</text>
+          <rect class="bx" x="448" y="42" width="128" height="46" rx="2"/><text class="lbl" x="462" y="63">run_tools</text><text class="sub" x="462" y="78">result·心跳·耗时</text>
+          <rect class="bx" x="592" y="42" width="152" height="46" rx="2"/><text class="lbl" x="606" y="63">subagent</text><text class="sub" x="606" y="78">折叠摘要·蒸馏草稿</text>
+          <rect class="bx" x="760" y="42" width="128" height="46" rx="2"/><text class="lbl" x="774" y="63">memory/*</text><text class="sub" x="774" y="78">用户手写文件</text>
+        </g>
+
+        <!-- arrows into core -->
+        <path class="ed" d="M80,88 L80,168"/><path class="ed" d="M224,88 L224,168"/>
+        <path class="ed" d="M368,88 L368,168"/><path class="ed" d="M512,88 L512,168"/>
+        <path class="ed" d="M668,88 L668,168"/>
+        <path class="ed" d="M824,88 L824,124 L980,124 L980,168"/>
+
+        <!-- lane 2: core -->
+        <text class="lane" x="16" y="160">CORE · 唯一 owner · 全在内存</text>
+        <rect x="16" y="168" width="1028" height="164" rx="3" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.4"/>
+        <g>
+          <rect class="bxc" x="34"  y="190" width="112" height="42" rx="2"/><text class="lbl" x="45" y="209">inbox</text><text class="sub" x="45" y="223">VecDeque</text>
+          <rect class="bxc" x="156" y="190" width="112" height="42" rx="2"/><text class="lbl" x="167" y="209">pending</text><text class="sub" x="167" y="223">本轮未提交</text>
+          <rect class="bxc" x="278" y="190" width="112" height="42" rx="2"/><text class="lbl" x="289" y="209">ws.fields</text><text class="sub" x="289" y="223">推断图</text>
+          <rect class="bxc" x="400" y="190" width="112" height="42" rx="2"/><text class="lbl" x="411" y="209">ws.scene</text><text class="sub" x="411" y="223">+ overrides</text>
+          <rect class="bxc" x="522" y="190" width="122" height="42" rx="2"/><text class="lbl" x="533" y="209">open·parked</text><text class="sub" x="533" y="223">直接覆盖</text>
+          <rect class="bxc" x="654" y="190" width="112" height="42" rx="2"/><text class="lbl" x="665" y="209">history</text><text class="sub" x="665" y="223">Vec&lt;Message&gt;</text>
+          <rect class="bxc" x="776" y="190" width="112" height="42" rx="2"/><text class="lbl" x="787" y="209">touched</text><text class="sub" x="787" y="223">CAS 用</text>
+          <rect class="bxc" x="898" y="190" width="128" height="42" rx="2"/><text class="lbl" x="909" y="209">memory</text><text class="sub" x="909" y="223">Arc，只读</text>
+
+          <rect class="bxc" x="34"  y="248" width="112" height="42" rx="2"/><text class="lbl" x="45" y="267">seen</text><text class="sub" x="45" y="281">LruSet 去重</text>
+          <rect class="bxc" x="156" y="248" width="112" height="42" rx="2"/><text class="lbl" x="167" y="267">cost</text><text class="sub" x="167" y="281">CostLedger</text>
+          <rect class="bxc" x="278" y="248" width="112" height="42" rx="2"/><text class="lbl" x="289" y="267">metrics</text><text class="sub" x="289" y="281">CoreMetrics</text>
+          <rect class="bxc" x="400" y="248" width="140" height="42" rx="2"/><text class="lbl" x="411" y="267">TurnStats</text><text class="sub" x="411" y="281">收下即丢弃</text>
+          <rect class="bxc" x="552" y="248" width="112" height="42" rx="2"/><text class="lbl" x="563" y="267">version</text><text class="sub" x="563" y="281">CAS+游标+UI</text>
+          <rect class="bxc" x="674" y="248" width="112" height="42" rx="2"/><text class="lbl" x="685" y="267">TurnPhase</text><text class="sub" x="685" y="281">Idle/Run/Close</text>
+        </g>
+        <text class="sub" x="800" y="272">version 三重身份，且部分 bump 不落盘</text>
+
+        <!-- lane 3: writer + disk -->
+        <text class="lane" x="16" y="378">落盘 · 只在 TurnFinished 与 UserEdit 触发</text>
+        <path class="ed" d="M90,332 L90,398"/>
+        <path class="ed" d="M334,332 L334,398"/>
+        <path class="ed" d="M700,332 L700,398"/>
+        <rect class="bx" x="16"  y="398" width="128" height="46" rx="2"/><text class="lbl" x="30" y="419">writer task</text><text class="sub" x="30" y="434">无界 mpsc</text>
+        <rect class="bx" x="270" y="398" width="150" height="46" rx="2"/><text class="lbl" x="284" y="419">snapshot.json</text><text class="sub" x="284" y="434">tmp+rename</text>
+        <rect class="bx" x="440" y="398" width="150" height="46" rx="2"/><text class="lbl" x="454" y="419">history.jsonl</text><text class="sub" x="454" y="434">append+fsync</text>
+        <rect class="bx" x="632" y="398" width="196" height="46" rx="2"/><text class="lbl" x="646" y="419">memory/*.md · toml</text><text class="sub" x="646" y="434">文件即界面，用户可改</text>
+        <path class="ed" d="M144,420 L262,420"/>
+        <path class="ed" d="M420,420 L432,420"/>
+
+        <!-- lane 4: consumers -->
+        <text class="lane" x="16" y="492">消费者</text>
+        <path class="ed" d="M300,332 L300,360 L86,360 L86,504"/>
+        <path class="ed" d="M660,332 L660,364 L246,364 L246,504"/>
+        <path class="edx" d="M345,444 L345,470 L406,470 L406,504"/>
+        <path class="edx" d="M515,444 L515,470 L406,470"/>
+        <rect class="bx" x="16"  y="504" width="140" height="46" rx="2"/><text class="lbl" x="30" y="525">UI 渲染</text><text class="sub" x="30" y="540">broadcast 有损</text>
+        <rect class="bx" x="176" y="504" width="140" height="46" rx="2"/><text class="lbl" x="190" y="525">prompt 组装</text><text class="sub" x="190" y="540">全量上下文</text>
+        <rect class="bx" x="336" y="504" width="140" height="46" rx="2"/><text class="lbl" x="350" y="525">restore()</text><text class="sub" x="350" y="540" fill="var(--bad)">无任何调用者</text>
+        <rect class="bx" x="496" y="504" width="140" height="46" rx="2"/><text class="lbl" x="510" y="525">R6 成本报表</text><text class="sub" x="510" y="540" fill="var(--bad)">跨会话取不到</text>
+        <rect class="bx" x="656" y="504" width="140" height="46" rx="2"/><text class="lbl" x="670" y="525">R5 回滚</text><text class="sub" x="670" y="540" fill="var(--bad)">无锚点</text>
+        <rect class="bx" x="816" y="504" width="140" height="46" rx="2"/><text class="lbl" x="830" y="525">一键蒸馏</text><text class="sub" x="830" y="540">读全程+推断图</text>
+
+        <!-- pins -->
+        <g>
+          <circle class="pinc" cx="140" cy="186" r="11"/><text class="pint" x="140" y="190">5</text>
+          <circle class="pinc" cx="500" cy="186" r="11"/><text class="pint" x="500" y="190">9</text>
+          <circle class="pinc" cx="638" cy="186" r="11"/><text class="pint" x="638" y="190">14</text>
+          <circle class="pinc" cx="760" cy="186" r="11"/><text class="pint" x="760" y="190">7</text>
+          <circle class="pinc" cx="882" cy="186" r="11"/><text class="pint" x="882" y="190">8</text>
+          <circle class="pinc" cx="140" cy="244" r="11"/><text class="pint" x="140" y="248">25</text>
+          <circle class="pinc" cx="262" cy="244" r="11"/><text class="pint" x="262" y="248">13</text>
+          <circle class="pinc" cx="384" cy="244" r="11"/><text class="pint" x="384" y="248">12</text>
+          <circle class="pinc" cx="534" cy="244" r="11"/><text class="pint" x="534" y="248">11</text>
+          <circle class="pinc" cx="658" cy="244" r="11"/><text class="pint" x="658" y="248">22</text>
+          <circle class="pinc" cx="224" cy="150" r="11"/><text class="pint" x="224" y="154">10</text>
+          <circle class="pinc" cx="90"  cy="366" r="11"/><text class="pint" x="90"  y="370">3</text>
+          <circle class="pinc" cx="128" cy="392" r="11"/><text class="pint" x="128" y="396">4</text>
+          <circle class="pinc" cx="580" cy="392" r="11"/><text class="pint" x="580" y="396">6</text>
+          <circle class="pinc" cx="336" cy="496" r="11"/><text class="pint" x="336" y="500">1</text>
+          <circle class="pinc" cx="466" cy="496" r="11"/><text class="pint" x="466" y="500">2</text>
+          <circle class="pinc" cx="146" cy="496" r="11"/><text class="pint" x="146" y="500">15</text>
+          <circle class="pinc" cx="306" cy="496" r="11"/><text class="pint" x="306" y="500">16</text>
+        </g>
+
+        <!-- 未落盘 -->
+        <text class="sub" x="16" y="600" fill="var(--bad)">从未落盘：inbox · cost · metrics · TurnStats · open_questions · 折叠结果 · client_id 去重集</text>
+        <text class="sub" x="16" y="618" fill="var(--bad)">从未被消费：TurnStats · CoreMetrics · TaskId · Pending.turn · UserMsg.at · Patch.base_version(User 分支)</text>
+        <text class="sub" x="16" y="636" fill="var(--warn)">同一事实两处存储：touched ↔ Field.version+origin　　version ↔ snapshot.version ↔ HistoryRecord.version</text>
+        <text class="sub" x="16" y="662">turn 全程只在开头取一次 StateView（含完整 history 的深拷贝）；scene / open / parked 在轮中写进 Core，turn 手里那份看不到。</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <i><span class="swatch" style="border-color:var(--muted)"></span>数据流</i>
+      <i><span class="swatch" style="border-color:var(--bad);border-top-style:dashed"></span>断链 / 无调用者</i>
+      <i><span class="d-pin" style="width:18px;height:18px;font-size:10px;display:inline-flex">n</span>缺陷钉，编号见 §2</i>
+    </div>
+    <figcaption>图 A · 现状。缺陷集中在两处：Core 内存里有六类数据从来不落盘；盘上的东西从来没被读回来过。</figcaption>
+  </figure>
+</section>
+
+<!-- ══════════════════ §2 ══════════════════ -->
+<section id="f2">
+  <div class="sec-head"><div class="sec-num">§2</div><h2>缺陷账 · 25 条</h2></div>
+  <p class="sec-sub">按四类分。位置是 <code>file:line</code>，都在当前 <code>main</code> 上可核。每条给一句处置，处置在 §3–§8 展开。</p>
+
+  <div class="ledger">
+
+  <div class="classhead">A · 链路断裂 —— 数据产生了，但走不到消费者，或消费者根本不存在</div>
+
+  <div class="d"><div class="d-pin">1</div><div>
+    <div class="d-t">整条崩溃恢复链路是死代码 <span class="loc">persist.rs:144 · core.rs:123</span></div>
+    <div class="d-b"><code>persist::restore()</code> 在全 crate <b>没有任何调用者</b>；<code>CoreDeps.restored</code> 从未被设成 <code>Some</code>。15 个链路场景一个都没走过它。你说的「退出应用后再打开进展丢失」在当前实现里不是风险，是必然。</div>
+    <div class="fix">恢复变成启动路径的第一步，而不是一个可选分支；§9 的 kill 点注入把它压成主干测试。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">2</div><div>
+    <div class="d-t">即使恢复了，对话历史也拿不回来 <span class="loc">core.rs:225</span></div>
+    <div class="d-b"><code>Restored.replayed</code> 里的 <code>msgs</code> 被丢弃，<code>Core::start</code> 硬编码 <code>history: Vec::new()</code>。恢复后推断图在、对话没了 —— 这是最糟的一种恢复：模型看到一张自己不记得怎么推出来的图。</div>
+    <div class="fix">history 与推断图从同一份 event log 重放，不存在只恢复一半的可能。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">3</div><div>
+    <div class="d-t">turn 跑到一半退出 = 本轮一个字节都没落盘 <span class="loc">core.rs:434–448</span></div>
+    <div class="d-b">落盘只发生在 <code>TurnFinished</code>。在那之前，用户的输入、模型已经流出来的正文、已经 propose 的 ops，全部只在内存。用户等了两分钟看着正文往外吐，关掉应用，回来一片空白。</div>
+    <div class="fix">落盘粒度从「轮」改成「事件」：用户输入在进 inbox 的同一刻就已提交事务。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">4</div><div>
+    <div class="d-t">Shutdown 不 flush <span class="loc">core.rs:332–337</span></div>
+    <div class="d-b"><code>CoreMsg::Shutdown</code> 直接 <code>return false</code>：跳过 <code>TurnFinished</code>，也不等 writer 排空队列。优雅退出和被 kill 的效果一样。</div>
+    <div class="fix">Shutdown 变两段：cancel 并<b>等</b> TurnFinished（带超时），再等 writer 确认 flush。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">5</div><div>
+    <div class="d-t">inbox 不持久 <span class="loc">core.rs:180</span></div>
+    <div class="d-b">用户在 turn 运行中插了三句话，还在队列里没被取走，进程没了 —— 三句话消失，而且用户以为已经发出去了。</div>
+    <div class="fix">用户输入落盘后才给 UI ack；未被消费的输入在恢复时重新进 inbox。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">6</div><div>
+    <div class="d-t">恢复会把用户填的字段变成模型推断 <span class="loc">persist.rs:164</span></div>
+    <div class="d-b"><code>HistoryRecord.commits</code> 根本没存 origin，<code>restore()</code> 把重放的 op <b>一律记成 <code>Origin::Model</code></b>。于是 <code>[用户设定]</code> 标记在恢复后消失 —— 而「模型改用户填过的字段前先问」这条约束的全部落点就是那个标记。删掉锁之后剩下的唯一保护，在崩溃恢复后失效。</div>
+    <div class="fix">origin 是 op 的固有属性，跟 op 一起进事件体，不由重放方推断。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">7</div><div>
+    <div class="d-t">上下文折叠不落盘 <span class="loc">core.rs:403–422</span></div>
+    <div class="d-b"><code>CompactHistory</code> 只改内存。恢复后折叠白做，下一轮再花一次摘要的钱；而且内存历史与盘上历史长度从此不一致，没有任何记录说明折叠发生在哪。</div>
+    <div class="fix">折叠是一条追加事件 <code>fold{from_seq,to_seq,summary}</code>，原文永不删除 —— 顺带让 UI 能「展开被折叠的部分」。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">11</div><div>
+    <div class="d-t">TurnStats 收下即丢弃 <span class="loc">core.rs:434</span></div>
+    <div class="d-b"><code>TurnOutcome.stats</code> 到了 Core，<code>handle</code> 只用了 <code>msgs</code> 和 <code>aborted</code>。<b>验收方案的副指标「干预次数」现在拿不到</b>，判断段耗时占比、插话次数、工具超时数也一样 —— 全部在这一行蒸发。</div>
+    <div class="fix"><code>turn</code> 表一行一轮，stats 存 JSON；<code>SessionApi::report()</code> 是它的第一个消费者。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">12</div><div>
+    <div class="d-t">CoreMetrics 不落盘也不发 UI <span class="loc">core.rs:52</span></div>
+    <div class="d-b">四个异常指标（stale_msg / refuse_inj / stale_op / pend_drop）设计意图是「不是 0 就说明有竞态」，但只在进程退出时的 <code>CoreSummary</code> 里可见。作为运行时告警完全用不上。</div>
+    <div class="fix">每轮末写一行 <code>metric</code>，并推一条 UiEvent 让状态栏能亮。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">13</div><div>
+    <div class="d-t">CostLedger 不落盘 <span class="loc">cost.rs:14</span></div>
+    <div class="d-b">R6 的账目只在进程内，重启归零，跨会话总花费拿不到。而「判断段占总 token 的 X%」这句话恰恰需要足够多的样本才有说服力。</div>
+    <div class="fix"><code>cost</code> 表一次调用一行，实测与估算分列（不合并，评审一问就露馅）。</div>
+  </div></div>
+
+  <div class="classhead">B · 语义不一致 —— 同一事实两处存储，或声明与实现对不上</div>
+
+  <div class="d"><div class="d-pin">8</div><div>
+    <div class="d-t">touched 声明「一轮」，实现是「一辈子」 <span class="loc">core.rs:177</span></div>
+    <div class="d-b">注释写「作用域天然只有一轮」，但 <code>HashMap&lt;Path,Version&gt;</code> 从不清空，长会话下每个被用户编辑过的 path 永久驻留。更根本的是它是 <code>Field.version</code> + <code>Field.origin</code> 的<b>冗余副本</b> —— 同一个事实存了两份，改一次语义要动两处。</div>
+    <div class="fix">收窄成「本轮内被用户改过的 path 集合」，turn 开始时清空；<code>Op::Remove</code> 留一条墓碑事件承载版本。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">9</div><div>
+    <div class="d-t">scene / scene_overrides 生命周期错位 <span class="loc">state.rs:171–174</span></div>
+    <div class="d-b"><code>scene</code> 是 turn 级瞬时量、<code>scene_overrides</code> 是审计流水，两者却都塞进跨会话持久的推断图里，同走一个 version、每次快照整份重写。结果之一：重启后 UI 显示上一次会话最后一轮的场景。</div>
+    <div class="fix">两者都从 <code>Workspace</code> 删除，改成事件（<code>scene</code> / <code>scene_override</code>）。UI 要当前场景就查最近一条。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">10</div><div>
+    <div class="d-t">turn 手里的快照与 Core 的 ws 在轮中分叉 <span class="loc">turn.rs:166 ↔ core.rs:359–382</span></div>
+    <div class="d-b">这就是你说的「场景选择后再塞进来比较奇怪」。<code>SceneDecided</code> / <code>Questions</code> 写进 Core 的 ws，但 turn 的 <code>snap</code> 是轮初取的，后面 <code>mk_context</code> 用的还是旧值 —— 同一份数据在同一时刻有两个不同的值，而且没有任何机制说明哪个算数。</div>
+    <div class="fix">把两个概念拆开命名：<code>TurnInput</code>（整轮不变的<b>只读输入</b>）与 <code>WorkspaceView</code>（Core 的当前物化视图）。turn 只往外追加事件，永远不往 <code>TurnInput</code> 里回灌。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">22</div><div>
+    <div class="d-t">Version 三重身份，且部分 bump 不落盘 <span class="loc">ids.rs:16 · core.rs:313/321/366/376</span></div>
+    <div class="d-b">同一个数同时是 CAS 令牌、崩溃恢复游标、UI 版本显示。而 <code>SceneDecided</code> / <code>Questions</code> / <code>OverrideScene</code> 都 bump 了 version 却<b>不</b> <code>emit_snapshot</code>，盘上 version 长期落后于内存 version。</div>
+    <div class="fix">改成事件流的 <code>seq</code>：一个数一个语义 —— 它是「第几条事件」，CAS 比它、恢复从它开始、UI 显示它、R5 回滚锚定它，全都是同一件事的不同用法。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">23</div><div>
+    <div class="d-t">restore 的边界判断在 pending 为空时会多算一版 <span class="loc">persist.rs:155</span></div>
+    <div class="d-b"><code>if rec.version &lt; version { continue }</code> 用的是严格小于。正常路径 AppendHistory(V) → commit bump 到 V+1 → snapshot(V+1) 没问题；但 pending 为空时 <code>commit_pending</code> 返回 0 且<b>不 bump</b>，snapshot 写的还是 V，那条记录会被重放，<code>version.bump()</code> 让恢复后的版本比实际大 1。</div>
+    <div class="fix">seq 由存储层单调分配，重放不再自己 bump，边界问题从结构上消失。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">14</div><div>
+    <div class="d-t">open / parked 静默覆盖，且用户根本改不了 <span class="loc">msg.rs:108–117 · state.rs:210</span></div>
+    <div class="d-b"><code>Questions</code> 整份覆盖，没有冲突裁决也没有 rejected 反馈：用户在侧栏往待落定里加了一条，模型这一轮结束时整份盖掉，<b>用户和模型都不会知道</b>。而且 <code>Op</code> 只能改 <code>fields</code>，UI 上这两个列表实际是只读的 —— 跟「待落定区是用户整理思路的地方」正好相反。</div>
+    <div class="fix">open / parked 走与 fields 同一条 op 通道，每条带 <code>item_id</code>，享受同一套 Stale 裁决。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">25</div><div>
+    <div class="d-t">client_id 去重只在内存 <span class="loc">core.rs:186</span></div>
+    <div class="d-b"><code>LruSet</code> 重启后清空。UI 在超时后重发同一条（这正是 client_id 存在的理由），跨了一次重启就会重复处理。</div>
+    <div class="fix">去重表落库，主键就是 client_id。</div>
+  </div></div>
+
+  <div class="classhead">C · 数据没用上 —— 定义了、产生了，但没有任何读者</div>
+
+  <div class="d cold"><div class="d-pin">18</div><div>
+    <div class="d-t">来源链是断的 <span class="loc">state.rs:83 · main.rs:301</span></div>
+    <div class="d-b"><code>Source::Repo</code> / <code>Paper</code> 只有 <code>Op::grounded</code> 能产生，而它<b>只在测试场景里被调过</b>。真实链路上工具明明知道来源（文件路径、行号、论文章节），但结果只以纯文本回到模型，靠模型自己再填一遍 source —— 那是模型的自由发挥，不是数据流。「无来源渲染虚线」这条设计因此没有可信的输入。</div>
+    <div class="fix"><code>ToolResult</code> 增加 <code>provenance: Vec&lt;Source&gt;</code>，模型基于某次工具结果写 op 时，harness 用 <code>call_id</code> 把来源接上。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">19</div><div>
+    <div class="d-t">TaskId 定义了从未使用 <span class="loc">ids.rs:53</span></div>
+    <div class="d-b">注释说「用于 R6 分账到具体调用」，但 <code>ToolResult</code> 里没有它，<code>CostLedger</code> 也只按 role 聚合。分账到工具粒度没做到。</div>
+    <div class="fix"><code>tool_call.task_id</code> 自增主键，<code>cost.task_id</code> 外键指过去。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">20</div><div>
+    <div class="d-t">Pending.turn 写了从不读 <span class="loc">state.rs:277</span></div>
+    <div class="d-b"><code>put</code> 每次写 <code>self.turn = Some(turn)</code>，但 <code>commit_pending</code> 不看它，没有任何地方校验。当前流程保证每轮必 commit 所以不出错，但字段是死的 —— 死字段的问题是下次有人改流程时会以为它在保护什么。</div>
+    <div class="fix">要么删掉，要么在 commit 时断言 <code>pending.turn == 结束的这一轮</code>。选后者：它能抓住「上一轮的 pending 混进这一轮」这类真 bug。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">21</div><div>
+    <div class="d-t">user_edit 要一个不被使用的参数 <span class="loc">handle.rs:133 · core.rs:485</span></div>
+    <div class="d-b"><code>apply</code> 的 <code>Origin::User</code> 分支根本不看 <code>base_version</code>，但接口逼 UI 传一个。设计上「用户永远赢」是对的，那就该把参数删掉，而不是留一个不看的形参让调用方猜它有没有用。</div>
+    <div class="fix"><code>SessionApi::edit(ops)</code>，没有版本参数。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">—</div><div>
+    <div class="d-t">UserMsg.at 只在注释里有用途 <span class="loc">msg.rs:36</span></div>
+    <div class="d-b">「进入 inbox 时的 Core 版本，排错用」—— 没有任何排错代码读它。</div>
+    <div class="fix">保留但改成事件的 <code>seq</code>，它自然就是「进队时刻」，不再是额外字段。</div>
+  </div></div>
+
+  <div class="classhead">D · 将来的消费者用不上 —— UI / R5 / R6 现在拿不到它们需要的形状</div>
+
+  <div class="d"><div class="d-pin">15</div><div>
+    <div class="d-t">ApplyReport 不含新值，UI 无法增量更新 <span class="loc">msg.rs:144</span></div>
+    <div class="d-b"><code>{applied: Vec&lt;Path&gt;, rejected, version}</code> 只有路径没有值。UI 收到 <code>StateChanged</code> 必须回头再拉一次整份快照才能画出来。</div>
+    <div class="fix">事件体里就带 op 全文，UI 直接应用；快照只在 Lagged 之后用来重新对齐。</div>
+  </div></div>
+
+  <div class="d"><div class="d-pin">16</div><div>
+    <div class="d-t">快照携带完整 history，每次深拷贝 <span class="loc">core.rs:552–559</span></div>
+    <div class="d-b"><code>Core::view()</code> 里 <code>history: self.history.clone()</code>。turn 每轮一次、用户每编辑一次一次，都是 O(全部历史) 的拷贝。全量上下文策略下这个量只增不减，几十轮之后每次侧栏改动都要复制几百 KB。</div>
+    <div class="fix">拆成两个类型：<code>WorkspaceView</code>（小，可以随便推）与 <code>Arc&lt;Vec&lt;Message&gt;&gt;</code>（追加用 <code>Arc::make_mut</code>，turn 拿 Arc 是 O(1)）。UI 的读接口默认<b>不带</b> history。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">17</div><div>
+    <div class="d-t">Message 无 id 无序号无时间戳 <span class="loc">model.rs:122</span></div>
+    <div class="d-b">单条消息无法寻址。于是：UI 做不了「引用这一条」；折叠之后原文只在 jsonl 里，界面上展不开；R5「回滚到某个点」没有锚点可选。</div>
+    <div class="fix"><code>msg_id</code>（ULID，自带时间序）+ 所属 <code>seq</code>；折叠只是给消息打 <code>folded_by</code>，不删除。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">24</div><div>
+    <div class="d-t">Delta 丢了补不回来 <span class="loc">msg.rs:239</span></div>
+    <div class="d-b">文档说「UI 收到 Lagged 就重取快照」，但正文 chunk 不在快照里 —— <b>它是唯一一类靠重取快照恢复不了的 UiEvent</b>。慢 UI 会看到正文中间缺一段而毫无提示。</div>
+    <div class="fix">delta 攒批写进 <code>message</code> 的增量列并带 <code>seq</code>；UI 发现 seq 跳号就按范围补拉，正文和状态走同一套对齐机制。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">—</div><div>
+    <div class="d-t">ask_user 的提问不是持久实体 <span class="loc">tools.rs:189–218</span></div>
+    <div class="d-b">提问只作为一条有损的 <code>UiEvent::Choice</code> 发出去。turn 结束、UI 刷新、进程重启，那道选择题就没了。更要紧的是：用户的回答回来时是一条<b>普通 user 消息</b>，模型看不出它是对哪个问题的回答。</div>
+    <div class="fix"><code>question</code> 表（含 <code>answered</code> 状态），<code>SessionApi::answer(question_id, choice)</code>，注入时写成「对提问 #N 的回答」。见 §7。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">—</div><div>
+    <div class="d-t">R5「回滚到任意快照」只有最新一份快照 <span class="loc">persist.rs:122</span></div>
+    <div class="d-b"><code>snapshot.json</code> 被原子覆盖，历史版本不存在。要回到过去只能从头重放 <code>history.jsonl</code>，而它没有保证从 v0 开始。</div>
+    <div class="fix">event log 天然支持重放到任意 seq；snapshot 降级成纯 cache，多存几份或不存都不影响正确性。</div>
+  </div></div>
+
+  <div class="d cold"><div class="d-pin">—</div><div>
+    <div class="d-t">memory 解析失败只 eprintln <span class="loc">memory.rs:99</span></div>
+    <div class="d-b">用户手改 <code>playbook.toml</code> 改坏了，程序静悄悄回退到内置目录继续跑。用户以为自己的场景生效了，实际没有 —— 「文件就是界面」的代价是必须把解析错误当成界面错误来报。</div>
+    <div class="fix">回退照旧（不能因为用户改坏一个文件就起不来），但发一条 <code>UiEvent::MemoryDegraded{file, err}</code>，状态栏常驻直到修好。</div>
+  </div></div>
+
+  </div>
+</section>
+
+<!-- ══════════════════ §3 ══════════════════ -->
+<section id="f3">
+  <div class="sec-head"><div class="sec-num">§3</div><h2>目标数据流</h2></div>
+  <p class="sec-sub">一句话概括这一轮的结构变化：<b>事件流是唯一真相，推断图是它的物化视图，快照只是省启动时间的 cache</b>。</p>
+
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1060 660" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="目标数据流图">
+        <defs>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+          </marker>
+          <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--ok)"/>
+          </marker>
+        </defs>
+        <style>
+          .b2{fill:var(--surface-2);stroke:var(--rule);stroke-width:1}
+          .b3{fill:var(--surface-3);stroke:var(--rule);stroke-width:1}
+          .l2{font-family:"IBM Plex Mono",monospace;font-size:11.5px;fill:var(--ink)}
+          .s2{font-family:"IBM Plex Mono",monospace;font-size:9.5px;fill:var(--muted)}
+          .n2{font-family:"IBM Plex Mono",monospace;font-size:10px;fill:var(--muted);letter-spacing:.1em}
+          .e2{stroke:var(--muted);stroke-width:1.2;fill:none;marker-end:url(#ar2)}
+          .e3{stroke:var(--ok);stroke-width:1.6;fill:none;marker-end:url(#ar3)}
+        </style>
+
+        <!-- producers -->
+        <text class="n2" x="16" y="30">产生者</text>
+        <rect class="b2" x="16" y="42" width="150" height="40" rx="2"/><text class="l2" x="28" y="67">用户 / UI</text>
+        <rect class="b2" x="16" y="90" width="150" height="40" rx="2"/><text class="l2" x="28" y="115">判断段</text>
+        <rect class="b2" x="16" y="138" width="150" height="40" rx="2"/><text class="l2" x="28" y="163">回答段流</text>
+        <rect class="b2" x="16" y="186" width="150" height="40" rx="2"/><text class="l2" x="28" y="211">run_tools</text>
+        <rect class="b2" x="16" y="234" width="150" height="40" rx="2"/><text class="l2" x="28" y="259">subagent</text>
+
+        <path class="e2" d="M166,62 L232,62 L232,150"/>
+        <path class="e2" d="M166,110 L212,110 L212,150"/>
+        <path class="e2" d="M166,158 L192,158 L192,152"/>
+        <path class="e2" d="M166,206 L212,206 L212,178"/>
+        <path class="e2" d="M166,254 L232,254 L232,178"/>
+
+        <!-- core -->
+        <text class="n2" x="256" y="30">CORE · 分配 seq · 唯一写权</text>
+        <rect x="256" y="42" width="300" height="252" rx="3" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.4"/>
+        <rect class="b3" x="274" y="62" width="264" height="44" rx="2"/><text class="l2" x="286" y="82">① 分配 seq，追加事件</text><text class="s2" x="286" y="97">同步·微秒级·不 await</text>
+        <rect class="b3" x="274" y="116" width="264" height="44" rx="2"/><text class="l2" x="286" y="136">② 折叠进物化视图</text><text class="s2" x="286" y="151">Workspace · CostLedger · 未答提问</text>
+        <rect class="b3" x="274" y="170" width="264" height="44" rx="2"/><text class="l2" x="286" y="190">③ 推 UiEvent（带 seq）</text><text class="s2" x="286" y="205">丢了可按 seq 范围补拉</text>
+        <rect class="b3" x="274" y="224" width="264" height="52" rx="2"/><text class="l2" x="286" y="244">history: Arc&lt;Vec&lt;Message&gt;&gt;</text><text class="s2" x="286" y="259">make_mut 追加；turn 取 Arc 是 O(1)</text>
+        <text class="s2" x="286" y="272" fill="var(--ok)">不再每轮深拷贝</text>
+
+        <!-- store -->
+        <text class="n2" x="596" y="30">STORE trait · SQLite 是其一</text>
+        <rect x="596" y="42" width="212" height="252" rx="3" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.2"/>
+        <rect class="b2" x="612" y="62" width="180" height="34" rx="2"/><text class="l2" x="622" y="84">event  ← 唯一真相</text>
+        <rect class="b3" x="612" y="102" width="180" height="30" rx="2"/><text class="l2" x="622" y="122">message</text>
+        <rect class="b3" x="612" y="138" width="180" height="30" rx="2"/><text class="l2" x="622" y="158">turn（含 stats）</text>
+        <rect class="b3" x="612" y="174" width="180" height="30" rx="2"/><text class="l2" x="622" y="194">tool_call · cost</text>
+        <rect class="b3" x="612" y="210" width="180" height="30" rx="2"/><text class="l2" x="622" y="230">question</text>
+        <rect class="b3" x="612" y="246" width="180" height="32" rx="2"/><text class="l2" x="622" y="266">snapshot（cache）</text>
+        <text class="s2" x="612" y="288">派生表与 event 在同一事务里写</text>
+
+        <path class="e3" d="M556,150 L588,150"/>
+        <path class="e2" d="M588,190 L560,190" />
+        <text class="s2" x="558" y="140" fill="var(--ok)">append(batch, flush)</text>
+        <text class="s2" x="556" y="208">replay / snapshot</text>
+
+        <!-- consumers -->
+        <text class="n2" x="848" y="30">消费者</text>
+        <rect class="b2" x="848" y="42" width="196" height="40" rx="2"/><text class="l2" x="860" y="61">TurnInput</text><text class="s2" x="860" y="75">整轮不变的只读输入</text>
+        <rect class="b2" x="848" y="90" width="196" height="40" rx="2"/><text class="l2" x="860" y="109">WorkspaceView</text><text class="s2" x="860" y="123">不带 history，可随便推</text>
+        <rect class="b2" x="848" y="138" width="196" height="40" rx="2"/><text class="l2" x="860" y="157">UI 增量渲染</text><text class="s2" x="860" y="171">seq 跳号即补拉</text>
+        <rect class="b2" x="848" y="186" width="196" height="40" rx="2"/><text class="l2" x="860" y="205">SessionReport</text><text class="s2" x="860" y="219">R6：cost + stats + metrics</text>
+        <rect class="b2" x="848" y="234" width="196" height="40" rx="2"/><text class="l2" x="860" y="253">R5 回滚到某个 seq</text><text class="s2" x="860" y="267">重放即得，无需多份快照</text>
+        <path class="e2" d="M808,90 L840,90"/>
+        <path class="e2" d="M808,160 L840,160"/>
+        <path class="e2" d="M808,230 L840,230"/>
+
+        <!-- 恢复回路 -->
+        <path class="e3" d="M700,294 L700,330 L406,330 L406,300"/>
+        <text class="s2" x="452" y="324" fill="var(--ok)">启动恢复：snapshot(seq) + replay(seq..) —— 现在是主干，不是可选分支</text>
+
+        <!-- memory track -->
+        <rect x="16" y="380" width="1028" height="96" rx="3" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text class="n2" x="34" y="404">持久层 · 刻意不进 SQLite</text>
+        <rect class="b2" x="34" y="414" width="176" height="44" rx="2"/><text class="l2" x="46" y="434">用户 / 编辑器</text><text class="s2" x="46" y="449">随时直接改，包括 bootstrap</text>
+        <rect class="b2" x="246" y="414" width="240" height="44" rx="2"/><text class="l2" x="258" y="434">memory/*.md · playbook.toml</text><text class="s2" x="258" y="449">文件就是界面</text>
+        <rect class="b2" x="522" y="414" width="200" height="44" rx="2"/><text class="l2" x="534" y="434">Memory（Arc，只读）</text><text class="s2" x="534" y="449">每次会话启动重读</text>
+        <rect class="b2" x="758" y="414" width="200" height="44" rx="2"/><text class="l2" x="770" y="434">prompt_block · 场景 · 案例</text><text class="s2" x="770" y="449">跨轮不变，命中 cache</text>
+        <path class="e2" d="M210,436 L238,436"/><path class="e2" d="M486,436 L514,436"/><path class="e2" d="M722,436 L750,436"/>
+        <text class="s2" x="34" y="470">一键蒸馏写 draft-&lt;ts&gt;.md 到同一目录，等用户看过改过再合并 —— 模型不能自己写进用户的记忆。</text>
+
+        <text class="s2" x="16" y="516" fill="var(--ok)">切分依据是 owner：推断层 owner 是 Core ⇒ 进 SQLite（要事务、要崩溃原子性、要按 id 查）；持久层 owner 是用户 ⇒ 留文件（要人写得动）。</text>
+        <text class="s2" x="16" y="536">引入 SQLite 不动摇「文件就是界面」：把持久层塞进 db 等于把「用户可修改」这条设计约束押给一个还没写的 UI。</text>
+
+        <text class="s2" x="16" y="574">三条不变量由结构保证，不再靠人工守纪律：</text>
+        <text class="s2" x="16" y="592">　I4  seq 严格 +1、无空洞 —— 由 event 表主键保证，不是由「先写日志再改状态」的约定保证。</text>
+        <text class="s2" x="16" y="610">　I1  replay(0..n) ≡ snapshot(n) —— 快照可以丢，丢了重算；顺序错误不再是数据损坏。</text>
+        <text class="s2" x="16" y="628">　I3  tool_calls 与 tool 消息配对 —— 恢复时按未配对的 call_id 补 [interrupted]，与打断收尾走同一段代码。</text>
+      </svg>
+    </div>
+    <figcaption>图 B · 目标。下一轮实现完成后按实现重画一次，逐节点对照 —— 对不上的地方就是实现偏离了设计。</figcaption>
+  </figure>
+</section>
+
+<!-- ══════════════════ §4 ══════════════════ -->
+<section id="f4">
+  <div class="sec-head"><div class="sec-num">§4</div><h2>数据字典</h2></div>
+  <p class="sec-sub">目标态。「唯一 owner」这一列是最要紧的：一个 datum 只能有一个 owner，其它人一律通过 owner 的修改入口改它。表格横向可滚。</p>
+
+  <div class="scroll" style="margin:22px 0">
+  <table class="dict">
+    <thead><tr>
+      <th>datum</th><th>产生者</th><th>唯一 owner</th><th>修改入口</th><th>消费者</th><th>持久位置</th><th>恢复入口</th><th>ID / 序号</th><th>失败语义</th>
+    </tr></thead>
+    <tbody>
+    <tr>
+      <td class="k">用户输入</td>
+      <td>UI</td><td><span class="chip c-core">Core.inbox</span></td><td><code>SessionApi::send</code></td>
+      <td>turn 检查点 · history · UI 回显</td><td><code>event(user_input)</code></td>
+      <td>重放；未被 turn 消费的重回 inbox</td><td><code>seq</code> + <code>client_id</code></td>
+      <td>落盘前不 ack，UI 停在「发送中」；重发同 client_id 幂等</td>
+    </tr>
+    <tr>
+      <td class="k">对提问的回答</td>
+      <td>UI</td><td><span class="chip c-core">Core.inbox</span></td><td><code>SessionApi::answer(qid, choice)</code></td>
+      <td>注入时标注「对提问 #N 的回答」· question 状态</td><td><code>event(answer)</code> + <code>question.answer</code></td>
+      <td>同用户输入</td><td><code>seq</code> + <code>question_id</code></td>
+      <td>提问所属轮已结束仍收下，降级为普通输入</td>
+    </tr>
+    <tr>
+      <td class="k">正文 delta</td>
+      <td>回答段流</td><td><span class="chip c-warn">turn 本地 partial</span></td><td>只追加</td>
+      <td>UI 实时 · turn 收尾拼成 Message</td><td>攒批进 <code>event(delta)</code>，≤200ms 一条</td>
+      <td>重放到最后一条，标 <code>interrupted</code></td><td><code>seq</code> + <code>msg_id</code></td>
+      <td>流断 ⇒ 已收到部分写成 interrupted 消息，不丢不静默</td>
+    </tr>
+    <tr>
+      <td class="k">Message</td>
+      <td>turn</td><td><span class="chip c-core">Core.history</span></td><td><code>TurnApi::emit</code>（逐条，不等轮末）</td>
+      <td>prompt · UI · 折叠 · 蒸馏</td><td><code>message</code> 表</td>
+      <td>按 seq 读，<code>folded_by IS NULL</code> 即活动上下文</td><td><code>msg_id</code>(ULID) + <code>seq</code></td>
+      <td>写失败 ⇒ writer nack ⇒ <code>UiEvent::PersistDegraded</code>，继续跑但状态栏常亮</td>
+    </tr>
+    <tr>
+      <td class="k">工具调用与结果</td>
+      <td>回答段模型 / run_tools</td><td><span class="chip c-warn">turn</span></td><td><code>run_tools</code></td>
+      <td>模型下一跳 · UI 任务列表 · R6 分账</td><td><code>tool_call</code> 表</td>
+      <td>未配对 call_id 补 <code>[interrupted]</code></td><td><code>call_id</code>(模型给) + <code>task_id</code>(本地)</td>
+      <td>超时 / 失败 / 未找到一律作为结果返回模型，<b>永不抛异常中断 turn</b></td>
+    </tr>
+    <tr>
+      <td class="k">Op（推断改动）</td>
+      <td>判断段 · 回答段 · 用户</td><td><span class="chip c-core">Core</span> pending→committed</td><td><code>TurnApi::propose</code> / <code>SessionApi::edit</code></td>
+      <td>Workspace 物化 · prompt · UI 图</td><td><code>event(op)</code> 追加，含 origin 与 source</td>
+      <td>折叠重放</td><td><code>seq</code></td>
+      <td>Stale ⇒ rejected 回喂模型（含原值）；写盘失败 ⇒ 不进 committed</td>
+    </tr>
+    <tr>
+      <td class="k">Workspace 推断图</td>
+      <td>op 折叠的结果</td><td><span class="chip c-core">Core</span>（内存物化视图）</td><td>只能经 op，没有第二条路</td>
+      <td>prompt · UI · 蒸馏</td><td><code>snapshot(seq, blob)</code>，<b>仅 cache</b></td>
+      <td>snapshot + 重放到 MAX(seq)</td><td><code>seq</code></td>
+      <td>快照损坏 ⇒ 从 seq 0 全量重放（慢但正确），不算数据丢失</td>
+    </tr>
+    <tr>
+      <td class="k">open / parked</td>
+      <td>模型 + 用户</td><td><span class="chip c-core">Core</span></td><td>与 fields 同一条 op 通道</td>
+      <td>prompt · UI</td><td><code>event(op)</code></td><td>同上</td><td><code>item_id</code></td>
+      <td>享受同一套 Stale 裁决，<b>不再静默整份覆盖</b></td>
+    </tr>
+    <tr>
+      <td class="k">场景判定</td>
+      <td>判断段</td><td><span class="chip c-core">event log</span>（不再是 ws 字段）</td><td><code>TurnApi::emit(Scene)</code></td>
+      <td>UI 侧栏 · guidance 注入</td><td><code>event(scene)</code> + <code>turn.scene</code></td>
+      <td>查最近一条</td><td><code>seq</code> + <code>turn_id</code></td>
+      <td>判定失败 ⇒ 记 <code>none</code> + 原因，不阻断回答段</td>
+    </tr>
+    <tr>
+      <td class="k">场景更换</td>
+      <td>用户</td><td><span class="chip c-core">event log</span></td><td><code>SessionApi::override_scene</code></td>
+      <td>UI · <b>playbook 场景描述回归修正的输入</b></td><td><code>event(scene_override)</code></td>
+      <td>查询即得</td><td><code>seq</code></td>
+      <td>无。这是纯审计流水</td>
+    </tr>
+    <tr>
+      <td class="k">提问 Question</td>
+      <td>回答段模型（ask_user）</td><td><span class="chip c-core">Core</span></td><td><code>run_tools</code> 派发</td>
+      <td>UI 渲染选择题 · 回答绑定</td><td><code>question</code> 表</td>
+      <td>未回答的重新画出来</td><td><code>question_id</code></td>
+      <td>参数坏 ⇒ 作为工具失败返回模型；无人回答不阻塞任何流程</td>
+    </tr>
+    <tr>
+      <td class="k">折叠 Fold</td>
+      <td>subagent</td><td><span class="chip c-core">Core</span></td><td><code>TurnApi::emit(Fold)</code></td>
+      <td>prompt 组装 · UI「展开原文」</td><td><code>event(fold)</code> + <code>message.folded_by</code>，<b>原文不删</b></td>
+      <td>重放即得</td><td><code>seq</code></td>
+      <td>摘要失败 ⇒ 本轮带全量继续，记 <code>fold_failed</code>，下一轮再试</td>
+    </tr>
+    <tr>
+      <td class="k">TurnStats</td>
+      <td>turn</td><td><span class="chip c-core">Core</span></td><td><code>TurnApi::finished</code></td>
+      <td><b>UI 状态栏 · R6 · 验收副指标「干预次数」</b></td><td><code>turn.stats</code> JSON</td>
+      <td>查询即得</td><td><code>turn_id</code></td>
+      <td>纯观测，无失败语义；turn 崩了这行 <code>outcome=crashed</code></td>
+    </tr>
+    <tr>
+      <td class="k">Usage / 成本</td>
+      <td>三个模型角色</td><td><span class="chip c-core">Core.cost</span></td><td><code>TurnApi::emit(Cost)</code></td>
+      <td>UI CostTick · R6 判断段占比</td><td><code>cost</code> 表，一次调用一行</td>
+      <td><code>SUM</code> 查询</td><td><code>seq</code> + <code>task_id</code></td>
+      <td>打断拿不到 usage ⇒ 估算并 <code>estimated=1</code>，<b>与实测分列不合并</b></td>
+    </tr>
+    <tr>
+      <td class="k">异常指标</td>
+      <td>Core</td><td><span class="chip c-core">Core</span></td><td>内部</td>
+      <td>UI 告警条 · 链路测试断言</td><td><code>metric</code> 表，每轮末一行</td>
+      <td>查询即得</td><td><code>turn_id</code></td>
+      <td>纯观测。非 0 意味着有竞态，不意味着数据错</td>
+    </tr>
+    <tr>
+      <td class="k">seq（会话版本）</td>
+      <td>Store</td><td><span class="chip c-core">Store</span>（不是 Core）</td><td>只有事件追加能推进</td>
+      <td>CAS · 恢复游标 · UI 版本 · R5 锚点</td><td>就是 <code>event.seq</code> 主键</td>
+      <td><code>SELECT MAX(seq)</code></td><td>它自己</td>
+      <td>单调、无空洞是不变量 I4；违反即视为存储损坏，拒绝启动并提示</td>
+    </tr>
+    <tr>
+      <td class="k">持久层 Memory</td>
+      <td>用户手写 + 蒸馏草稿</td><td><span class="chip c-user">用户</span>（不是 Core）</td><td>文件系统 / 编辑器 / 将来的 UI 表单</td>
+      <td><code>prompt_block</code> · 场景目录 · 案例检索</td><td><code>memory/*.md · playbook.toml</code>（<b>不进 db</b>）</td>
+      <td>每次会话启动重读；缺哪个补哪个</td><td>文件名 + <code>scene.id</code> / <code>case.id</code></td>
+      <td>解析失败 ⇒ 回退 builtin <b>并发 UI 告警</b>，不静默</td>
+    </tr>
+    <tr>
+      <td class="k">蒸馏草稿</td>
+      <td>subagent</td><td><span class="chip c-user">用户</span></td><td><code>SessionApi::distill</code></td>
+      <td>用户阅读后手工合并</td><td><code>memory/draft-&lt;ts&gt;.md</code></td>
+      <td>文件在</td><td>时间戳</td>
+      <td>失败发 UiEvent，不重试、不覆盖任何既有记忆</td>
+    </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note prose">
+    <strong>三个 owner 归属是这一轮真正的改动。</strong>场景判定的 owner 从 <code>Workspace</code> 挪到 event log（它是流水不是状态）；seq 的 owner 从 Core 挪到 Store（分配序号和持久化是同一件事，分开就要维护两套一致性）；持久层的 owner 明确写成<b>用户</b> —— 这一条决定了它不能进 SQLite。
+  </div>
+</section>
+
+<!-- ══════════════════ §5 ══════════════════ -->
+<section id="f5">
+  <div class="sec-head"><div class="sec-num">§5</div><h2>SQLite schema</h2></div>
+  <p class="sec-sub">一个 workspace 一个 <code>store.db</code>，表里带 <code>session_id</code> —— 不是一个会话一个文件，因为跨会话的成本汇总、找历史会话、蒸馏读多个会话都需要联查；会话隔离靠索引不靠文件边界。</p>
+
+<pre><i>-- 打开时设定。WAL 让「UI 读」和「writer 写」互不阻塞，这是引入 SQLite 最直接的收益。</i>
+<b>PRAGMA</b> journal_mode = WAL;
+<b>PRAGMA</b> synchronous  = NORMAL;   <i>-- WAL 下崩溃安全；掉电最多丢最后一个未 checkpoint 的事务</i>
+<b>PRAGMA</b> foreign_keys = ON;
+
+<i>-- ═══ 唯一真相 ═══════════════════════════════════════</i>
+<b>CREATE TABLE</b> event (
+  seq        <b>INTEGER PRIMARY KEY AUTOINCREMENT</b>,  <i>-- 全库单调。取代 Version，一个数一个语义</i>
+  session_id <b>TEXT    NOT NULL</b>,
+  turn_id    <b>INTEGER</b>,                            <i>-- NULL = 不属于任何一轮（用户编辑、phase 推进）</i>
+  at_ms      <b>INTEGER NOT NULL</b>,
+  kind       <b>TEXT    NOT NULL</b>,   <i>-- user_input | answer | op | scene | scene_override |</i>
+                                 <i>-- message | delta | fold | phase | question | tool | cost |</i>
+                                 <i>-- turn_start | turn_end</i>
+  actor      <b>TEXT    NOT NULL</b>,   <i>-- user | judge | answer | subagent | tool | system</i>
+  body       <b>TEXT    NOT NULL</b>    <i>-- JSON，按 kind 定形状</i>
+);
+<b>CREATE INDEX</b> event_sess_seq <b>ON</b> event(session_id, seq);
+<b>CREATE INDEX</b> event_turn     <b>ON</b> event(turn_id, seq);
+<b>CREATE INDEX</b> event_kind     <b>ON</b> event(session_id, kind, seq);
+
+<i>-- ═══ 物化 cache：丢了能重算，只为省启动时间 ═══════════</i>
+<b>CREATE TABLE</b> snapshot (
+  session_id <b>TEXT NOT NULL</b>,
+  seq        <b>INTEGER NOT NULL</b>,      <i>-- 折叠到哪一条</i>
+  ws         <b>BLOB NOT NULL</b>,         <i>-- Workspace 的编码</i>
+  at_ms      <b>INTEGER NOT NULL</b>,
+  <b>PRIMARY KEY</b>(session_id, seq)     <i>-- 留多份：R5 回滚时就近起跳，不必从 0 重放</i>
+);
+
+<i>-- ═══ 派生查询表：与 event 在同一事务里写 ═══════════════</i>
+<b>CREATE TABLE</b> message (
+  msg_id       <b>TEXT PRIMARY KEY</b>,     <i>-- ULID，自带时间序。UI 引用与折叠展开的锚点</i>
+  session_id   <b>TEXT NOT NULL</b>,
+  seq          <b>INTEGER NOT NULL REFERENCES</b> event(seq),
+  turn_id      <b>INTEGER</b>,
+  role         <b>TEXT NOT NULL</b>,        <i>-- system | user | assistant | tool</i>
+  content      <b>TEXT NOT NULL</b>,
+  tool_calls   <b>TEXT</b>,                 <i>-- JSON array</i>
+  tool_call_id <b>TEXT</b>,
+  interrupted  <b>INTEGER NOT NULL DEFAULT</b> 0,
+  folded_by    <b>INTEGER</b>               <i>-- 被哪条 fold 事件折叠；NULL = 仍在活动上下文里。</i>
+                                    <i>-- 原文永不删除，所以 UI 能展开、蒸馏能读全程</i>
+);
+<b>CREATE INDEX</b> message_ctx <b>ON</b> message(session_id, folded_by, seq);
+
+<b>CREATE TABLE</b> turn (
+  turn_id    <b>INTEGER PRIMARY KEY AUTOINCREMENT</b>,
+  session_id <b>TEXT NOT NULL</b>,
+  started_ms <b>INTEGER NOT NULL</b>,
+  ended_ms   <b>INTEGER</b>,
+  outcome    <b>TEXT</b>,     <u>-- done | aborted | crashed</u>
+                       <i>-- crashed 由启动时「有 turn_start 没 turn_end」扫出来。</i>
+                       <i>-- 这一列是「上次异常退出」提示的唯一依据</i>
+  scene      <b>TEXT</b>,
+  stats      <b>TEXT</b>      <i>-- TurnStats 的 JSON。R6 与验收副指标的落点（缺陷 11）</i>
+);
+
+<b>CREATE TABLE</b> tool_call (
+  task_id  <b>INTEGER PRIMARY KEY AUTOINCREMENT</b>,   <i>-- TaskId 终于有消费者了（缺陷 19）</i>
+  turn_id  <b>INTEGER NOT NULL REFERENCES</b> turn(turn_id),
+  call_id  <b>TEXT NOT NULL</b>,                      <i>-- 模型给的，必须原样回填到 tool 消息</i>
+  name     <b>TEXT NOT NULL</b>,
+  args     <b>TEXT NOT NULL</b>,
+  kind     <b>TEXT</b>,        <i>-- ok | timeout | interrupted | not_found | failed</i>
+  ms       <b>INTEGER</b>,
+  provenance <b>TEXT</b>,      <i>-- JSON: [{repo:"src/x.py:42"}] —— 接上断掉的来源链（缺陷 18）</i>
+  <b>UNIQUE</b>(turn_id, call_id)
+);
+
+<b>CREATE TABLE</b> question (
+  question_id <b>TEXT PRIMARY KEY</b>,
+  session_id  <b>TEXT NOT NULL</b>,
+  turn_id     <b>INTEGER NOT NULL</b>,
+  text        <b>TEXT NOT NULL</b>,
+  options     <b>TEXT NOT NULL</b>,      <i>-- JSON array</i>
+  answer      <b>TEXT</b>,               <i>-- NULL = 还没答，启动时要重新画出来</i>
+  answer_seq  <b>INTEGER</b>
+);
+
+<b>CREATE TABLE</b> cost (
+  seq        <b>INTEGER PRIMARY KEY REFERENCES</b> event(seq),
+  session_id <b>TEXT NOT NULL</b>,
+  turn_id    <b>INTEGER</b>,
+  role       <b>TEXT NOT NULL</b>,       <i>-- judge | answer | subagent</i>
+  task_id    <b>INTEGER</b>,             <i>-- 分账到具体工具调用</i>
+  prompt     <b>INTEGER NOT NULL</b>,
+  completion <b>INTEGER NOT NULL</b>,
+  estimated  <b>INTEGER NOT NULL DEFAULT</b> 0   <i>-- 与实测分列。混在一起账目会显得比实际精确</i>
+);
+
+<b>CREATE TABLE</b> metric (
+  turn_id <b>INTEGER PRIMARY KEY REFERENCES</b> turn(turn_id),
+  body    <b>TEXT NOT NULL</b>        <i>-- CoreMetrics 增量。四个异常计数非 0 时 UI 亮告警</i>
+);
+
+<b>CREATE TABLE</b> dedupe (
+  client_id <b>TEXT PRIMARY KEY</b>,   <i>-- 落盘去重，重启后重发仍幂等（缺陷 25）</i>
+  seq       <b>INTEGER NOT NULL</b>
+);</pre>
+
+  <div class="note prose">
+    <strong>为什么派生表和 event 在同一事务。</strong>不这样做就回到了现在的问题：两份数据、两个写入时点、一个崩溃窗口。同一事务下 <code>message</code> 永远是 <code>event</code> 的一个视图，不一致这件事在结构上不成立 —— 这正是「引入 SQLite 减少人工维护写入语义的负担」这句话的兑现处。
+  </div>
+</section>
+
+<!-- ══════════════════ §6 ══════════════════ -->
+<section id="f6">
+  <div class="sec-head"><div class="sec-num">§6</div><h2>落盘时机与 cache</h2></div>
+  <p class="sec-sub">Core 依然不碰磁盘。变的是落盘的<b>粒度</b>（轮 → 事件）与<b>确认语义</b>（无 → 分两级）。</p>
+
+<pre>Core.handle(msg)            <i>── 同步、微秒级、不 await ──</i>
+  ├ 分配 seq（向 Store 预留一段，或由 Store 回填）
+  ├ 折叠进内存物化视图（Workspace / CostLedger / open_questions）
+  ├ 推 UiEvent（带 seq）
+  └ 发 WriteJob{ events, flush } 给 writer
+
+writer task（独占 SQLite 写连接，spawn_blocking 里跑 rusqlite）
+  ├ <b>must-flush</b>  ── 立刻开事务、提交、回 oneshot ack
+  │    用户输入 · 用户编辑 · 用户回答 · turn 结束 · phase 推进 · shutdown
+  └ <b>best-effort</b> ── 攒到 ≤64 条或 ≤200ms 再一个事务写掉
+       正文 delta · 工具事件 · cost · scene · metric</pre>
+
+  <p class="prose">分两级的理由：must-flush 的那些是<b>用户已经付出过动作</b>的数据，丢了用户会知道并且会生气；best-effort 的那些是模型产物，掉电丢掉最后 200ms 的正文，代价只是重生成。全部 must-flush 会让每个 delta 都开一次事务，全部 best-effort 就回到了「用户输入还在内存里」的老问题。</p>
+
+  <h3>UI 的 ack 语义</h3>
+  <p class="prose"><code>SessionApi::send</code> 在 writer 事务提交后才返回 <code>Ack{seq}</code>。UI 在此之前把气泡显示成「发送中」。这一条直接解掉缺陷 5：用户看到消息变成已送达，就意味着它已经在盘上了。</p>
+
+  <h3>Core 内存里保留什么</h3>
+  <table class="narrow" style="margin:16px 0">
+    <thead><tr><th>缓存</th><th>形态</th><th>为什么是这个形态</th><th>失效 / 重建</th></tr></thead>
+    <tbody>
+      <tr><td class="k">Workspace</td><td>可变结构体</td><td>推断图是 CAS 的仲裁对象，必须在 Core 手里且随时可读</td><td>启动时 snapshot + replay</td></tr>
+      <tr><td class="k">history</td><td><code>Arc&lt;Vec&lt;Message&gt;&gt;</code></td><td>全量上下文策略要求每轮拿到全部。<code>Arc::make_mut</code> 追加，turn 取 Arc clone 是 O(1) —— 解掉缺陷 16 的每轮深拷贝</td><td>同上；折叠只换 Arc 内容</td></tr>
+      <tr><td class="k">CostLedger</td><td>聚合计数</td><td>UI 状态栏每次 CostTick 都要显示总额，不能每次去 SQL 求和</td><td>启动时一次 <code>SUM</code> 查询</td></tr>
+      <tr><td class="k">open_questions</td><td><code>Vec&lt;QuestionId&gt;</code></td><td>回答到来时要 O(1) 认领</td><td>启动时查 <code>answer IS NULL</code></td></tr>
+      <tr><td class="k">touched</td><td><code>HashSet&lt;Path&gt;</code>，<b>每轮清空</b></td><td>只服务「本轮内用户改过没有」这一个问题，作用域就是一轮 —— 解掉缺陷 8 的声明实现不符</td><td>turn 开始时清</td></tr>
+      <tr><td class="k">Memory</td><td><code>Arc&lt;Memory&gt;</code>，只读</td><td>owner 是用户，Core 只读不写</td><td>会话启动时重读；文件变更暂不热加载</td></tr>
+    </tbody>
+  </table>
+
+  <h3>快照写入频率</h3>
+  <p class="prose">每 <b>200 条事件</b>或<b>每轮结束</b>写一份，保留最近 10 份。快照纯粹是启动加速，写失败只记一条告警不影响任何正确性 —— 这是把 snapshot 从「崩溃安全的一半」降级成「cache」之后拿到的自由度。</p>
+</section>
+
+<!-- ══════════════════ §7 ══════════════════ -->
+<section id="f7">
+  <div class="sec-head"><div class="sec-num">§7</div><h2>五种收尾的语义</h2></div>
+  <p class="sec-sub">你点名的这几种情况现在各自的行为定死在这张表里。最后两行是当前完全没有实现的。</p>
+
+  <div class="scroll" style="margin:22px 0">
+  <table class="narrow" style="min-width:1080px">
+    <thead><tr><th>情况</th><th>触发</th><th>turn 怎么收</th><th>落了什么</th><th>重开之后用户看到</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">正常结束</td><td><code>StreamEvent::Done</code></td>
+        <td><code>break 'turn</code></td>
+        <td>全部消息 · pending 提交 · <code>turn.outcome=done</code> · stats</td>
+        <td>完整的一轮</td>
+      </tr>
+      <tr>
+        <td class="k">用户中断</td><td><code>interrupt</code></td>
+        <td>cancel → <code>close_open_calls</code> 补齐缺失的 tool 消息，partial 标 interrupted</td>
+        <td>已产生的全部（<b>打断也提交 pending</b>）· <code>outcome=aborted</code> · 估算 usage</td>
+        <td>灰显的半截回答，可以接着说</td>
+      </tr>
+      <tr>
+        <td class="k">插话（排队）</td><td><code>send(Queue)</code></td>
+        <td>下一个检查点吸收，本轮继续</td>
+        <td>输入在<b>进 inbox 的同一刻</b>就 must-flush 落盘</td>
+        <td>插的话在，且已经被回应过</td>
+      </tr>
+      <tr>
+        <td class="k">插话（打断并发）</td><td><code>send(Interrupt)</code></td>
+        <td>同「用户中断」，随后开新一轮</td>
+        <td>同上 + 新轮的 <code>turn_start</code></td>
+        <td>两轮界限分明</td>
+      </tr>
+      <tr>
+        <td class="k">回答模型提问</td><td><code>answer(qid, choice)</code></td>
+        <td>同插话，但注入时写成「对提问 #N 的回答：…」</td>
+        <td><code>event(answer)</code> + <code>question.answer</code> 更新</td>
+        <td>那道选择题变成已答状态，不再悬着</td>
+      </tr>
+      <tr>
+        <td class="k">优雅退出</td><td><code>shutdown</code></td>
+        <td>cancel 并<b>等</b> TurnFinished（3s 超时），再等 writer 确认 flush</td>
+        <td>全部 · <code>outcome=aborted</code></td>
+        <td>与「用户中断」完全一致</td>
+      </tr>
+      <tr>
+        <td class="k">被 kill / 崩溃</td><td>无</td>
+        <td>无</td>
+        <td>已 flush 的部分；启动时把「有 turn_start 无 turn_end」的轮标成 <code>crashed</code></td>
+        <td>半截回答 + 一条「上次异常退出」提示；<b>已 ack 的用户输入一条不丢</b></td>
+      </tr>
+      <tr>
+        <td class="k">上下文折叠</td><td>接近 80% 上限</td>
+        <td>追加 fold 事件，本轮继续</td>
+        <td><code>event(fold)</code> + <code>message.folded_by</code>，原文保留</td>
+        <td>一条可展开的折叠条，不是消失的历史</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note prose">
+    <strong>「一个 turn 只存一个 snapshot」这句话在新结构里不成立了 —— 因为 snapshot 不再是 turn 的产物。</strong>turn 只做一件事：往 event log 追加。snapshot 是 Core 对 event log 的定期折叠，跟 turn 边界完全解耦。turn 手里那份改名叫 <code>TurnInput</code>，它是整轮不变的<b>只读输入</b>，从此不会有「场景选完了再往里塞一个字段」这种事 —— 场景判定是一条<b>出向</b>事件，不回灌。
+  </div>
+
+  <h3>ask_user 为什么仍然不阻塞</h3>
+  <p class="prose">工具不等用户，这一条不变：阻塞会让 turn 挂在人类时间尺度的等待上，打断、插话、落盘全都得排队。变的是<b>回答能被认领</b> —— 提问有 id、有持久状态，回答带着 id 回来，注入时告诉模型这是对哪个问题的答复。现在的实现里这层绑定完全没有，模型只能靠猜。</p>
+</section>
+
+<!-- ══════════════════ §8 ══════════════════ -->
+<section id="f8">
+  <div class="sec-head"><div class="sec-num">§8</div><h2>接口封装</h2></div>
+  <p class="sec-sub">现在 <code>CoreHandle</code> 上 UI 侧和 turn 侧的方法混在一起，四个 emit 类方法四种签名，读接口只有一个「返回一切」的 <code>snapshot()</code>。拆成四个面，各自只服务一类调用方。</p>
+
+<pre><i>// ── 给 UI：axum / WebSocket handler 只认这一个 ─────────────────</i>
+<b>pub trait</b> SessionApi {
+    <i>// 写：全部返回 Ack{seq}，且在落盘事务提交后才返回</i>
+    <b>async fn</b> send(&amp;self, text: String, mode: SendMode) -&gt; Result&lt;Ack&gt;;
+    <b>async fn</b> answer(&amp;self, q: QuestionId, choice: String) -&gt; Result&lt;Ack&gt;;
+    <b>async fn</b> edit(&amp;self, ops: Vec&lt;Op&gt;) -&gt; Result&lt;ApplyReport&gt;;   <u>// 不再要 base_version</u>
+    <b>async fn</b> interrupt(&amp;self) -&gt; Result&lt;Ack&gt;;
+    <b>async fn</b> advance_phase(&amp;self, to: Phase) -&gt; Result&lt;Ack&gt;;
+    <b>async fn</b> override_scene(&amp;self, to: SceneId) -&gt; Result&lt;Ack&gt;;
+    <b>async fn</b> distill(&amp;self) -&gt; Result&lt;DraftPath&gt;;
+
+    <i>// 读：分开，不再有一个「返回一切」的 snapshot</i>
+    <b>async fn</b> workspace(&amp;self) -&gt; Arc&lt;WorkspaceView&gt;;        <i>// 小，不含 history</i>
+    <b>async fn</b> messages(&amp;self, r: SeqRange) -&gt; Vec&lt;Message&gt;;   <i>// 分页；含被折叠的原文</i>
+    <b>async fn</b> open_questions(&amp;self) -&gt; Vec&lt;Question&gt;;
+    <b>async fn</b> report(&amp;self) -&gt; SessionReport;                 <i>// R6：cost + stats + metrics</i>
+    <b>fn</b> subscribe(&amp;self) -&gt; broadcast::Receiver&lt;UiEvent&gt;;      <i>// 事件带 seq，跳号即补拉</i>
+}
+
+<i>// ── 给 turn task ────────────────────────────────────────────</i>
+<b>pub trait</b> TurnApi {
+    <b>async fn</b> input(&amp;self, turn: TurnId) -&gt; Option&lt;TurnInput&gt;;  <i>// 整轮一次，只读，不回灌</i>
+    <b>async fn</b> take_injections(&amp;self, turn: TurnId) -&gt; Vec&lt;Injection&gt;;
+    <b>async fn</b> propose(&amp;self, turn: TurnId, ops: Vec&lt;Op&gt;) -&gt; ApplyReport;
+    <b>async fn</b> emit(&amp;self, turn: TurnId, ev: TurnEvent);        <u>// 一个方法替掉四个</u>
+    <b>async fn</b> finished(&amp;self, turn: TurnId, out: TurnOutcome);
+}
+
+<i>// scene_decided / questions / compact_history / cost 四个签名不同的方法合并成一个枚举，</i>
+<i>// 因为它们本来就是同一件事：turn 往 event log 追加一条。</i>
+<b>pub enum</b> TurnEvent {
+    Message(Message), Delta(String), Scene{ id: SceneId, rationale: String },
+    Fold{ from: Seq, to: Seq, summary: String }, Tool(ToolRecord),
+    Cost{ role: Role, task: Option&lt;TaskId&gt;, usage: Usage },
+}
+
+<i>// 插话与提问回答类型化 —— 现在两者都退化成 Message::user，模型分不出来</i>
+<b>pub enum</b> Injection {
+    Said{ seq: Seq, text: String },
+    Answered{ seq: Seq, question: QuestionId, choice: String },
+}
+
+<i>// ── 给存储：SQLite 是一个实现，MemStore 是另一个，FaultStore 是第三个 ──</i>
+<b>pub trait</b> Store: Send + Sync {
+    <b>async fn</b> append(&amp;self, batch: Vec&lt;EventIn&gt;, flush: Flush) -&gt; Result&lt;Seq, StoreError&gt;;
+    <b>async fn</b> load_snapshot(&amp;self, s: SessionId) -&gt; Result&lt;Option&lt;(Seq, Workspace)&gt;&gt;;
+    <b>async fn</b> put_snapshot(&amp;self, s: SessionId, seq: Seq, ws: &amp;Workspace) -&gt; Result&lt;()&gt;;
+    <b>async fn</b> replay(&amp;self, s: SessionId, from: Seq) -&gt; Result&lt;Vec&lt;Event&gt;&gt;;
+    <b>async fn</b> messages(&amp;self, s: SessionId, r: SeqRange) -&gt; Result&lt;Vec&lt;Message&gt;&gt;;
+    <b>async fn</b> report(&amp;self, s: SessionId) -&gt; Result&lt;SessionReport&gt;;
+}
+
+<i>// ModelClient / Tool 已经是 trait，不动。</i></pre>
+
+  <p class="prose">四个面加上已有的两个，覆盖你点的四类消费方：<b>UI</b> 用 <code>SessionApi</code>，<b>存储</b> 用 <code>Store</code>，<b>tool-use</b> 用 <code>Tool</code> + <code>TurnEvent::Tool</code>，<b>模型调用</b> 用 <code>ModelClient</code> + <code>TurnInput</code>。每一面都能单独换实现单独测 —— <code>MemStore</code> 让链路测试不碰磁盘，<code>FaultStore</code> 是 §9 的注入点。</p>
+</section>
+
+<!-- ══════════════════ §9 ══════════════════ -->
+<section id="f9">
+  <div class="sec-head"><div class="sec-num">§9</div><h2>验证矩阵</h2></div>
+  <p class="sec-sub">现在 15 个场景全是我自己写的功能的正路。改成：断言不变量而不是断言脚本，且失败由外部注入而不是由脚本安排。</p>
+
+  <h3>不变量</h3>
+  <table class="narrow" style="min-width:820px;margin:14px 0">
+    <thead><tr><th>编号</th><th>不变量</th><th>抓什么</th></tr></thead>
+    <tbody>
+      <tr><td class="k">I1</td><td><code>replay(0..=n)</code> 得到的 Workspace ≡ <code>snapshot(n)</code> 的 Workspace</td><td>物化视图与事件流漂移</td></tr>
+      <tr><td class="k">I2</td><td>任何 kill 点恢复后，每条<b>已 ack</b> 的用户输入都查得到</td><td>缺陷 3 / 5 —— 用户付出过动作的数据不能丢</td></tr>
+      <tr><td class="k">I3</td><td>每条带 <code>tool_calls</code> 的 assistant 都有配齐的 tool 消息（含恢复后）</td><td>下一次请求被 API 拒掉</td></tr>
+      <tr><td class="k">I4</td><td><code>seq</code> 严格 +1，无空洞无重复</td><td>存储损坏 / 双写者</td></tr>
+      <tr><td class="k">I5</td><td><code>cost</code> 单调不减；<code>estimated</code> 与实测分列可分离</td><td>缺陷 13 —— 账目被打断吃掉</td></tr>
+      <tr><td class="k">I6</td><td>未回答的 question 在恢复后仍是 open</td><td>提问随进程消失</td></tr>
+      <tr><td class="k">I7</td><td><code>Origin::User</code> 的字段经过任何恢复路径后仍是 <code>User</code></td><td><b>缺陷 6</b> —— 删锁之后唯一的保护</td></tr>
+      <tr><td class="k">I8</td><td>被折叠的消息原文仍可按 <code>msg_id</code> 取回</td><td>缺陷 7 / 17</td></tr>
+    </tbody>
+  </table>
+
+  <h3>故障注入</h3>
+  <ul class="prose">
+    <li><b><code>FaultStore</code></b> 包一层 <code>Store</code>：按随机种子在第 K 次 <code>append</code> / <code>flush</code> 注入 <code>Err</code>、写一半、延迟 500ms、SQLITE_BUSY。断言：Core 不 panic、发出 <code>PersistDegraded</code>、用户仍能继续对话。</li>
+    <li><b>kill 点注入</b>：在 12 个关键 await 点各切断一次 —— 取 input 后 / 判断段中 / propose 后 / 流式中途 / 工具运行中 / emit 后 flush 前 / flush 后 turn_end 前 / 折叠中 / 蒸馏中 / shutdown 两段之间 —— 每个点跑一遍 I1–I8。<b>这一组现在一个都没有。</b></li>
+    <li><b>并发随机化</b>：随机穿插 <code>send</code> / <code>edit</code> / <code>interrupt</code> / <code>answer</code> / <code>shutdown</code>，200 个种子，只断言不变量不断言具体输出。抓的是「用户在轮中乱点」这类我自己写场景时想不到的序列。</li>
+    <li><b>模型侧对抗</b>：mock 返回不存在的 scene id、超长输出、只吐 tool_calls 不吐正文、tool_calls 里塞重复 call_id、op 里塞非法 path。现在的 mock 全是配合我的。</li>
+  </ul>
+
+  <h3>必须补上的链路（当前完全没跑过）</h3>
+  <p class="prose">恢复全链路 · 崩溃中途恢复 · Shutdown flush · 用户回答提问 · 折叠后恢复 · 存储写失败降级 · memory 解析失败告警 · 跨会话成本汇总 · R5 回滚到某个 seq。</p>
+</section>
+
+<!-- ══════════════════ §10 ══════════════════ -->
+<section id="f10">
+  <div class="sec-head"><div class="sec-num">§10</div><h2>决策与待你拍板</h2></div>
+
+  <h3>我拍的（有理由，可推翻）</h3>
+  <table class="narrow" style="min-width:820px;margin:14px 0">
+    <thead><tr><th>问题</th><th>决策</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td class="k">持久层进不进 SQLite</td><td><b>不进</b>，仍是 md + toml 文件</td><td>它的 owner 是用户。塞进 db 等于把「用户随时可改」押给一个还没写的 UI</td></tr>
+      <tr><td class="k">db 文件粒度</td><td>一个 workspace 一个 <code>store.db</code>，表里带 <code>session_id</code></td><td>跨会话汇总成本、找历史会话、蒸馏读多个会话都要联查</td></tr>
+      <tr><td class="k">SQLite 绑定</td><td><code>rusqlite</code> + <code>bundled</code></td><td>writer 本来就是独占单线程，同步 API 正合适；<code>bundled</code> 避开 WSL / Windows 的系统 sqlite 依赖。<code>sqlx</code> 会拉进一整套异步机器，对本地单写者过重</td></tr>
+      <tr><td class="k">读写连接</td><td>WAL + 写连接独占给 writer，另开只读连接给 UI 查询</td><td>UI 翻历史不应该跟落盘抢锁</td></tr>
+      <tr><td class="k">delta 落盘</td><td>攒批 best-effort，≤64 条或 ≤200ms</td><td>正文是模型产物，可重生成；每 chunk 一个事务不可接受</td></tr>
+      <tr><td class="k">快照保留份数</td><td>最近 10 份</td><td>R5 回滚能就近起跳，代价是几百 KB</td></tr>
+      <tr><td class="k">memory 热加载</td><td><b>不做</b>，会话启动时读一次</td><td>轮中换记忆会让同一轮的两段看到不同的持久层。用户改完重开会话即可</td></tr>
+      <tr><td class="k">Pending.turn</td><td>保留，改成 commit 时断言</td><td>死字段删掉可惜，它能抓「上一轮 pending 混进这一轮」</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note q prose">
+    <strong>要你定的两件事。</strong><br>
+    <b>一 · R5 回滚的锚点粒度。</b>event log 支持回到任意 <code>seq</code>，但那对用户是个没有意义的数字。我倾向只把<b>轮边界</b>暴露成可选锚点（「回到第 7 轮开始前」），任意 seq 只作为内部能力。如果你要的是更细的粒度（比如回到某条消息之前），说一声，UI 和 schema 都撑得住，只是选择列表会变长。<br><br>
+    <b>二 · 回滚之后被丢弃的事件怎么处理。</b>两种：<b>(a) 分支</b> —— 保留原事件，新写入挂在一个新 branch 上，可以来回切；<b>(b) 截断</b> —— 直接删掉 seq 之后的事件，不可逆。(a) 更符合「实验助手」的气质（试一条路不成再回来），但 schema 要加 <code>branch_id</code>，重放和 UI 都变复杂。我倾向先做 (b) 并把 <code>branch_id</code> 列预留出来。
+  </div>
+
+  <h3>这一轮的边界</h3>
+  <p class="prose">本轮只出设计，不动 <code>src/</code>。下一轮实现完成后按<b>实际代码</b>重画一次图 B，逐节点对照 —— 对不上的地方就是实现偏离了设计，那份对照本身是验收材料。</p>
+</section>
+
+<!-- ══════════════════ §11 ══════════════════ -->
+<section id="f11">
+  <div class="sec-head"><div class="sec-num">§11</div><h2>按实现重画</h2></div>
+  <p class="sec-sub">这张图是照着落地的代码画的，不是照着 §3 的设计画的。节点名就是实际的类型名与函数名，可以逐个去代码里核。</p>
+
+  <figure>
+    <div class="scroll">
+      <svg viewBox="0 0 1060 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="按实现重画的数据流图">
+        <defs>
+          <marker id="am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--muted)"/>
+          </marker>
+          <marker id="ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" fill="var(--ok)"/>
+          </marker>
+        </defs>
+        <style>
+          .m1{fill:var(--surface-2);stroke:var(--rule);stroke-width:1}
+          .m2{fill:var(--surface-3);stroke:var(--rule);stroke-width:1}
+          .t1{font-family:"IBM Plex Mono",monospace;font-size:11px;fill:var(--ink)}
+          .t2{font-family:"IBM Plex Mono",monospace;font-size:9px;fill:var(--muted)}
+          .tl{font-family:"IBM Plex Mono",monospace;font-size:10px;fill:var(--muted);letter-spacing:.1em}
+          .e1{stroke:var(--muted);stroke-width:1.2;fill:none;marker-end:url(#am)}
+          .e2{stroke:var(--ok);stroke-width:1.6;fill:none;marker-end:url(#ak)}
+          .note{font-family:"IBM Plex Mono",monospace;font-size:9.5px;fill:var(--ok)}
+        </style>
+
+        <!-- 产生者 -->
+        <text class="tl" x="16" y="28">产生者</text>
+        <rect class="m1" x="16" y="38" width="146" height="36" rx="2"/><text class="t1" x="27" y="55">UI</text><text class="t2" x="27" y="68">SessionApi 那 11 个方法</text>
+        <rect class="m1" x="16" y="82" width="146" height="36" rx="2"/><text class="t1" x="27" y="99">判断段 judge()</text><text class="t2" x="27" y="112">JudgeOut{scene,ops,retrieve}</text>
+        <rect class="m1" x="16" y="126" width="146" height="36" rx="2"/><text class="t1" x="27" y="143">回答段 stream()</text><text class="t2" x="27" y="156">Chunk / ToolCalls / Done</text>
+        <rect class="m1" x="16" y="170" width="146" height="36" rx="2"/><text class="t1" x="27" y="187">run_tools()</text><text class="t2" x="27" y="200">ToolResult{kind,task}</text>
+        <rect class="m1" x="16" y="214" width="146" height="36" rx="2"/><text class="t1" x="27" y="231">subagent</text><text class="t2" x="27" y="244">折叠摘要 · 蒸馏草稿</text>
+
+        <!-- turn -->
+        <text class="tl" x="186" y="28">TURN TASK · 全部控制流</text>
+        <rect x="186" y="38" width="216" height="212" rx="3" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.2"/>
+        <rect class="m2" x="200" y="52" width="188" height="42" rx="2"/><text class="t1" x="210" y="69">TurnInput（只读）</text><text class="t2" x="210" y="83">整轮一次，绝不回灌</text>
+        <rect class="m2" x="200" y="102" width="188" height="42" rx="2"/><text class="t1" x="210" y="119">local: Vec&lt;Event&gt;</text><text class="t2" x="210" y="133">Core 回传的事件，拼下一次 prompt</text>
+        <rect class="m2" x="200" y="152" width="188" height="42" rx="2"/><text class="t1" x="210" y="169">Memory（每轮重读）</text><text class="t2" x="210" y="183">改文件下一轮生效</text>
+        <rect class="m2" x="200" y="202" width="188" height="36" rx="2"/><text class="t1" x="210" y="219">emit(Emit) ×10 变体</text><text class="t2" x="210" y="232">turn 往外发只有这一个方法</text>
+        <path class="e1" d="M162,56 L182,56 L182,150"/>
+        <path class="e1" d="M162,100 L176,100 L176,150 L196,150"/>
+        <path class="e1" d="M162,144 L172,144 L172,150"/>
+        <path class="e1" d="M162,188 L176,188 L176,150"/>
+        <path class="e1" d="M162,232 L182,232 L182,150"/>
+
+        <!-- core -->
+        <text class="tl" x="426" y="28">CORE · 唯一写权 · 唯一 seq 分配者 · 全同步</text>
+        <rect x="426" y="38" width="288" height="252" rx="3" fill="var(--surface)" stroke="var(--ok)" stroke-width="1.4"/>
+        <rect class="m2" x="440" y="52" width="260" height="46" rx="2"/><text class="t1" x="450" y="69">absorb() —— ★ 唯一仲裁点</text><text class="t2" x="450" y="83">Infer 的 ops 撞上 turn_edits ⇒ 丢，只记生效的</text>
+        <rect class="m2" x="440" y="106" width="260" height="52" rx="2"/><text class="t1" x="450" y="123">commit() —— 唯一能推进 seq</text><text class="t2" x="450" y="137">分配 seq → ws.apply → observe → 推 UI</text><text class="t2" x="450" y="149">→ Arc::make_mut 追加 → 丢给 writer</text>
+        <rect class="m2" x="440" y="166" width="260" height="46" rx="2"/><text class="t1" x="450" y="183">observe() —— 派生态集中在一处</text><text class="t2" x="450" y="197">open_calls · open_questions · scene · cost</text>
+        <rect class="m2" x="440" y="220" width="126" height="56" rx="2"/><text class="t1" x="450" y="237">turn_edits</text><text class="t2" x="450" y="250">HashSet&lt;Path&gt;</text><text class="t2" x="450" y="262">每轮清空</text>
+        <rect class="m2" x="574" y="220" width="126" height="56" rx="2"/><text class="t1" x="584" y="237">open_calls</text><text class="t2" x="584" y="250">call_id → Seq</text><text class="t2" x="584" y="262">小生命周期</text>
+        <path class="e2" d="M402,150 L420,150"/>
+        <path class="e1" d="M420,170 L402,170"/>
+        <text class="note" x="404" y="142">emit</text>
+        <text class="t2" x="398" y="186">Applied{seq,dropped,events}</text>
+
+        <!-- writer + store -->
+        <text class="tl" x="738" y="28">WRITER · 两级落盘</text>
+        <rect x="738" y="38" width="306" height="252" rx="3" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.2"/>
+        <rect class="m2" x="752" y="52" width="278" height="52" rx="2"/><text class="t1" x="762" y="69">must-flush（事务提交后才 ack）</text><text class="t2" x="762" y="83">用户输入 · apply · 回答 · TurnClosed</text><text class="t2" x="762" y="95">· 恢复修补 · Flush 屏障 · Shutdown</text>
+        <rect class="m2" x="752" y="112" width="278" height="52" rx="2"/><text class="t1" x="762" y="129">best-effort（≤64 条或 ≤200ms）</text><text class="t2" x="762" y="143">正文 · 工具事件 · 成本 · 场景判定</text><text class="t2" x="762" y="155">linger 计时器兜底，尾批不会漏</text>
+        <rect class="m2" x="752" y="172" width="278" height="44" rx="2"/><text class="t1" x="762" y="189">失败：无限重试，不回滚内存</text><text class="t2" x="762" y="203">连续 3 次 ⇒ PersistDegraded（同一条 UI 通道）</text>
+        <rect class="m2" x="752" y="224" width="134" height="52" rx="2"/><text class="t1" x="762" y="241">history 表</text><text class="t2" x="762" y="254">seq PK · kind 索引</text><text class="t2" x="762" y="266">client_id UNIQUE</text>
+        <rect class="m2" x="896" y="224" width="134" height="52" rx="2"/><text class="t1" x="906" y="241">checkpoint 表</text><text class="t2" x="906" y="254">留 10 份</text><text class="t2" x="906" y="266">删光也不影响正确性</text>
+        <path class="e2" d="M714,120 L734,120"/><text class="note" x="700" y="112">WriteJob</text>
+
+        <!-- 恢复 -->
+        <path class="e2" d="M890,290 L890,320 L300,320 L300,290 L300,254"/>
+        <text class="note" x="380" y="314">启动第一步：restore() = checkpoint + 重放 + 补 Aborted / TurnClosed(crashed)</text>
+
+        <!-- 消费者 -->
+        <text class="tl" x="16" y="368">消费者（全部有实际调用方，S01–S24 覆盖）</text>
+        <rect class="m1" x="16" y="378" width="164" height="44" rx="2"/><text class="t1" x="27" y="396">assemble(&amp;events)</text><text class="t2" x="27" y="410">时间线 → prompt 消息</text>
+        <rect class="m1" x="192" y="378" width="164" height="44" rx="2"/><text class="t1" x="203" y="396">Context::build()</text><text class="t2" x="203" y="410">metadata 每轮现拼</text>
+        <rect class="m1" x="368" y="378" width="164" height="44" rx="2"/><text class="t1" x="379" y="396">Snap</text><text class="t2" x="379" y="410">小视图，不含历史</text>
+        <rect class="m1" x="544" y="378" width="164" height="44" rx="2"/><text class="t1" x="555" y="396">CostLedger::from_events</text><text class="t2" x="555" y="410">R6，可重建不需单独存</text>
+        <rect class="m1" x="720" y="378" width="164" height="44" rx="2"/><text class="t1" x="731" y="396">rollback(before_turn)</text><text class="t2" x="731" y="410">R5，重放到轮边界</text>
+        <rect class="m1" x="896" y="378" width="148" height="44" rx="2"/><text class="t1" x="907" y="396">start_distill()</text><text class="t2" x="907" y="410">读全程 → 草稿</text>
+
+        <!-- 持久层 -->
+        <rect x="16" y="446" width="1028" height="82" rx="3" fill="var(--surface)" stroke="var(--rule)" stroke-width="1.2" stroke-dasharray="4 3"/>
+        <text class="tl" x="30" y="468">持久层 · 刻意不进 SQLite · owner 是用户</text>
+        <text class="t1" x="30" y="490">memory/  project.md · preferences.md · knowledge.md · playbook.toml · prompts.toml · cases/*.md · draft-&lt;ts&gt;.md</text>
+        <text class="t2" x="30" y="508">turn 每轮开头 Memory::load_or_bootstrap()，所以改了文件下一轮就生效（S16 验证）。</text>
+        <text class="t2" x="30" y="521">解析失败 ⇒ 回退内置 + UiEvent::MemoryDegraded，不再是静悄悄 eprintln。</text>
+
+        <!-- 落差 -->
+        <text class="t2" x="16" y="558" fill="var(--ok)">对得上 §3 的：事件流唯一真相 · Workspace 是物化视图 · checkpoint 纯 cache · corr 承载小生命周期 · 两级落盘 · 持久层留文件</text>
+        <text class="t2" x="16" y="576" fill="var(--warn)">和 §3 不一样的：派生表五张 → 零张　|　seq 的 owner 从 Store 挪回 Core　|　仲裁从 base_version CAS 降成 turn 内 path 集合　|　Pending 整个删掉</text>
+        <text class="t2" x="16" y="594" fill="var(--bad)">§3 里没有、实现时才冒出来的：writer 的 linger 计时器 · writer 与 Core 共用 UI 通道 · Flush 屏障 · TurnClosed 必须 must-flush · Applied 回带 events</text>
+        <text class="t2" x="16" y="618">图上每个方框都有实际调用方。上一版图 A 里那三个红框 ——「restore 无调用者」「R6 取不到数据」「R5 无锚点」—— 现在分别由 S12·S13、I5、S15 覆盖。</text>
+      </svg>
+    </div>
+    <figcaption>图 B′ · 按实现重画。与 §3 的图 B 逐节点对照的结果见 §12。</figcaption>
+  </figure>
+</section>
+
+<!-- ══════════════════ §12 ══════════════════ -->
+<section id="f12">
+  <div class="sec-head"><div class="sec-num">§12</div><h2>设计 → 实现 diff</h2></div>
+  <p class="sec-sub">三类：照着做了的、做的时候改了的、图上根本没有直到写代码才冒出来的。第三类最值钱 —— 它说明设计漏了什么。</p>
+
+  <h3>一 · 改了的（连同理由）</h3>
+  <div class="scroll" style="margin:16px 0">
+  <table class="narrow" style="min-width:960px">
+    <thead><tr><th>§3–§8 的设计</th><th>实际实现</th><th>为什么改</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">event 表 + message / turn / tool_call / question / cost 五张派生表，同事务写</td>
+        <td><b>只有 history 与 checkpoint 两张表</b>，派生的东西一律现算（<code>assemble</code> / <code>open_questions</code> / <code>unclosed_calls</code> / <code>CostLedger::from_events</code>）</td>
+        <td>会话规模是一个人聊几十上百轮，全表扫是微秒级；而每多一张派生表就多一处「写事件时忘了同步」的机会。表上只留一个从 <code>Body::tag()</code> 抄的 <code>kind</code> 列当索引键</td>
+      </tr>
+      <tr>
+        <td class="k">seq 的 owner 是 Store（数据库 AUTOINCREMENT）</td>
+        <td><b>owner 是 Core</b>，启动时读一次 <code>MAX(seq)</code> 接着往下</td>
+        <td><b>这条是我上一轮设计错了。</b>数据库分配意味着 Core 发出事件时还不知道自己发的是第几条 —— 那它就没法同步更新物化视图、没法同步推 UI，只能等一次磁盘往返。而 Core 不能 await 磁盘</td>
+      </tr>
+      <tr>
+        <td class="k">仲裁靠 <code>base_version</code> CAS 比较</td>
+        <td><b><code>turn_edits: HashSet&lt;Path&gt;</code></b>，每轮清空；撞上就丢，事件只记生效的部分</td>
+        <td>仲裁范围就是一个 turn，不需要版本比较。跨轮的保护是 prompt 里的 <code>[用户设定]</code> 标记，不是硬拒绝</td>
+      </tr>
+      <tr>
+        <td class="k">保留 <code>Pending</code>（模型改动攒到轮末提交）</td>
+        <td><b>整个删掉</b>，模型的推断当场生效</td>
+        <td>「打断也提交」一确定，事务边界就名存实亡了。它剩下的唯一用途是让 UI 高亮「本轮新增」，而那件事用 <code>field.seq &gt; turn_start</code> 就能判断</td>
+      </tr>
+      <tr>
+        <td class="k">用户编辑立即写盘</td>
+        <td><b>apply 才产生事件</b>；apply 之前 UI 自己管</td>
+        <td>侧栏改到一半、改了又撤销，都不该灌进主时间线</td>
+      </tr>
+      <tr>
+        <td class="k">prompt 文本写在 Rust 源码里</td>
+        <td><b><code>memory/prompts.toml</code></b>，与其余持久层一起每轮重读</td>
+        <td>「metadata 动态拼接、改动立即生效」这条对 system 段同样成立。写死在源码里，调一句话的措辞要重新编译</td>
+      </tr>
+      <tr>
+        <td class="k"><code>UiEvent::Choice</code> 推提问给 UI</td>
+        <td><b>删掉</b>，提问是时间线上的 <code>Asked</code> 事件，UI 从 <code>Appended</code> 得知</td>
+        <td>有损通道上的一次性事件配不上一个持久实体。现在界面刷新、turn 结束、进程重启，那道题都还在</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>二 · 设计里没有，写代码才冒出来的</h3>
+  <div class="scroll" style="margin:16px 0">
+  <table class="narrow" style="min-width:960px">
+    <thead><tr><th>问题</th><th>怎么发现的</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr>
+        <td class="k">writer 只在「下一次有活来」时检查攒批 ⇒ 尾批永远不落盘</td>
+        <td>写 §6 的攒批逻辑时意识到：一批 best-effort 之后没有后续活动，它就一直躺在内存里 —— <b>这正是「用户看着正文吐完、关掉应用、回来一片空白」的成因</b>，而设计文本里只写了「≤64 条或 ≤200ms」，没说这个计时器由谁驱动</td>
+        <td>writer 从阻塞线程改成 async 循环，攒着东西时用 <code>timeout(LINGER, recv())</code>；真要写库时才 <code>spawn_blocking</code> 一下</td>
+      </tr>
+      <tr>
+        <td class="k">writer 与 Core 各建各的 UI 通道 ⇒ <code>PersistDegraded</code> 永远到不了界面</td>
+        <td><b>S14 直接测出来的</b>：注入落盘故障后，「发出了降级提示」这条断言红了。设计里两者都写着「发 UiEvent」，没说是同一条通道</td>
+        <td><code>CoreDeps.ui</code> 收一个外部传入的 <code>broadcast::Sender</code>，writer 与 Core 共用</td>
+      </tr>
+      <tr>
+        <td class="k">best-effort 攒批意味着「刚发生的事还没在盘上」，没有能等的点</td>
+        <td>S03/S18/S19/S20 一开始全红 —— 断言读盘时事件还在 writer 的缓冲里</td>
+        <td>加 <code>CoreMsg::Flush</code> / <code>session_flush()</code>：一个空的 must-flush 批次当屏障。生产上也用得着（退出确认、「已保存」提示）</td>
+      </tr>
+      <tr>
+        <td class="k"><code>TurnClosed</code> 走 best-effort ⇒ 崩在它之后会把一轮好好结束的对话标成 crashed</td>
+        <td>写 S13 的崩溃恢复断言时想到的</td>
+        <td>改成 must-flush。它是「这一轮真的收完了」的凭据</td>
+      </tr>
+      <tr>
+        <td class="k">恢复补的修补事件走 best-effort ⇒ 下次启动还要再判一次「上次崩了」</td>
+        <td>S13 的「未闭合调用被补上了 Aborted」断言红了</td>
+        <td>同上，改成 must-flush</td>
+      </tr>
+      <tr>
+        <td class="k">turn 需要本轮的局部时间线来拼下一次 prompt</td>
+        <td>写 turn.rs 时发现：<code>TurnInput.events</code> 是轮初的快照，turn 自己 emit 的东西不在里面。让 turn 自己把 <code>Emit</code> 映射成 <code>Body</code> 会造出第二份映射</td>
+        <td><code>Applied</code> 回带 <code>events</code> —— Core 追加进去的那几条原样返回，turn 直接并进 <code>local</code>。映射只有一处</td>
+      </tr>
+      <tr>
+        <td class="k">插话回到 turn 时会退化成一条普通消息</td>
+        <td>同上。原设计的 <code>Vec&lt;UserMsg&gt;</code> 又要 turn 再映射一次</td>
+        <td><code>take_injections</code> 直接返回 <code>Vec&lt;Event&gt;</code> —— 它们在用户按发送时就已落盘，本来就是时间线上的事件</td>
+      </tr>
+      <tr>
+        <td class="k">serde 的内部 tag 叫 <code>kind</code>，与 <code>Returned.kind</code> 字段撞名</td>
+        <td>编译器报的</td>
+        <td>字段改名 <code>outcome</code>，比 <code>kind</code> 也更准</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>三 · 照着做了的</h3>
+  <p class="prose">事件流唯一真相 · Workspace 是物化视图（I1 在每个场景收尾都验一次）· checkpoint 纯 cache（S22：删光也能从 0 重放出同一份）· <code>corr</code> 承载工具与提问的小生命周期（S03/S09）· 未闭合调用补 <code>Aborted</code>（S06 打断路径、S13 被 kill 路径，走的是同一段语义）· 提问是持久实体（S09）· 折叠是事件且原文不删（S11）· <code>TurnStats</code> 落进 <code>TurnClosed</code> · 账本从事件重建（I5）· origin 由事件类型决定（S12 的 I7：★ 恢复后 <code>[用户设定]</code> 不丢）· 持久层留文件（S16）· 两级落盘 · 写失败不回滚内存（S14）· 换场景真注入新材料（S17）· 回滚到轮边界（S15）· <code>open</code>/<code>parked</code> 走同一条 op 通道（S21）· UI 读历史走 store 不穿 Core。</p>
+</section>
+
+<!-- ══════════════════ §13 ══════════════════ -->
+<section id="f13">
+  <div class="sec-head"><div class="sec-num">§13</div><h2>缺陷结算与欠账</h2></div>
+  <p class="sec-sub">§2 那 25 条的下落。</p>
+
+  <h3>已结（21 条）</h3>
+  <p class="prose">
+    <b>1–4</b> 恢复链路成了启动第一步（<code>Rig::build</code> 无条件先 <code>restore()</code>），history 与推断图从同一份时间线重放，落盘粒度从「轮」降到「事件」，Shutdown 两段式等 flush ——
+    S12（优雅重启，上一次会话的对话进了 prompt）与 S13（被 kill 后重开，已 ack 的输入一条没丢）覆盖。<br>
+    <b>5</b> inbox 里存的就是已落盘的事件本身。　<b>6</b> origin 由事件类型决定，不可能丢（S12 的 I7）。　<b>7</b> 折叠是事件，原文不删（S11 + I8）。<br>
+    <b>8</b> <code>touched</code> → <code>turn_edits</code>，每轮清空。　<b>9</b> <code>scene</code> / <code>scene_overrides</code> 从 Workspace 删除，改成事件（S17）。<br>
+    <b>10</b> <code>TurnInput</code> 与 <code>Snap</code> 分家，turn 全程不重取（这条是这一版结构上最大的改动）。<br>
+    <b>11–13</b> <code>TurnStats</code> 进 <code>TurnClosed</code>、异常计数进 <code>CoreMetrics</code> 并可落、账本从事件重建（I5）。<br>
+    <b>14</b> <code>open</code>/<code>parked</code> 走 op 通道，享受同一套仲裁（S21：用户加的条目没被静默盖掉）。<br>
+    <b>15</b> <code>StateChanged</code> 带上生效的 ops。　<b>16</b> <code>Snap</code> 不含历史；Core 侧 <code>Arc::make_mut</code>，一轮至多复制一次。<br>
+    <b>19</b> <code>TaskId</code> 有消费者了（S03 断言两次调用拿到不同的号）。　<b>20</b> <code>Pending</code> 删了，死字段随之消失。　<b>21</b> <code>edit(ops)</code> 不再要版本参数。<br>
+    <b>22–23</b> <code>Version</code> → <code>Seq</code>，一个数一个语义；边界问题随 CAS 一起消失（I4 每场景验一次）。<br>
+    <b>24</b> <code>UiEvent</code> 带 <code>seq</code>，跳号按范围补拉。　<b>25</b> 去重落库（<code>client_id</code> UNIQUE）+ 内存快路径。<br>
+    <b>提问持久化</b>（S09）、<b>R5 多份 checkpoint</b>（S15/S22）、<b>memory 解析失败告警</b>（S16 后半段）也都结了。
+  </p>
+
+  <h3>没做（4 条，说明原因）</h3>
+  <table class="narrow" style="min-width:820px;margin:14px 0">
+    <thead><tr><th>缺陷</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="k">18 · 来源链断裂</td><td><span class="chip c-bad">未做</span></td>
+        <td><b>这条我在 §4 的字典里写了要给 <code>ToolResult</code> 加 <code>provenance</code>，实际没加。</b><code>Source::Repo</code> 至今只有测试在构造。要真做，得让工具返回结构化的来源，并在模型基于某次结果写 op 时用 <code>call_id</code> 接上 —— 那是工具协议的改动，不是数据层的</td></tr>
+      <tr><td class="k">17 · Message 的 msg_id</td><td><span class="chip c-warn">部分</span></td>
+        <td>寻址锚点由事件的 <code>seq</code> 承担了（UI 引用、折叠展开、回滚都用它）。单独的 ULID 没加 —— 一条事件可能产生一条消息，两个 id 是冗余</td></tr>
+      <tr><td class="k">分支式回滚</td><td><span class="chip c-bad">未做</span></td>
+        <td>§10 抛给你的第二个问题。按我的倾向做了截断式；<code>branch_id</code> 列<b>也没预留</b> —— 一张表加列很容易，预留一个没人写的列反而是噪音</td></tr>
+      <tr><td class="k">§9 的 kill 点注入 12 个 / 200 种子并发随机化</td><td><span class="chip c-warn">部分</span></td>
+        <td>只做了 1 个 kill 点（工具运行中，S13）与定点故障注入（S14）。12 点 × 8 不变量、并发随机化都没做 —— 那是一套需要单独搭的框架，而现在 <code>FaultStore</code> 与 <code>Rig::kill()</code> 已经是它的接口</td></tr>
+    </tbody>
+  </table>
+
+  <h3>验证现状</h3>
+  <p class="prose"><b>24 个场景 · 188 条断言 · 全通过 · 0 warning · 6424 行 / 18 文件。</b>断言方式换了：8 条不变量里的 I1（重放 ≡ 运行时）、I3（tool_calls 配对）、I4（seq 无空洞）、I5（账本可重建）、I8（折叠原文仍在）在<b>每个场景收尾都跑一遍</b>，不关心这个场景走了哪条路。I2（已 ack 的输入不丢）与 I7（origin 不丢）在恢复类场景里单独验。新增的对抗性 mock（未知场景 id、重复 <code>call_id</code>、只吐工具不吐正文）与故障注入（<code>FaultStore</code>、<code>Rig::kill()</code>）是上一版完全没有的路径。</p>
+</section>
+
+<footer><div class="wrap">Premortem · core 第五轮 · 数据结构 —— 设计 §1–§10，实现后的对照 §11–§13</div></footer>
+
+</div>

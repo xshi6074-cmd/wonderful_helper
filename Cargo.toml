@@ -17,6 +17,9 @@ uuid        = { version = "1", features = ["v4"] }
 thiserror   = "2"
 # 持久层是用户直接编辑的文件，所以要人写得动的格式
 toml        = "0.9"
+# 主时间线的存储。bundled 直接编进来，避开 WSL/Windows 上系统 sqlite 版本不一的麻烦。
+# 同步 API 正合适：写连接本来就独占给 writer 一个 task。
+rusqlite    = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "test-util"] }

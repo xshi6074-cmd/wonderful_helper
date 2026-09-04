@@ -1,20 +1,20 @@
-//! 持久层：跨会话的蒸馏成果。
+//! 持久层：跨会话的蒸馏成果，**外加 harness 自己的提示词**。
 //!
 //! # 只有两层
 //!
-//! - **持久层**（这个文件）：跨会话。场景库、案例、用户合作偏好、用户的实验知识与经验评估、
-//!   项目概述与阶段目标与进展。目标是**让一个新对话能快速入手这个项目**。
-//! - **推断层**（[`crate::state::Workspace`]）：一个会话内的推断图，turn 是它的事务边界。
+//! - **持久层**（这个文件）：跨会话。项目概述与进展、用户合作偏好、知识与经验评估、
+//!   场景库、参考案例、提示词模板。目标是**让一个新对话能快速入手这个项目**。
+//! - **推断层**（[`crate::state::Workspace`]）：一个会话内的推断图，由主时间线物化。
 //!
-//! 中间那个「会话层 / 工作 memory」没有了。理由是完整对话本来就要塞给模型
-//! （见 [`crate::context`] 的全量上下文策略），而推断图已经承担了信息整合，
-//! 再夹一层筛选过的会话事实是重复劳动。
+//! 中间那个「会话层 / 工作 memory」没有：完整对话本来就要塞给模型，
+//! 推断图已经承担了信息整合，再夹一层筛过的会话事实是重复劳动。
 //!
 //! # 文件就是界面
 //!
-//! 持久层**用户随时可以直接改**，包括内置的 bootstrap 内容。所以它落在人写得动的格式上：
-//! 叙述性的内容用 Markdown，结构化的场景库用 TOML。不要用不透明的 json blob ——
-//! 那等于把「用户可修改」这条设计约束交给一个还没写的 UI 去兑现。
+//! 持久层**用户随时可以直接改**，包括内置的 bootstrap 内容。所以它落在人写得动的
+//! 格式上：叙述性的内容用 Markdown，结构化的场景库与提示词用 TOML。
+//! **刻意不进 SQLite** —— 它的 owner 是用户，塞进不透明的库等于把「用户可修改」
+//! 这条设计约束押给一个还没写的 UI。
 //!
 //! ```text
 //! <workspace>/memory/
@@ -22,10 +22,21 @@
 //!   preferences.md    用户合作偏好
 //!   knowledge.md      实验相关知识情况与经验评估
 //!   playbook.toml     易犯错场景与对应指令
+//!   prompts.toml      harness 注入的提示词模板
 //!   cases/*.md        参考案例（TOML frontmatter + 正文）
 //! ```
 //!
-//! 首次运行时把 bootstrap 内容写进去；之后读到的就是用户改过的版本。
+//! # 每轮重读
+//!
+//! turn 在开头重新加载一次（见 [`crate::turn::run_turn`]）。所以用户改了任何一个
+//! 文件，**下一轮立刻生效**，不必重启。读几个小文件是微秒级，不值得为它引一套
+//! 文件监听。轮中不重读：同一轮的两段看到不同的持久层会很难排查。
+//!
+//! # 解析失败要报出来
+//!
+//! 用户把 `playbook.toml` 改坏了，回退到内置目录继续跑是对的（不能因为一个文件
+//! 起不来），但**必须像界面报错一样报出来** —— 上一版只 eprintln，用户以为自己
+//! 写的场景生效了，其实没有。见 [`Memory::warnings`]。
 
 use crate::scene::Playbook;
 use serde::{Deserialize, Serialize};
@@ -35,6 +46,7 @@ const PROJECT: &str = "project.md";
 const PREFERENCES: &str = "preferences.md";
 const KNOWLEDGE: &str = "knowledge.md";
 const PLAYBOOK: &str = "playbook.toml";
+const PROMPTS: &str = "prompts.toml";
 const CASES: &str = "cases";
 
 /// 一条参考案例。文件形如：
@@ -66,6 +78,51 @@ struct CaseFront {
     scenes: Vec<String>,
 }
 
+/// harness 注入的提示词模板。
+///
+/// 放进持久层而不是写死在 Rust 里，是为了兑现「改动立即生效」：
+/// 这些是 metadata，每轮动态拼进 prompt，用户改完下一轮就变。
+/// 写死在源码里的话，调一句话的措辞要重新编译。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Prompts {
+    /// 角色与流程边界。
+    pub role: String,
+    /// 「改用户填过的字段之前先问」—— 删掉硬锁之后这条约束的落点。
+    pub user_field: String,
+    /// 折叠早期对话时给摘要模型的指令。
+    pub fold: String,
+    /// 探索 mode 的一句话。
+    pub mode_explore: String,
+    /// 行动 mode 的一句话。
+    pub mode_go: String,
+}
+
+impl Default for Prompts {
+    fn default() -> Self {
+        Prompts {
+            role: "你是实验设计的研究助理。你不主导流程：是否进入实现由用户拍板，\
+                   你可以在正文里建议收尾，但没有推进权，也不能因为「我觉得还没准备好」\
+                   拦住用户。你的工作是把一个模糊的想法收敛成能交给编码 agent 的实验设计。"
+                .into(),
+            user_field: "推断图里标了 [用户设定] 的字段是用户自己填的。\
+                         你可以提出不同意见，但**改动它之前先在正文里问一句**，不要直接覆盖。\
+                         标了 [模型推断] 的可以直接更新。"
+                .into(),
+            fold: "把下面这段早期对话压成摘要，供后续对话继续使用。\n\
+                   务必保住：口径与用户的原话约束、已经放弃的路线与放弃的理由、\
+                   已经问过的问题、明确排除的可能性。\n\
+                   这些正是推断图里没有、但后面会被引用的东西。叙述过程可以大幅压缩。"
+                .into(),
+            mode_explore: "当前是探索 mode：可以展开讲、可以开放式追问。\
+                           抽取资料时关注动机、领域背景、术语定义。"
+                .into(),
+            mode_go: "当前是行动 mode：用户想往前推进，回答直接一些，不要倒回去讲基础。\
+                      抽取资料时关注方法、超参、实现细节。"
+                .into(),
+        }
+    }
+}
+
 /// 持久层的全部内容。
 #[derive(Debug, Clone)]
 pub struct Memory {
@@ -78,7 +135,10 @@ pub struct Memory {
     pub knowledge: String,
     /// 易犯错场景与对应指令。
     pub playbook: Playbook,
+    pub prompts: Prompts,
     pub cases: Vec<Case>,
+    /// 解析失败的文件。**必须报给用户**，否则他以为自己改的东西生效了。
+    pub warnings: Vec<(String, String)>,
 }
 
 impl Memory {
@@ -89,6 +149,7 @@ impl Memory {
     pub async fn load_or_bootstrap(dir: &FsPath) -> Memory {
         let _ = tokio::fs::create_dir_all(dir).await;
         let _ = tokio::fs::create_dir_all(dir.join(CASES)).await;
+        let mut warnings = Vec::new();
 
         let project = read_or_write(dir, PROJECT, bootstrap_project()).await;
         let preferences = read_or_write(dir, PREFERENCES, bootstrap_preferences()).await;
@@ -96,7 +157,7 @@ impl Memory {
 
         let playbook = match tokio::fs::read_to_string(dir.join(PLAYBOOK)).await {
             Ok(s) => Playbook::from_toml_str(&s).unwrap_or_else(|e| {
-                eprintln!("[memory] playbook.toml 解析失败（{e}），改用内置目录");
+                warnings.push((PLAYBOOK.into(), e));
                 Playbook::builtin()
             }),
             Err(_) => {
@@ -106,8 +167,22 @@ impl Memory {
             }
         };
 
+        let prompts = match tokio::fs::read_to_string(dir.join(PROMPTS)).await {
+            Ok(s) => toml::from_str::<Prompts>(&s).unwrap_or_else(|e| {
+                warnings.push((PROMPTS.into(), e.to_string()));
+                Prompts::default()
+            }),
+            Err(_) => {
+                let p = Prompts::default();
+                if let Ok(s) = toml::to_string_pretty(&p) {
+                    let _ = tokio::fs::write(dir.join(PROMPTS), s).await;
+                }
+                p
+            }
+        };
+
         let cases = load_cases(&dir.join(CASES)).await;
-        Memory { project, preferences, knowledge, playbook, cases }
+        Memory { project, preferences, knowledge, playbook, prompts, cases, warnings }
     }
 
     /// 空的持久层，用于测试与不落盘的场景。
@@ -117,7 +192,9 @@ impl Memory {
             preferences: String::new(),
             knowledge: String::new(),
             playbook: Playbook::builtin(),
+            prompts: Prompts::default(),
             cases: vec![],
+            warnings: vec![],
         }
     }
 
@@ -141,6 +218,14 @@ impl Memory {
             .map(|c| format!("### {}\n{}", c.title, c.body.trim()))
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// mode 的一句话。文本在持久层里，用户可改。
+    pub fn mode_note(&self, mode: crate::model::Mode) -> &str {
+        match mode {
+            crate::model::Mode::Explore => &self.prompts.mode_explore,
+            crate::model::Mode::Go => &self.prompts.mode_go,
+        }
     }
 }
 
