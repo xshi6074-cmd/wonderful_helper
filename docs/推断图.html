@@ -126,11 +126,11 @@ hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
     <h1>实验流程推断图</h1>
     <p class="dek">模型对「这个实验到底怎么做」的当前推断，是一张有稳定身份的语义图；mermaid 是它的产物，不是它本身。这份定死：图的类型、id 谁铸、用户在图上改一笔会变成什么事件、以及模型想绕过用户改动时被什么挡住。</p>
     <div class="mast-meta">
-      <span><b>状态</b> 设计，未实现</span>
-      <span><b>基线</b> a6e8e5d · core-timeline</span>
+      <span><b>状态</b> 已实现 · 31 场景 400 断言</span>
+      <span><b>基线</b> ac88465 · core-timeline</span>
       <span><b>新增事件类型</b> 0</span>
       <span><b>新增表</b> 0</span>
-      <span><b>要你拍的</b> 3 条（见 10）</span>
+      <span><b>新增不变量</b> I9 / I10 / I11</span>
     </div>
   </div>
 </header>
@@ -146,7 +146,7 @@ hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
     <a href="#s7"><span>07</span>用户的一笔</a>
     <a href="#s8"><span>08</span>模型看到的那份</a>
     <a href="#s9"><span>09</span>删除与放弃的路线</a>
-    <a href="#s10"><span>10</span>不变量 · 欠账 · 待拍</a>
+    <a href="#s10"><span>10</span>不变量 · 欠账 · 已拍</a>
   </div>
 </nav>
 
@@ -209,10 +209,10 @@ hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
     </tbody>
   </table></div>
 
-  <h3>逃生舱：模型确实要自由画的时候</h3>
-  <p>总会有渲染器表达不了的东西（一张时序图、一段解释性 HTML）。给它一个旁挂位 <code>Graph.asides</code>：模型可以塞整段 mermaid 或 HTML，我们原样渲染。</p>
+  <h3>模型画的那份也实现了，两种并存</h3>
+  <p><code>Graph.sketch</code> 收模型自己写的 mermaid 或 HTML 源码，<code>Graph.view</code> 决定当前以哪一份为准。<b>两份同时存在</b>，切过去再切回来，结构化那份原封不动 —— 跑起来看哪种在真实对话里更有用，不用现在定。</p>
   <div class="note warn">
-    <p><b>代价说死：能被结构化编辑的部分必须有稳定 id；模型要完全自由地画的部分，就放弃结构化编辑。</b>旁挂图在 UI 上明确标注「不可点选」，用户只能整段改文本，它也不参与仲裁。主图<b>永远</b>是结构化的 —— 逃生舱是旁挂的一张附图，不是主图的替代品。</p>
+    <p><b>代价说死：能被结构化编辑的部分必须有稳定 id；模型要完全自由地画的部分，就放弃结构化编辑。</b>Sketch 视图在 UI 上标注「不可点选」，用户只能整段改源码，整份在仲裁里只占一个键 <code>flow/sketch</code>。prompt 里也会明说这一条，让模型知道「想让用户能就地改，就把图搬回结构化视图」。</p>
   </div>
 </section>
 
@@ -322,7 +322,7 @@ hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
     </div>
     <div>
       <h4><span class="tag bad">漏洞 2</span> 用户删了一个步骤，模型新建一个同名节点把它复活</h4>
-      <p>id 不复用挡住了「原样加回来」，挡不住「换个 id 重写一遍」。<b>堵法：</b>删节点时额外占一个归一化 label 键。这是<b>启发式</b>，模型换个措辞就绕过去了 —— 但代价方向是安全的：宁可多丢一条 op（模型下一轮从 <code>dropped</code> 里看得到、可以重提），也不要静默盖掉用户的删除。<span class="tag warn">待你拍</span></p>
+      <p>id 不复用挡住了「原样加回来」，挡不住「换个 id 重写一遍」。<b>堵法：</b>删节点时额外占一个归一化 label 键。这是<b>启发式</b>，模型换个措辞就绕过去了 —— 但代价方向是安全的：宁可多丢一条 op（模型下一轮从 <code>dropped</code> 里看得到、可以重提），也不要静默盖掉用户的删除。<span class="tag ok">已开</span></p>
     </div>
     <div>
       <h4><span class="tag ok">漏洞 3</span> 模型加一条边指向用户刚删掉的节点</h4>
@@ -405,23 +405,23 @@ hr.soft{border:0;border-top:1px solid var(--rule-2);margin:34px 0}
   <div class="mer">
 <pre class="mermaid">
 flowchart TD
-  n12_0["前驱体溶液配制"] --> n12_1["旋涂 4000rpm/30s"]
-  n12_1 --> n12_2["反溶剂滴加"]
-  n12_2 --> n14_0["退火 100℃ 10min"]
-  n14_0 -.-> n14_1{"XRD 出现钙钛矿峰?"}
-  n14_1 -->|是| n15_0["J-V 曲线测试"]
-  n14_1 -.->|否| n17_0["改用两步法"]
-  subgraph g16_0["对照组 · 只换退火温度"]
-    n16_1["退火 85℃"]
-    n16_2["退火 130℃"]
+  n12_0[("LAION 子集 2M")] --> n12_1["ViT-B/16 图像塔"]
+  n12_0 --> n12_2["文本塔 · 冻结前 6 层"]
+  n12_1 --> n14_0(["投影到 512 维"])
+  n12_2 --> n14_0
+  n14_0 ==> n14_1{{"InfoNCE · tau=0.07"}}
+  n14_1 --> n15_0[/"零样本 ImageNet top-1"/]
+  subgraph n16_0["消融 · 只换温度系数"]
+    n16_1[["tau=0.05"]]
+    n16_2[["tau=0.10"]]
   end
-  n12_2 --> g16_0
+  n14_0 --> n16_0
   classDef guess stroke-dasharray: 5 3
-  class n14_0,n14_1,n17_0,n16_1,n16_2 guess
+  class n12_2,n14_1,n16_1,n16_2 guess
 </pre>
   </div>
 
-  <p class="mini">实线 = 有实证来源（用户口述 / 论文章节 / 仓库位置）。虚线 = <code>Source::Guess</code> 或没标来源 —— 上图里模型自己猜的退火条件、判据、整个对照组都是虚的，这一眼就是要给用户看的盲区。</p>
+  <p class="mini">主场景是 ML，所以最有信息量的是<b>架构图</b>：数据 → 模块 → 算子 → 损失 → 指标 → 消融臂。形状来自 <code>memory/prompts.toml</code> 的默认词表，用户随时可改。实线 = 有实证来源（用户口述 / 论文章节 / 仓库位置）；虚线 = <code>Source::Guess</code> 或没标来源 —— 上图里冻结几层、温度系数、整组消融都是模型自己猜的，这一眼就是要给用户看的盲区。<b>决策树刻意不主推</b>：`gate` 留了个形状，但那类图本来就难画好，也不是 ML 讨论里信息量最大的东西。</p>
 
   <h3>prompt 里怎么拼</h3>
   <p>mermaid 之后跟一段<b>明细</b>，只写 mermaid 装不下的东西，且<b>只写有内容的节点</b> —— 标题不重复第二遍，省 token：</p>
@@ -430,12 +430,12 @@ flowchart TD
 &lt;上面那段 mermaid，逐字节相同&gt;
 
 <i>== 节点明细（只列有细节的）==</i>
-<b>n14_0</b>  [模型推断 · 模型推测 · conf 0.4] <em>(本轮)</em>
-  temp = 100℃    time = 10min
-  body: 手套箱内热台，退火时盖培养皿
-  <i>挂在这里的图外推断：这一步的温度依据不足，用户没说过热台型号</i>
-<b>n17_0</b>  [模型推断 · 模型推测 · conf 0.2]
-  body: 若一步法始终不结晶，换 PbI2 先旋涂再浸 MAI
+<b>n14_1</b>  [模型推断 · 模型推测 · conf 0.4] <em>(本轮)</em>
+  tau = 0.07    batch = 32k
+  body: 对称 InfoNCE，图文两个方向都算
+  <i>↳ risk.negatives = 负样本数可能不够，用户没说过卡数</i>
+<b>n12_2</b>  [模型推断 · 模型推测 · conf 0.3]
+  body: 冻结前 6 层是猜的，用户只说了「文本塔别全调」
 
 <i>== 本轮用户改过、你的改动被丢弃的位置 ==</i>
 <s>flow/n14_0</s>  <i>（用户本轮刚改过它的标题）</i></pre>
@@ -464,26 +464,26 @@ flowchart TD
 
   <hr class="soft">
 
-  <h3>放弃的路线</h3>
-  <div class="note bad">
-    <p><code>memory/project.md</code> 里写着：<b>「试过没成立的方法」是这个项目最值钱的数据。</b>而图上「删掉一个步骤」恰恰就是在产生这种数据。所以删除不能只是消失。</p>
+  <h3>放弃的路线：不进图</h3>
+  <div class="note">
+    <p><b>这张图只服务正向决策。</b>「试过没成立的方法」确实是这个项目里最值钱的数据（<code>memory/project.md</code> 就是这么写的），但把它画进图会直接抬高用户的阅读与决策成本 —— 图上每多一个灰掉的「这条走不通」，就多一份每次都要略过的东西。曾经考虑过 <code>kind: "abandoned"</code> 加 <code>invalidates</code> 边，<b>否掉了</b>。</p>
   </div>
 
-  <p>两条路，我倾向第一条：</p>
+  <p>它落在时间线上，不落在图上：</p>
   <div class="decide">
     <div>
-      <h4><span class="tag ok">推荐</span> 留在图上</h4>
-      <p>不删，改成 <code>kind: "abandoned"</code>，用一条 <code>kind: "invalidates"</code> 的边连到否掉它的那个观察，渲染成灰色。蒸馏直接读图就有；模型每轮也看得见「这条路走过了，别再提」。代价是图更大 —— 但这正是第 8 节那个 detail 裁剪要解决的事。</p>
+      <h4><span class="tag ok">已实现</span> <code>Drop{ why: Option&lt;String&gt; }</code></h4>
+      <p>用户删掉一个节点后，UI 在原地留一个<b>可跳过的单行输入</b>「为什么去掉？」—— 不弹窗、不阻断，愿意写就白拿一行最值钱的数据。蒸馏扫时间线上的 <code>Drop</code> 事件去捞：<b>图上删掉不等于历史里删掉。</b></p>
     </div>
     <div>
-      <h4>兜底 · 无论如何都做</h4>
-      <p><code>Drop{ why: Option&lt;String&gt; }</code>：用户删掉一个步骤后，UI 在原地留一个<b>可跳过的单行输入</b>「为什么去掉？」—— 不弹窗、不阻断。那一句话是最值钱的一行。蒸馏另外扫时间线上的 <code>Drop</code> 事件，<b>图上删掉不等于历史里删掉</b>。</p>
+      <h4>以后再说</h4>
+      <p>要给经验性内容一个位置的话，那是 explore mode 下的<b>独立栏</b>，不是这张图。等真跑起来看用户会不会想翻它。</p>
     </div>
   </div>
 </section>
 
 <section id="s10">
-  <div class="h-row"><span class="h-num">10</span><h2>不变量 · 欠账 · 要你拍的三件事</h2></div>
+  <div class="h-row"><span class="h-num">10</span><h2>不变量 · 欠账 · 三条已拍</h2></div>
 
   <h3>三条新不变量（每个场景收尾时验，与 I1–I8 同处）</h3>
   <div class="tw"><table>
@@ -498,24 +498,24 @@ flowchart TD
   <h3>这个设计新欠的账</h3>
   <ul>
     <li><b>给模型的图要按 detail 裁剪。</b>图涨到几十节点之前不痛，但迟早痛。</li>
-    <li><b>HTML 渲染器。</b>先只做 mermaid；<code>Aside.lang</code> 已经留好位置。</li>
+    <li><b><code>Built</code> 视图的 HTML 渲染</b>：<code>render::built_html</code> 已经占好位并写清了 TODO —— 逻辑与 <code>mermaid</code> 高度相似（同样按 id 序遍历、递归展开子图、查形状、按 <code>prov</code> 决定虚实），差别只在产出 DOM 而不是 mermaid 文本。现在不写是因为节点组件长什么样由 R2 的 UI 决定，此刻等于凭空猜。<b><code>Sketch</code> 的 HTML 已经能用</b>（模型自己写的源码原样出去），所以这条路不是空白。</li>
     <li><b>UI 侧的图编辑器</b>本身属于 R2，这份只定到「一笔手势等于哪条 op」为止。</li>
     <li><b>归一化 label 键的误伤率</b>没有数据支撑，得跑起来看 <code>dropped</code> 里有多少是冤的。</li>
   </ul>
 
-  <h3>要你拍的三件事</h3>
-  <div class="decide q">
+  <h3>三条已拍</h3>
+  <div class="decide">
     <div>
-      <h4><span class="tag warn">拍 1</span> 主图结构化 + 旁挂自由图，还是整张图都让模型自由画？</h4>
-      <p>我选了前者（第 2 节）。<b>如果你要的是后者</b> —— 模型直接写 mermaid、用户在那份 mermaid 上改 —— 那么「点选节点改一个字段、拖一条线」要降级成整段文本编辑，turn 级仲裁要退化成文本 diff。这两条是<b>连带的</b>，不能只要自由不要代价。这是这份设计里最该你定的一条。</p>
+      <h4><span class="tag ok">拍 1</span> 两种画法都实现，跑起来再看</h4>
+      <p>不二选一。<code>Built</code>（程序画，有稳定 id、能点选能仲裁）与 <code>Sketch</code>（模型画，自由但放弃结构化编辑）并存，<code>Graph.view</code> 切换，两份同时保留。UI 侧两种都是「源码 + 预览」双栏 —— 那是 R2 的活。</p>
     </div>
     <div>
-      <h4><span class="tag warn">拍 2</span> 归一化 label 键要不要开？</h4>
-      <p>开了能挡住「模型换个 id 把用户删掉的步骤复活」，代价是模型本轮想新建一个同名节点会被误伤。我倾向<b>开</b>：误伤会通过 <code>dropped</code> 反馈给模型、下一轮能重提；漏判则是静默盖掉用户的删除。</p>
+      <h4><span class="tag ok">拍 2</span> 归一化 label 键开着</h4>
+      <p>条件是不干扰其它逻辑：它只在 <code>Op::keys()</code> 里多返回一个键，不碰仲裁流程本身。误伤方向安全 —— 模型能从 <code>dropped</code> 里看到、下一轮重提。S29 在验它。</p>
     </div>
     <div>
-      <h4><span class="tag warn">拍 3</span> 放弃的路线留在图上，还是只留在时间线里？</h4>
-      <p>我倾向<b>留在图上</b>（<code>kind: "abandoned"</code> 加 <code>invalidates</code> 边）。埋在时间线里等蒸馏去捞太脆 —— 而且模型看不见，会一遍遍重提同一条走不通的路。</p>
+      <h4><span class="tag ok">拍 3</span> 放弃的路线不进图</h4>
+      <p>图只服务正向决策。经验性内容留在时间线上（<code>Drop{ why }</code>），蒸馏时去捞。将来要给它位置，那是 explore mode 下的独立栏。</p>
     </div>
   </div>
 </section>
