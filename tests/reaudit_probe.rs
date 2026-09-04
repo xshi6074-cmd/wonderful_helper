@@ -252,29 +252,26 @@ async fn triggering_user_input_appears_once_in_each_model_prompt() {
     );
 }
 
-/// # 这条契约与一条更强的、已经验证过的性质冲突 —— 待裁决，未修改断言
+/// # 已裁决：UI 的 `TurnClosed` **有意**领先于落盘回执
 ///
-/// 实现故意不满足它：`TurnClosed` 在内存状态转换的同一刻就推给 UI，不等落盘回执。
+/// 审计原版要求「这批事务提交之后才推给 UI」。它与一条更强的、已经验证过的性质冲突
+/// （`src/main.rs` 的 S14：落盘失败不阻断对话）：盘写不进去时 writer 会**无限重试**，
+/// 若 UI 要等提交，一块坏盘会让界面永远停在「正在停止」，用户连新的一轮都开不了。
 ///
-/// 理由是「落盘失败不阻断对话」这条更强的要求（`src/main.rs` 的 S14 在验它）：
-/// 盘写不进去时 writer 会**无限重试**，若 UI 的 `TurnClosed` 要等提交，
-/// 那么一块坏盘会让界面永远停在「正在停止」，用户连新的一轮都开不了。
-/// 用一条「显示可能领先于磁盘」换「盘挂了还能继续说话」，是刻意的取舍。
+/// 取舍已定：**显示可以领先于磁盘，对话不能被磁盘卡住。** 同一取舍还落在别处 ——
+/// `Wrote`（正文本身）也是先推 UI 后落盘；只把 `TurnClosed` 单独卡住并不能消除
+/// 这一类不一致，只会让它更难解释。
 ///
-/// 同一取舍还落在别处：`Wrote`（正文本身）也是先推 UI 后落盘；
-/// 只把 `TurnClosed` 单独卡住并不能消除这一类不一致，只会让它更难解释。
-///
-/// 目前的耐久度信号是分开给的：用户输入用 `Ack.durable`（提交后才回），
+/// 耐久度是**另一路信号**，不混进 UI 事件：用户输入用 `Ack.durable`（提交后才回），
 /// 出问题用 `UiEvent::PersistDegraded`。
 ///
-/// 要改成满足这条契约，需要先决定坏盘时的行为：是让 UI 一起停住，
-/// 还是给 `TurnClosed` 加一个 `durable: bool` 再补一条确认事件。
+/// 所以断言反过来写 —— 守的是这个决定本身，以及它换来的那件事（Core 不被磁盘拖住）。
 #[tokio::test]
-async fn turn_closed_is_published_only_after_its_store_commit() {
+async fn ui_close_leads_the_store_commit_and_the_disk_never_blocks_the_core() {
     let base: Arc<dyn Store> = Arc::new(SqliteStore::memory().unwrap());
     let gate = Arc::new(CloseGate::new());
     let store: Arc<dyn Store> = Arc::new(BlockingCloseStore {
-        inner: base,
+        inner: base.clone(),
         gate: gate.clone(),
     });
     let model = Arc::new(
@@ -295,17 +292,33 @@ async fn turn_closed_is_published_only_after_its_store_commit() {
     .await
     .expect("writer never reached the TurnClosed transaction");
 
+    // (1) 显示领先于磁盘：事务还卡在 append 里，UI 已经收到收尾。
     let mut close_seen_before_commit = false;
     while let Ok(event) = rig.ui.try_recv() {
         if matches!(event, UiEvent::TurnClosed { .. }) {
             close_seen_before_commit = true;
         }
     }
+    assert!(
+        close_seen_before_commit,
+        "TurnClosed 没能在落盘之前推给 UI —— 坏盘会把界面冻在「正在停止」"
+    );
+
+    // (2) 这才是 (1) 换来的东西：盘卡死时 Core 仍然应答。
+    tokio::time::timeout(Duration::from_secs(1), rig.handle.session_snapshot())
+        .await
+        .expect("盘卡住时 Core 不再应答 —— 落盘失败阻断了对话");
+
     gate.release();
     stop(rig).await;
+
+    // (3) 领先不等于丢失：闸门放开后，那条 TurnClosed 确实落到了盘上。
+    let events = base.load_chain(&sid()).unwrap();
     assert!(
-        !close_seen_before_commit,
-        "UI published TurnClosed while the transaction containing TurnClosed was blocked"
+        events
+            .iter()
+            .any(|e| matches!(e.body, Body::TurnClosed { .. })),
+        "TurnClosed 推给了 UI 却始终没有落盘"
     );
 }
 
