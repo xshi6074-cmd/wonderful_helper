@@ -101,7 +101,10 @@ pub struct Deps {
 
 /// 按当前配置注册可用的工具。
 pub fn register(mut reg: Registry, d: &Deps) -> Registry {
+    // ask_user 之前只在一个测试里注册过，生产路径上模型根本问不了用户 ——
+    // 而「提问是持久实体」是这套设计里明确保留的一条打扰权。补上。
     reg = reg
+        .with(Arc::new(crate::tools::AskUser))
         .with(Arc::new(FsRead(d.clone())))
         .with(Arc::new(FsGrep(d.clone())))
         .with(Arc::new(FsFind(d.clone())))

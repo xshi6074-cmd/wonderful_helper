@@ -6,7 +6,7 @@ description = "Premortem —— 把撞墙之后才学到的东西，前移成动
 
 [dependencies]
 # 运行时：SessionActor(Core) / turn task / subagent 都是 tokio task
-tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "signal"] }
 # CancellationToken：全项目唯一的取消手段，绝不使用 JoinHandle::abort
 tokio-util  = { version = "0.7", default-features = false }
 # FuturesUnordered：run_tools 里并行工具的汇聚点
@@ -32,6 +32,12 @@ grep-matcher  = "0.1"   # Matcher trait
 # 各装一套系统库的麻烦。SSE 自己解（十几行），不再引一个 eventsource crate。
 # SSE 那段流式转换写成 stream! 宏，比手搓 unfold 状态机可读得多
 async-stream  = "0.3"
+# UI：axum + WebSocket。前端**零构建步骤** —— 纯 ES module + CSS 用 include_str!
+# 编进二进制，没有 node、没有打包器。将来套 webview 做桌面版也只是指向 localhost。
+axum          = { version = "0.8", features = ["ws"] }
+# markdown 在 Rust 侧渲染：不引 JS 依赖，而且**天生免疫 XSS** ——
+# 模型输出里的 raw HTML 事件被直接丢掉，不可能进 DOM。
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 reqwest       = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
 
 [dev-dependencies]

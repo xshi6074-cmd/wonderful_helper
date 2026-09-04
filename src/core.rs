@@ -528,6 +528,12 @@ impl Core {
                 Self::ack_later(reply, seq, wrx);
             }
 
+            CoreMsg::SetMode { to } => {
+                // 只改下一轮的取向，不动正在跑的这一轮 —— 那一轮的 prompt 早拼好了，
+                // 中途换 mode 只会让它前后不一致。
+                self.mode = to;
+            }
+
             CoreMsg::AdvancePhase { to } => {
                 // 阶段闸门在用户手里。模型没有推进权，也没有阻断权。
                 self.metrics.phase_advances += 1;
@@ -970,6 +976,7 @@ impl Core {
                 TurnPhase::Idle => None,
             },
             queued: self.inbox.len(),
+            mode: self.mode,
         }
     }
 

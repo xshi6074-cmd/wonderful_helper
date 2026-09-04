@@ -162,6 +162,11 @@ impl CoreHandle {
         self.ask(|reply| CoreMsg::Snapshot { reply }).await
     }
 
+    /// 切换 mode。下一轮生效（当前轮已经拼好 prompt 了）。
+    pub async fn session_set_mode(&self, to: crate::model::Mode) {
+        let _ = self.tx.send(CoreMsg::SetMode { to }).await;
+    }
+
     /// 等攒着的事件全部落盘。返回 false 表示这一批没写成功（此时 UI 上应有降级提示）。
     pub async fn session_flush(&self) -> bool {
         self.ask(|reply| CoreMsg::Flush { reply }).await.unwrap_or(false)

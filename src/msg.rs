@@ -68,6 +68,8 @@ pub struct Snap {
     pub open_questions: Vec<OpenQuestion>,
     pub turn: Option<TurnId>,
     pub queued: usize,
+    /// 当前 mode。UI 的开关要显示当前值，光靠客户端自己记会和后端漂移。
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +282,11 @@ pub enum CoreMsg {
     /// 测试里用于在断言盘上内容之前消除攒批带来的时序不确定。
     Flush { reply: tokio::sync::oneshot::Sender<bool> },
     Shutdown { reply: tokio::sync::oneshot::Sender<()> },
+    /// 切换探索 / 行动 mode。
+    ///
+    /// 设计里 mode 一直是「用户显式切换」的，但上一版把它做成了构造参数 ——
+    /// 一个会话开起来之后就再也换不了。UI 有这个开关，所以补上。
+    SetMode { to: Mode },
     /// 退出宽限期到了，不再等 turn 收尾。由 Core 自己的超时 task 发。
     ShutdownNow,
 

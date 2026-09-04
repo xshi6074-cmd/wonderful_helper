@@ -1,0 +1,837 @@
+// premortem UI —— 零构建步骤的纯 ES module。
+//
+// 组织方式：一个 S（全局状态）+ 若干 render 函数。收到消息就改 S、重画受影响的那块。
+// 没有框架、没有虚拟 DOM —— 一次对话几十到几百条事件，整块重画是微秒级，
+// 换来的是「状态只有一份、画法只有一处」，比手动打补丁好维护得多。
+//
+// 唯一用 innerHTML 的地方是**服务端渲染好的 markdown**。那份 HTML 在 Rust 里
+// 已经把 raw HTML 事件丢掉了（见 src/markdown.rs），是安全的；除此之外
+// 所有文本都走 textContent。
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+function h(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'html') e.innerHTML = v;          // 只给服务端渲染过的 markdown
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (v === true) e.setAttribute(k, '');
+    else e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return e;
+}
+
+// ───────────────────────── 状态 ─────────────────────────
+
+const S = {
+  session: null, sessions: [], settings: null, keys: {}, warnings: [],
+  tools: [], web: '无', metrics: '', memory: [],
+  timeline: [], snap: null,
+  mode: 'explore', phase: 'designing', tokens: 0, queued: 0,
+  scene: null, running: false, connected: false,
+  stream: null,           // { turn, text }
+  banners: [],            // { level, text, key }
+};
+
+// ───────────────────────── 连接 ─────────────────────────
+
+let ws = null, retry = 0;
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { retry = 0; S.connected = true; renderTop(); };
+  ws.onclose = () => {
+    S.connected = false; renderTop();
+    retry = Math.min(retry + 1, 6);
+    setTimeout(connect, 400 * retry);
+  };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    onMsg(m);
+  };
+}
+
+function send(op, extra = {}) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op, ...extra }));
+}
+
+function onMsg(m) {
+  switch (m.t) {
+    case 'boot':
+      S.session = m.session; S.sessions = m.sessions; S.settings = m.settings;
+      S.keys = m.keys; S.warnings = m.warnings || []; S.tools = m.tools || [];
+      S.web = m.web; S.metrics = m.metrics; S.memory = m.memory || [];
+      S.timeline = m.timeline || []; S.snap = m.snap; S.stream = null;
+      if (m.snap) { S.mode = m.snap.mode; S.phase = m.snap.phase; S.scene = m.snap.scene; S.queued = m.snap.queued; }
+      S.banners = S.warnings.map((w, i) => ({ level: 'warn', text: w, key: 'cfg' + i }));
+      renderAll();
+      break;
+    case 'event':
+      S.timeline.push(m);
+      if (m.kind === 'wrote') S.stream = null;
+      renderStream(); renderTop();
+      break;
+    case 'delta':
+      if (!S.stream || S.stream.turn !== m.turn) S.stream = { turn: m.turn, text: '' };
+      S.stream.text += m.text;
+      liveDelta();
+      break;
+    case 'turn_started': S.running = true; S.stream = null; renderTop(); renderStream(); break;
+    case 'turn_closed':
+      S.running = false; S.stream = null; renderTop(); renderStream(); send('snap');
+      // 标题是后端按第一句用户发言算的，但那是 boot 时算的。刚说完第一句时
+      // 本地补一下，不然侧栏会一直挂着「空对话」直到下次切会话。
+      titleSelf();
+      break;
+    case 'stopping': banner('info', '正在停止…', 'stop'); break;
+    case 'queued': S.queued = m.pending; renderTop(); break;
+    case 'state_changed': send('snap'); break;
+    case 'snap':
+      S.snap = m.snap; S.mode = m.snap.mode; S.phase = m.snap.phase;
+      S.scene = m.snap.scene; S.queued = m.snap.queued;
+      renderRight(); renderTop(); renderAsk();
+      break;
+    case 'cost': S.tokens = m.total; renderTop(); break;
+    case 'mode': S.mode = m.to; renderTop(); break;
+    case 'phase': S.phase = m.to; renderTop(); break;
+    case 'still_running':
+      banner('info', `工具仍在跑：${m.pending.join(', ')}（${(m.elapsed_ms / 1000) | 0}s）`, 'run');
+      break;
+    case 'task_done': dropBanner('run'); break;
+    case 'compacted':
+      banner('info', `已折叠 ${m.folded} 条早期对话：${m.before} → ${m.after} tok`, 'fold');
+      break;
+    case 'distilled': banner('info', `蒸馏草稿写到 ${m.draft}`, 'distill'); send('snap'); break;
+    case 'footprint': S.foot = m; renderTop(); break;
+    case 'persist':
+      if (m.ok) dropBanner('persist');
+      else banner('bad', `落盘失败（已积压 ${m.pending} 条），对话不受影响：${m.why}`, 'persist');
+      break;
+    case 'memory_bad': banner('warn', `${m.file} 解析失败，已回退内置：${m.err}`, 'mem' + m.file); break;
+    case 'memory': S.memory = m.files; renderMemory(); break;
+    case 'recovered':
+      banner('info', `恢复了上次的会话：${m.events} 条事件，修补 ${m.crashed} 个中断轮次，${m.reopened} 个提问重新打开`, 'rec');
+      break;
+    case 'forked': banner('info', `已从第 ${m.from_turn} 轮分出新分支`, 'fork'); break;
+    case 'probe': $('#probe-out') && ($('#probe-out').textContent = m.text); break;
+    case 'err': banner('bad', m.msg, 'err' + Date.now()); break;
+    case 'lagged': banner('warn', `推送积压，跳过了 ${m.n} 条（刷新可对齐）`, 'lag'); break;
+  }
+}
+
+function banner(level, text, key) {
+  S.banners = S.banners.filter(b => b.key !== key);
+  S.banners.push({ level, text, key });
+  renderBanner();
+}
+function dropBanner(key) { S.banners = S.banners.filter(b => b.key !== key); renderBanner(); }
+
+// ───────────────────────── 顶栏 ─────────────────────────
+
+function renderTop() {
+  $$('#mode-seg button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
+  $('#phase-chip').textContent = S.phase === 'handoff' ? '交接' : '设计讨论';
+  const sc = $('#scene-chip');
+  sc.hidden = !S.scene || S.scene === 'none';
+  if (!sc.hidden) sc.textContent = '场景 ' + S.scene;
+  const foot = S.foot ? `　·　上下文 ${S.foot.total} tok` : '';
+  $('#token-chip').textContent = `${S.tokens} tok${foot}`;
+  const c = $('#conn-chip');
+  c.textContent = S.connected ? (S.session ? S.session.slice(0, 8) : '无会话') : '断线重连中…';
+  c.className = 'chip ' + (S.connected ? 'ghost' : 'bad');
+  $('#stop').hidden = !S.running;
+  const ready = S.connected && !!S.session;
+  $('#send').disabled = !ready;
+  $('#send').title = ready ? '' : '还没有会话 —— 先在左栏配置里填模型密钥';
+  $('#input').placeholder = ready
+    ? '说点什么…  Enter 发送 · Shift+Enter 换行'
+    : '还没有会话。左栏「配置」里填一个模型密钥。';
+  const q = $('#queue-chip');
+  q.hidden = !S.queued;
+  if (S.queued) q.textContent = `${S.queued} 条排队`;
+}
+
+function renderBanner() {
+  const b = $('#banner'); b.textContent = '';
+  for (const n of S.banners) b.append(h('div', { class: 'note ' + n.level }, n.text));
+}
+
+// ───────────────────────── 消息流 ─────────────────────────
+
+/** 把线性事件流分成「块」：轮外的用户发言各成一块，一轮里的东西合成一块。 */
+function blocks() {
+  const out = []; let cur = null;
+  const flush = () => { if (cur) out.push(cur); cur = null; };
+  for (const e of S.timeline) {
+    if (e.kind === 'turn_open') { flush(); cur = { type: 'turn', turn: e.turn, proc: [], msgs: [], closed: false }; continue; }
+    if (e.kind === 'turn_close') { if (cur) { cur.closed = true; cur.stats = e.body.stats; cur.aborted = e.body.aborted; } flush(); continue; }
+    if (e.kind === 'said' || e.kind === 'answered') { flush(); out.push({ type: 'user', e }); continue; }
+    if (!cur) { cur = { type: 'turn', turn: e.turn, proc: [], msgs: [], closed: true }; }
+    if (e.kind === 'wrote' || e.kind === 'asked') cur.msgs.push(e);
+    else cur.proc.push(e);
+  }
+  flush();
+  return out;
+}
+
+const PROC_LABEL = {
+  judged: '场景判定', called: '发起工具', returned: '工具返回', aborted: '调用中止',
+  inferred: '推断更新', edited: '你的编辑', noted: '备注', folded: '折叠',
+  cost: '计费', phase_set: '阶段', scene_overridden: '换场景',
+};
+
+function renderStream() {
+  const st = $('#stream');
+  const stick = st.scrollTop + st.clientHeight > st.scrollHeight - 120;
+  st.textContent = '';
+
+  for (const b of blocks()) {
+    if (b.type === 'user') {
+      const e = b.e;
+      const who = e.kind === 'answered' ? '回答' : '你';
+      st.append(h('div', { class: 'turn' },
+        h('div', { class: 'msg user' },
+          h('div', { class: 'who' }, who),
+          h('div', { class: 'bubble md', html: e.html || '' }))));
+      continue;
+    }
+    const box = h('div', { class: 'turn-block' });
+    if (b.proc.length) box.append(procBlock(b));
+    for (const e of b.msgs) {
+      if (e.kind === 'asked') {
+        box.append(h('div', { class: 'turn' },
+          h('div', { class: 'msg ask' },
+            h('div', { class: 'who' }, '提问'),
+            h('div', { class: 'bubble md', html: e.html || '' }))));
+      } else {
+        box.append(h('div', { class: 'turn' },
+          h('div', { class: 'msg assistant' + (e.body.interrupted ? ' note' : '') },
+            h('div', { class: 'who' }, e.body.interrupted ? '半截' : '助理'),
+            h('div', { class: 'bubble md', html: e.html || '' }))));
+      }
+    }
+    if (b.closed) {
+      box.append(h('div', { class: 'turn-foot' },
+        h('button', {
+          title: '从这一轮分出一条新分支。原会话一条都不动。',
+          onclick: () => send('fork', { turn: b.turn, title: `从第 ${b.turn} 轮分支` }),
+        }, '⑂ 从这里分支'),
+        b.stats ? h('span', { class: 'hint' }, b.stats) : null,
+        b.aborted ? h('span', { class: 'chip warn' }, '中止收尾') : null));
+    }
+    st.append(box);
+  }
+
+  if (S.stream) {
+    st.append(h('div', { class: 'turn', id: 'live' },
+      h('div', { class: 'msg assistant streaming' },
+        h('div', { class: 'who' }, '助理'),
+        h('div', { class: 'bubble', id: 'live-text' }, S.stream.text))));
+  }
+  if (!S.timeline.length && !S.stream) {
+    const missing = Object.entries(S.keys).filter(([, v]) => !v.has).map(([k]) => k);
+    const noSession = !S.session;
+    st.append(noSession
+      ? h('div', { class: 'blank' },
+          h('h2', {}, '先填一个模型密钥'),
+          h('p', {}, missing.length
+            ? `${missing.join(' / ')} 还没有密钥。填好之后会话会自动起来。`
+            : '会话还没起来，看看左栏配置里有没有报错。'),
+          h('div', { class: 'cta' },
+            h('button', { class: 'primary', onclick: () => openTab('config') }, '去配置'),
+            h('button', { onclick: () => send('open', { session: '' }) }, '再试一次')))
+      : h('div', { class: 'blank' },
+          h('h2', {}, '说点什么开始'),
+          h('p', {}, '把你想做的实验讲一遍就行。右栏会随着对话长出一张推断图，你可以直接改它。')));
+  }
+  if (stick) st.scrollTop = st.scrollHeight;
+}
+
+/** 流式只改那一个文本节点，不重画整条流 —— 否则每来一个 delta 都会滚动跳一下。 */
+function liveDelta() {
+  let n = $('#live-text');
+  if (!n) { renderStream(); n = $('#live-text'); if (!n) return; }
+  n.textContent = S.stream.text;
+  const st = $('#stream');
+  if (st.scrollTop + st.clientHeight > st.scrollHeight - 200) st.scrollTop = st.scrollHeight;
+}
+
+/** 执行过程：与回答分开、默认折叠。想看细节再展开。 */
+function procBlock(b) {
+  const steps = h('div', { class: 'steps' });
+  for (const e of b.proc) steps.append(procStep(e));
+  const kinds = [...new Set(b.proc.map(e => PROC_LABEL[e.kind] || e.kind))];
+  return h('div', { class: 'proc' },
+    h('details', {},
+      h('summary', {}, `第 ${b.turn} 轮 · ${b.proc.length} 步`,
+        h('span', { class: 'hint' }, kinds.join(' · '))),
+      steps));
+}
+
+function procStep(e) {
+  const k = PROC_LABEL[e.kind] || e.kind;
+  const v = h('div', { class: 'v' });
+  const B = e.body || {};
+  switch (e.kind) {
+    case 'judged': v.append(`${B.scene}　—　${B.rationale || ''}`); break;
+    case 'called':
+      for (const c of B.calls || []) v.append(h('div', {}, h('code', {}, c.name), ' ', JSON.stringify(c.args)));
+      break;
+    case 'returned':
+      v.append(h('div', {}, h('code', {}, B.name), ' ', h('span', { class: 'hint' }, B.outcome)));
+      v.append(h('pre', {}, B.content || ''));
+      break;
+    case 'inferred': {
+      const ops = (B.ops || []).map(o => o.op + (o.path ? ' ' + o.path : '') + (o.id ? ' ' + o.id : ''));
+      v.append(`生效 ${(B.ops || []).length} 条${ops.length ? '：' + ops.join('、') : ''}`);
+      if ((B.dropped || []).length) {
+        v.append(h('div', { class: 'hint' }, `丢弃 ${B.dropped.length} 条（你本轮改过这些位置）：${B.dropped.join('、')}`));
+      }
+      break;
+    }
+    case 'edited':
+      v.append((B.ops || []).map(o => o.op + ' ' + (o.path || o.id?.node || o.id?.edge || o.id || '')).join('、'));
+      break;
+    case 'noted': v.append(B.text || ''); break;
+    case 'folded': v.append(`把 #${B.from}–#${B.to} 折成摘要（${B.folded} 条）`); break;
+    case 'cost': v.append(`${B.role}　输入 ${B.usage?.prompt ?? 0} / 输出 ${B.usage?.completion ?? 0}${B.usage?.estimated ? '（估算）' : ''}`); break;
+    case 'aborted': v.append(`${B.call_id}：${B.why}`); break;
+    case 'scene_overridden': v.append(`${B.from} → ${B.to}`); break;
+    case 'phase_set': v.append(B.to); break;
+    default: v.append(JSON.stringify(B));
+  }
+  const bad = e.kind === 'aborted' || (e.kind === 'returned' && B.outcome && B.outcome !== 'ok');
+  return h('div', { class: 'step' + (bad ? ' bad' : '') }, h('div', { class: 'k' }, k), v);
+}
+
+/** 模型提了问 ⇒ 输入区上方出现选项按钮。提问是持久实体，重启也还在。 */
+function renderAsk() {
+  const row = $('#ask-row'); row.textContent = '';
+  const qs = S.snap?.open_questions || [];
+  row.hidden = !qs.length;
+  for (const q of qs) {
+    row.append(h('div', { class: 'q' }, '模型在问：' + q.question));
+    for (const o of q.options) {
+      row.append(h('button', { onclick: () => send('answer', { seq: q.seq, choice: o }) }, o));
+    }
+    row.append(h('button', {
+      onclick: () => { $('#input').focus(); },
+      title: '也可以直接在下面自由回答',
+    }, '自己写'));
+  }
+}
+
+// ───────────────────────── 右栏：推断 ─────────────────────────
+
+function isGuess(prov) {
+  const s = prov?.source;
+  return !s || s === 'Guess';
+}
+
+function renderRight() {
+  const ws = S.snap?.ws;
+  const g = ws?.flow;
+  drawGraph(g);
+  $('#graph-hint').textContent = g?.view === 'sketch' ? '（模型自己画的，不能点选）' : '';
+  const src = $('#graph-src');
+  const mer = S.snap?.mermaid;
+  src.hidden = !mer;
+  if (mer) $('pre', src).textContent = mer;
+
+  const fl = $('#fields'); fl.textContent = '';
+  const fields = Object.entries(ws?.fields || {});
+  if (!fields.length) fl.append(h('div', { class: 'empty' }, '还没有图外推断'));
+  for (const [path, f] of fields) {
+    fl.append(h('div', {
+      class: 'frow', title: '点开可以改。改过之后模型本轮不能再动它。',
+      onclick: () => editField(path, f),
+    },
+      h('span', { class: 'p' }, path),
+      h('span', { class: 'v' }, typeof f.value === 'string' ? f.value : JSON.stringify(f.value)),
+      h('span', { class: 'm' }, f.prov?.origin === 'User' ? '你' : (isGuess(f.prov) ? '猜' : '有据'))));
+  }
+
+  for (const [id, key] of [['#open-list', 'open'], ['#parked-list', 'parked']]) {
+    const box = $(id); box.textContent = '';
+    const items = ws?.[key] || [];
+    if (!items.length) box.append(h('div', { class: 'empty' }, '（空）'));
+    for (const q of items) box.append(h('div', { class: 'qrow' }, '· ' + q));
+    box.append(h('button', {
+      style: 'margin-top:6px;font-size:12px',
+      onclick: () => editList(key, items),
+    }, '编辑'));
+  }
+}
+
+/** 分层布局 + SVG。**故意不引 mermaid**：节点要能点选编辑，就得是我们自己画的。 */
+function drawGraph(g) {
+  const box = $('#graph'); box.textContent = '';
+  const nodes = g?.nodes || {}, edges = g?.edges || {};
+  const ids = Object.keys(nodes);
+  if (!ids.length) {
+    box.append(h('div', { class: 'empty' }, g?.sketch ? '模型画的图见下方源码' : '还没有推断图'));
+    return;
+  }
+  const groupOf = {}, isGroup = {};
+  for (const id of ids) { const p = nodes[id].parent; if (p) { isGroup[p] = true; groupOf[id] = p; } }
+  const flat = ids.filter(id => !isGroup[id]);
+
+  // 层号 = 从任一根出发的最长路径。有环也不会死循环（跑固定轮数）。
+  const layer = {}; flat.forEach(id => layer[id] = 0);
+  const es = Object.values(edges).filter(e => layer[e.from] !== undefined && layer[e.to] !== undefined);
+  for (let i = 0; i < flat.length; i++) {
+    let moved = false;
+    for (const e of es) if (layer[e.to] < layer[e.from] + 1) { layer[e.to] = layer[e.from] + 1; moved = true; }
+    if (!moved) break;
+  }
+  const rows = {};
+  for (const id of flat) (rows[layer[id]] ||= []).push(id);
+  Object.values(rows).forEach(r => r.sort());
+
+  const W = 148, H = 38, GX = 22, GY = 34, PAD = 14;
+  const pos = {};
+  let maxCols = 1;
+  for (const [L, r] of Object.entries(rows)) {
+    maxCols = Math.max(maxCols, r.length);
+    r.forEach((id, i) => { pos[id] = { x: PAD + i * (W + GX), y: PAD + (+L) * (H + GY) }; });
+  }
+  const width = PAD * 2 + maxCols * W + (maxCols - 1) * GX;
+  const height = PAD * 2 + Object.keys(rows).length * H + (Object.keys(rows).length - 1) * GY;
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('width', width); svg.setAttribute('height', height);
+  const mk = (t, a, parent = svg) => {
+    const e = document.createElementNS(NS, t);
+    for (const [k, v] of Object.entries(a)) e.setAttribute(k, v);
+    parent.append(e); return e;
+  };
+
+  // 分组：围住它的子节点
+  for (const gid of Object.keys(isGroup)) {
+    const kids = ids.filter(i => groupOf[i] === gid).map(i => pos[i]).filter(Boolean);
+    if (!kids.length) continue;
+    const x0 = Math.min(...kids.map(p => p.x)) - 8, y0 = Math.min(...kids.map(p => p.y)) - 18;
+    const x1 = Math.max(...kids.map(p => p.x)) + W + 8, y1 = Math.max(...kids.map(p => p.y)) + H + 8;
+    const gg = mk('g', { class: 'g' });
+    mk('rect', { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: 8 }, gg);
+    const t = mk('text', { x: x0 + 6, y: y0 + 12 }, gg);
+    t.textContent = nodes[gid].label || gid;
+  }
+
+  const anchor = (id) => {
+    if (pos[id]) return { cx: pos[id].x + W / 2, top: pos[id].y, bot: pos[id].y + H };
+    const kids = ids.filter(i => groupOf[i] === id).map(i => pos[i]).filter(Boolean);
+    if (!kids.length) return null;
+    const x0 = Math.min(...kids.map(p => p.x)), x1 = Math.max(...kids.map(p => p.x)) + W;
+    const y0 = Math.min(...kids.map(p => p.y)) - 18, y1 = Math.max(...kids.map(p => p.y)) + H;
+    return { cx: (x0 + x1) / 2, top: y0, bot: y1 };
+  };
+
+  for (const e of Object.values(edges)) {
+    const a = anchor(e.from), b = anchor(e.to);
+    if (!a || !b) continue;
+    const dy = Math.max(12, (b.top - a.bot) / 2);
+    const d = `M${a.cx},${a.bot} C${a.cx},${a.bot + dy} ${b.cx},${b.top - dy} ${b.cx},${b.top}`;
+    mk('path', { d, class: 'e' + (isGuess(e.prov) ? ' guess' : '') });
+    if (e.label) {
+      const t = mk('text', { x: (a.cx + b.cx) / 2 + 4, y: (a.bot + b.top) / 2, class: 'elabel' });
+      t.textContent = e.label;
+    }
+  }
+
+  for (const id of flat) {
+    const n = nodes[id], p = pos[id];
+    const cls = 'n' + (isGuess(n.prov) ? ' guess' : '') + (n.prov?.origin === 'User' ? ' user' : '');
+    const gg = mk('g', { class: cls });
+    gg.addEventListener('click', () => editNode(id, n));
+    const title = document.createElementNS(NS, 'title');
+    title.textContent = `${id} · ${n.kind}\n${n.body || ''}`;
+    gg.append(title);
+    mk('rect', { x: p.x, y: p.y, width: W, height: H, rx: 6 }, gg);
+    const label = (n.label || id);
+    const t1 = mk('text', { x: p.x + W / 2, y: p.y + (n.kind ? 16 : 23), 'text-anchor': 'middle' }, gg);
+    t1.textContent = label.length > 20 ? label.slice(0, 19) + '…' : label;
+    if (n.kind) {
+      const t2 = mk('text', { x: p.x + W / 2, y: p.y + 29, 'text-anchor': 'middle', class: 'elabel' }, gg);
+      t2.textContent = n.kind;
+    }
+  }
+  box.append(svg);
+}
+
+// ───────────────────────── 编辑弹层 ─────────────────────────
+
+function modal(title, bodyNodes, onOk) {
+  const m = $('#modal'), body = $('.sheet-body', m);
+  body.textContent = '';
+  body.append(h('h3', {}, title), ...bodyNodes,
+    h('div', { class: 'acts', style: 'display:flex;gap:8px;margin-top:14px' },
+      h('button', { class: 'primary', onclick: () => { onOk(); close(); } }, '应用'),
+      h('button', { onclick: close }, '取消')));
+  m.hidden = false;
+  function close() { m.hidden = true; }
+  m.onclick = (e) => { if (e.target === m) close(); };
+}
+
+function editNode(id, n) {
+  const label = h('input', { value: n.label || '' });
+  const kind = h('input', { value: n.kind || '' });
+  const body = h('textarea', { rows: 4 }); body.value = n.body || '';
+  modal(`节点 ${id}`, [
+    h('div', { class: 'field' }, h('label', {}, '标题'), label),
+    h('div', { class: 'field' }, h('label', {}, '类型（形状由 memory/prompts.toml 的 graph.shape 决定）'), kind),
+    h('div', { class: 'field' }, h('label', {}, '细节'), body),
+    h('p', { class: 'hint' }, '改完之后，模型在本轮里不能再动这个节点。'),
+    h('button', {
+      class: 'danger', style: 'margin-top:4px',
+      onclick: () => { send('edit', { ops: [{ op: 'drop', id: { node: id } }] }); $('#modal').hidden = true; },
+    }, '删除这个节点'),
+  ], () => send('edit', {
+    ops: [{ op: 'node', id, label: label.value, kind: kind.value, body: body.value }],
+  }));
+}
+
+function editField(path, f) {
+  const v = h('input', { value: typeof f.value === 'string' ? f.value : JSON.stringify(f.value) });
+  modal(`推断 ${path}`, [
+    h('div', { class: 'field' }, h('label', {}, '值'), v),
+    h('p', { class: 'hint' }, `来源：${f.prov?.origin === 'User' ? '你填的' : '模型推断'}` +
+      (f.prov?.seq ? ` · 第 #${f.prov.seq} 条事件` : '')),
+    h('button', {
+      class: 'danger', style: 'margin-top:4px',
+      onclick: () => { send('edit', { ops: [{ op: 'remove', path }] }); $('#modal').hidden = true; },
+    }, '删掉这条'),
+  ], () => {
+    let val = v.value;
+    try { val = JSON.parse(v.value); } catch { /* 不是 JSON 就当字符串 */ }
+    send('edit', { ops: [{ op: 'set', path, value: val }] });
+  });
+}
+
+function editList(key, items) {
+  const t = h('textarea', { rows: 8 }); t.value = items.join('\n');
+  modal(key === 'open' ? '待落定' : '已搁置', [
+    h('p', { class: 'hint' }, '一行一条。'), t,
+  ], () => {
+    const lines = t.value.split('\n').map(s => s.trim()).filter(Boolean);
+    send('edit', { ops: [{ op: 'set', path: key, value: null, [key]: lines }] });
+  });
+}
+
+// ───────────────────────── 左栏 ─────────────────────────
+
+/** 本会话有内容了就把侧栏里那条的标题补上。 */
+function titleSelf() {
+  const me = S.sessions.find(x => x.id === S.session);
+  if (!me || me.title) return;
+  const first = S.timeline.find(e => e.kind === 'said');
+  if (!first) return;
+  const t = (first.body.text || '').split(/\s+/).join(' ');
+  me.title = t.length > 24 ? t.slice(0, 24) + '…' : t;
+  renderSessions();
+}
+
+function renderSessions() {
+  const ul = $('#session-list'); ul.textContent = '';
+  if (!S.sessions.length) ul.append(h('li', { class: 'hint' }, '还没有对话'));
+  for (const s of S.sessions) {
+    ul.append(h('li', {
+      class: s.id === S.session ? 'on' : '',
+      onclick: () => send('open', { session: s.id }),
+    },
+      h('span', {}, s.title || (s.parent ? '空分支' : '空对话')),
+      h('span', { class: 'sub' }, s.parent ? '⑂ ' + s.id.slice(0, 6) : s.id.slice(0, 6))));
+  }
+}
+
+function renderConfig() {
+  const box = $('#config-form'); box.textContent = '';
+  const st = S.settings; if (!st) return;
+  const draft = JSON.parse(JSON.stringify(st));
+
+  const num = (obj, k, label) => {
+    const i = h('input', { type: 'number', value: obj[k], oninput: e => obj[k] = +e.target.value });
+    return h('div', { class: 'field' }, h('label', {}, label), i);
+  };
+  const txt = (obj, k, label) => {
+    const i = h('input', { value: obj[k], oninput: e => obj[k] = e.target.value });
+    return h('div', { class: 'field' }, h('label', {}, label), i);
+  };
+  const sel = (obj, k, label, opts) => {
+    const s = h('select', { onchange: e => obj[k] = e.target.value });
+    for (const o of opts) s.append(h('option', { value: o, selected: obj[k] === o }, o));
+    return h('div', { class: 'field' }, h('label', {}, label), s);
+  };
+  const lines = (obj, k, label) => {
+    const t = h('textarea', { rows: 3, oninput: e => obj[k] = e.target.value.split('\n').map(s => s.trim()).filter(Boolean) });
+    t.value = (obj[k] || []).join('\n');
+    return h('div', { class: 'field' }, h('label', {}, label), t);
+  };
+  const block = (title, tag, kids, open = false, tagOn = false) => {
+    const d = h('details', { class: 'block', open });
+    d.append(h('summary', {}, title,
+      tag ? h('span', { class: 'tag' + (tagOn ? ' on' : '') }, tag) : null));
+    d.append(h('div', { class: 'body' }, ...kids));
+    return d;
+  };
+
+  const provs = Object.keys(draft.providers);
+  for (const [role, cn] of [['judge', '判断段'], ['answer', '回答段'], ['subagent', '子任务']]) {
+    const r = draft.roles[role];
+    box.append(block(`${cn} · ${role}`, r.model, [
+      sel(r, 'provider', 'provider', provs), txt(r, 'model', '模型名'),
+      h('div', { class: 'two' }, num(r, 'temperature', '温度'), num(r, 'max_tokens', 'max tokens')),
+    ]));
+  }
+
+  for (const name of provs) {
+    const p = draft.providers[name];
+    const st_ = S.keys[name] || {};
+    const keyIn = h('input', { type: 'password', placeholder: st_.has ? '已有密钥（留空保持不变）' : '粘贴密钥…' });
+    box.append(block(`provider · ${name}`, st_.has ? '密钥已存' : '缺密钥', [
+      sel(p, 'api', 'API 协议', ['anthropic', 'open_ai_compat']),
+      txt(p, 'base_url', 'base_url'), txt(p, 'key_env', '密钥的环境变量名'),
+      h('div', { class: 'field' }, h('label', {}, `密钥（存进 secrets.json，0600，不进 config.json）`), keyIn),
+      h('div', { class: 'acts' },
+        h('button', {
+          onclick: () => { if (keyIn.value.trim()) send('secret_put', { provider: name, key: keyIn.value }); keyIn.value = ''; },
+        }, '存入'),
+        st_.has ? h('button', { class: 'danger', onclick: () => send('secret_put', { provider: name, key: '' }) }, '清除') : null),
+      h('p', { class: 'hint' }, `环境变量 ${st_.env} 优先级高于这里。`),
+    ]));
+  }
+
+  const w = draft.web;
+  box.append(block('联网后端', w.fetch, [
+    sel(w, 'fetch', '抓取', ['crawl4ai', 'crawl4ai_cli', 'firecrawl', 'http', 'none']),
+    txt(w, 'fetch_base', '抓取服务地址'),
+    sel(w, 'search', '搜索', ['searxng', 'firecrawl', 'none']),
+    txt(w, 'search_base', 'SearXNG 地址'),
+    h('p', { class: 'hint' }, 'crawl4ai 与 SearXNG 都是本地自建、不要密钥。firecrawl 要。'),
+    h('div', { class: 'acts' }, h('button', { onclick: () => send('probe_web') }, '探活')),
+    h('pre', { id: 'probe-out', class: 'hint', style: 'white-space:pre-wrap;margin:6px 0 0' }),
+  ]));
+
+  const t = draft.tools;
+  box.append(block('工具权限与上限', t.net ? '联网开' : '联网关', [
+    h('div', { class: 'kv' },
+      h('b', {}, '联网'),
+      h('input', { type: 'checkbox', checked: t.net, style: 'width:auto', onchange: e => t.net = e.target.checked })),
+    lines(t, 'roots', '可读目录（一行一个）'),
+    lines(t, 'allow_hosts', '可抓域名（后缀匹配，* 表示不限）'),
+    lines(t, 'deny_names', '永不读取的名字'),
+    h('div', { class: 'two' }, num(t, 'max_bytes', '单次字节上限'), num(t, 'max_lines', '行数上限')),
+    h('div', { class: 'two' }, num(t, 'max_matches', '检索条数'), num(t, 'max_depth', '遍历深度')),
+  ]));
+
+  const raw = h('textarea', { rows: 10 });
+  raw.value = JSON.stringify(draft, null, 2);
+  box.append(block('配置文件（config.json）', '高级', [
+    h('p', { class: 'hint' }, '上面的表单改的就是这份。也可以直接改这里 —— 保存时以这份为准。'),
+    raw,
+  ]));
+
+  box.append(h('button', {
+    class: 'primary wide', style: 'margin-top:10px',
+    onclick: () => {
+      let next;
+      try { next = JSON.parse(raw.value); } catch { next = draft; }
+      // 表单改的是 draft，文本框如果被动过就以文本框为准；两边一致时无所谓
+      send('settings_put', { settings: raw.value.trim() === JSON.stringify(draft, null, 2).trim() ? draft : next });
+    },
+  }, '保存并重启会话'));
+  box.append(h('p', { class: 'hint', style: 'margin-top:8px' },
+    '改动会重启当前会话（历史不丢，从库里恢复）。'));
+}
+
+const MEM_DESC = {
+  'project.md': '项目概述与进展。新对话靠它快速入手。',
+  'preferences.md': '你的合作偏好。',
+  'knowledge.md': '你在各知识域的掌握程度，决定模型是提问还是讲解。',
+  'playbook.toml': '易犯错场景与对应指令 —— 也就是蒸馏出来的东西最终落到的地方。',
+  'prompts.toml': '所有注入的提示词模板：角色、用户字段约束、折叠指令、两个 mode 的一句话、图的形状词表。',
+};
+
+function renderMemory() {
+  const box = $('#memory-list'); box.textContent = '';
+  for (const f of S.memory) {
+    const ta = h('textarea', {}); ta.value = f.text;
+    const isCase = f.file.startsWith('cases/');
+    const d = h('details', { class: 'block' });
+    d.append(h('summary', {}, f.file, isCase ? h('span', { class: 'tag' }, '蒸馏结果') : null));
+    d.append(h('div', { class: 'body' },
+      h('p', { class: 'hint' }, MEM_DESC[f.file] || '一条参考案例。命中对应场景时注入回答段。'),
+      ta,
+      h('div', { class: 'acts' },
+        h('button', { class: 'primary', onclick: () => send('memory_put', { file: f.file, text: ta.value }) }, '保存'),
+        isCase ? h('button', { class: 'danger', onclick: () => send('memory_del', { file: f.file }) }, '删除') : null)));
+    box.append(d);
+  }
+  box.append(h('button', {
+    class: 'wide', style: 'margin-top:8px',
+    onclick: () => send('distill'),
+    title: '把这次会话的结论蒸馏成草稿，写进 memory/。只有你按了才会写。',
+  }, '⚗ 一键蒸馏'));
+}
+
+function renderTools() {
+  const box = $('#tools-panel'); box.textContent = '';
+  box.append(h('p', { class: 'hint' }, '模型这一轮能用的工具。全部只读 —— 没有写文件的工具，也没有 shell。'));
+  for (const t of S.tools) {
+    box.append(h('div', { class: 'kv' }, h('b', { class: 'mono' }, t)));
+  }
+  box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '联网后端'));
+  box.append(h('div', { class: 'kv' }, h('b', {}, '当前'), S.web));
+  box.append(h('button', { style: 'margin-top:6px', onclick: () => send('probe_web') }, '探活'));
+  box.append(h('pre', { id: 'probe-out', class: 'hint', style: 'white-space:pre-wrap;margin:6px 0 0' }));
+  box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '本会话用量'));
+  box.append(h('div', { class: 'hint', style: 'font-family:var(--mono);font-size:11px' }, S.metrics || '（还没调用过）'));
+  box.append(h('p', { class: 'hint', style: 'margin-top:12px' },
+    'subagent 目前只用在上下文折叠上。检索型 subagent 还没接（判断段的 retrieve 恒为空）。'));
+}
+
+function renderAll() {
+  renderTop(); renderBanner(); renderStream(); renderRight();
+  renderSessions(); renderConfig(); renderMemory(); renderTools(); renderAsk();
+  const roots = S.settings?.tools?.roots || [];
+  $('#root-path').value = roots[0] || '.';
+}
+
+// ───────────────────────── 查找 ─────────────────────────
+
+let hits = [], cur = -1;
+
+function clearHits() {
+  for (const m of $$('mark.hit')) {
+    const t = document.createTextNode(m.textContent);
+    m.replaceWith(t); t.parentNode && t.parentNode.normalize();
+  }
+  hits = []; cur = -1;
+}
+
+function doFind(q) {
+  clearHits();
+  if (!q) { $('#find-count').textContent = '0/0'; return; }
+  const needle = q.toLowerCase();
+  const walker = document.createTreeWalker($('#stream'), NodeFilter.SHOW_TEXT);
+  const targets = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode;
+    if (n.nodeValue.toLowerCase().includes(needle)) targets.push(n);
+  }
+  for (const n of targets) {
+    const parts = n.nodeValue.split(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'ig'));
+    const frag = document.createDocumentFragment();
+    for (const p of parts) {
+      if (p.toLowerCase() === needle) { const m = h('mark', { class: 'hit' }, p); frag.append(m); hits.push(m); }
+      else if (p) frag.append(document.createTextNode(p));
+    }
+    n.replaceWith(frag);
+  }
+  cur = hits.length ? 0 : -1;
+  focusHit();
+}
+
+function focusHit() {
+  hits.forEach((m, i) => m.classList.toggle('cur', i === cur));
+  $('#find-count').textContent = `${hits.length ? cur + 1 : 0}/${hits.length}`;
+  if (cur >= 0) hits[cur].scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function step(d) { if (!hits.length) return; cur = (cur + d + hits.length) % hits.length; focusHit(); }
+
+// ───────────────────────── 交互接线 ─────────────────────────
+
+function grip(el, cssVar, side) {
+  el.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const move = (ev) => {
+      const w = side === 'left' ? ev.clientX : window.innerWidth - ev.clientX;
+      document.documentElement.style.setProperty(cssVar, Math.max(180, Math.min(560, w)) + 'px');
+    };
+    const up = () => { removeEventListener('mousemove', move); removeEventListener('mouseup', up); };
+    addEventListener('mousemove', move); addEventListener('mouseup', up);
+  });
+}
+
+function openTab(name) {
+  document.body.classList.remove('no-left');
+  $('#left-show').hidden = true;
+  $$('#left-tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === name));
+  $$('#left .pane').forEach(p => p.hidden = p.dataset.pane !== name);
+}
+
+function boot() {
+  grip($('#lgrip'), '--left', 'left');
+  grip($('#rgrip'), '--right', 'right');
+
+  $('#left-hide').onclick = () => { document.body.classList.add('no-left'); $('#left-show').hidden = false; };
+  $('#left-show').onclick = () => { document.body.classList.remove('no-left'); $('#left-show').hidden = true; };
+  $('#right-toggle').onclick = () => {
+    document.body.classList.toggle('no-right');
+    document.body.classList.add('want-right');
+  };
+
+  $$('#left-tabs button').forEach(b => b.onclick = () => openTab(b.dataset.tab));
+
+  $$('#mode-seg button').forEach(b => b.onclick = () => send('mode', { to: b.dataset.mode }));
+  $('#phase-chip').onclick = () =>
+    send('phase', { to: S.phase === 'handoff' ? 'designing' : 'handoff' });
+  $('#new-chat').onclick = () => send('open', { session: '' });
+  $('#graph-refresh').onclick = () => send('snap');
+  $('#stop').onclick = () => send('interrupt');
+
+  const input = $('#input');
+  const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; };
+  input.addEventListener('input', grow);
+  const fire = () => {
+    const text = input.value;
+    if (!text.trim()) return;
+    // 轮次在跑的时候发出去 = 插话；Core 会决定排队还是打断
+    send('send', { text, interrupt: false });
+    input.value = ''; grow(); input.focus();
+  };
+  $('#send').onclick = fire;
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); fire(); }
+  });
+
+  $('#root-save').onclick = () => {
+    const next = JSON.parse(JSON.stringify(S.settings));
+    next.tools.roots = [$('#root-path').value.trim() || '.'];
+    send('settings_put', { settings: next });
+  };
+
+  // 查找
+  const openFind = () => { $('#find').hidden = false; $('#find-input').focus(); $('#find-input').select(); };
+  $('#find-btn').onclick = openFind;
+  $('#find-close').onclick = () => { $('#find').hidden = true; clearHits(); };
+  $('#find-next').onclick = () => step(1);
+  $('#find-prev').onclick = () => step(-1);
+  let t = null;
+  $('#find-input').addEventListener('input', (e) => {
+    clearTimeout(t); const v = e.target.value; t = setTimeout(() => doFind(v), 120);
+  });
+  $('#find-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    if (e.key === 'Escape') { $('#find').hidden = true; clearHits(); }
+  });
+  addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFind(); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); $('#left-hide').click(); }
+    if (e.key === 'Escape' && !$('#modal').hidden) $('#modal').hidden = true;
+  });
+
+  connect();
+}
+
+boot();
