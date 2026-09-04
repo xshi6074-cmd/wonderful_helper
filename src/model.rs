@@ -115,6 +115,17 @@ pub struct ToolSpec {
     pub name: String,
     /// 给模型看的说明。**「什么时候该用这个工具」写在这里，不写进 harness。**
     pub description: String,
+    /// 参数的 JSON Schema。
+    ///
+    /// 真实 API（Anthropic 的 `input_schema`、OpenAI 的 `function.parameters`）
+    /// 都要它。默认是个「随便什么对象」，但那样模型只能从 description 里猜参数名 ——
+    /// 猜错一次就是一次白烧的往返。所以工具应该自己给准确的 schema。
+    #[serde(default = "any_object")]
+    pub schema: serde_json::Value,
+}
+
+pub fn any_object() -> serde_json::Value {
+    serde_json::json!({ "type": "object", "properties": {} })
 }
 
 /// 会话历史里的一条消息。

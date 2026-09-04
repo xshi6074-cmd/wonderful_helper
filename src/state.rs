@@ -643,7 +643,14 @@ pub const DEFAULT_EDGE_KIND: &str = "flow";
 ///
 /// 图内的 op **全部是 patch**（`None` = 这一项不改）：这是「只改 label 不动 body」
 /// 能成立的前提，也是把重写压到最小的地方 —— 模型每轮只发它真想改的那几项。
+///
+/// # 为什么是内部 tag
+///
+/// 默认的外部 tag 会序列化成 `{"Node": {...}}`，模型写起来别扭、事件 JSON 读起来
+/// 也别扭。内部 tag 是 `{"op": "node", "id": ..., "label": ...}` —— 平的，
+/// **模型侧的 schema 和落盘格式是同一个**，不需要在中间再翻译一层。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     // ───────────── 图外 ─────────────
     Set {

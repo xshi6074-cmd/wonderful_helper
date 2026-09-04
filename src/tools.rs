@@ -117,6 +117,10 @@ pub trait Tool: Send + Sync {
     /// 这是上一版最大的错误被改掉的地方之一：原来 harness 拿着一个 `Action` 枚举
     /// 替模型决定「这一步要读仓库」；现在只是把工具连同说明摆出来，用不用模型自己定。
     fn description(&self) -> &str;
+    /// 参数的 JSON Schema。默认「随便什么对象」—— 能跑，但模型得靠 description 猜。
+    fn schema(&self) -> serde_json::Value {
+        crate::model::any_object()
+    }
     fn concurrency(&self) -> Concurrency;
     fn run<'a>(
         &'a self,
@@ -144,6 +148,13 @@ impl Registry {
         self.tools.get(name).cloned()
     }
 
+    /// 注册了哪些工具，按名字排序。启动时打出来给人看的。
+    pub fn names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.tools.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
     pub fn concurrency(&self, name: &str) -> Concurrency {
         self.tools.get(name).map(|t| t.concurrency()).unwrap_or(Concurrency::Parallel)
     }
@@ -156,6 +167,7 @@ impl Registry {
             .map(|t| crate::model::ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
+                schema: t.schema(),
             })
             .collect()
     }

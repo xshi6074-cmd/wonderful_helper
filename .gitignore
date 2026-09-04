@@ -1,1 +1,11 @@
 /target
+
+# live 探针在运行目录里生成的东西。secrets.json 由 Secrets::save 自己补进
+# 运行目录的 .gitignore；这里再挡一道，防止有人拿仓库根目录当运行目录。
+/secrets.json
+/config.json
+/premortem.db
+/premortem.db-wal
+/premortem.db-shm
+/workspace/
+/memory/

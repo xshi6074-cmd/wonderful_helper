@@ -1749,19 +1749,149 @@ async fn s39_config_reaches_the_gate() {
     ok(!ok_kind(&bad), "★ 默认允许的 arxiv 现在抓不了 —— 文件真的管住了闸门");
     ok(bad.content.contains("config.json"), "★ 拒绝时告诉模型去哪儿改");
 
-    // 后端选择：没有 curl 的机器上应该干脆不给联网工具，而不是给一个会报错的
-    let has_curl = premortem::shell::which("curl").is_some();
-    let picked = premortem::web::pick(&loaded.tools, None);
-    ok(picked.is_some() == has_curl, "没有 curl 就不注册联网工具");
-    if has_curl {
-        ok(picked.as_ref().unwrap().name() == "curl", "没密钥时降级到裸 curl");
-        ok(!picked.as_ref().unwrap().can_search(), "★ 裸 curl 不假装能搜索");
-        let fc = premortem::web::pick(&loaded.tools, Some("sk-x".into())).unwrap();
-        ok(fc.name() == "firecrawl" && fc.can_search(), "★ 填了密钥就升级成 firecrawl");
-    }
-    let off = premortem::policy::PolicyCfg { net: false, ..loaded.tools.clone() };
-    ok(premortem::web::pick(&off, Some("sk-x".into())).is_none(), "总开关关掉时连后端都不建");
+    // 后端选择：抓与搜各自可配，默认是本地 crawl4ai（不要密钥）
+    use premortem::web::{Fetcher, Searcher, WebCfg};
+    let d0 = WebCfg::default();
+    ok(d0.fetch == Fetcher::Crawl4ai, "★ 默认抓取后端是本地 crawl4ai —— 不用配密钥");
+    let b = premortem::web::build(&d0, &loaded.tools, None).unwrap();
+    ok(!b.can_search(), "★ 只配了抓没配搜时，web_search 不注册（不给会报错的工具）");
 
+    let with_search = WebCfg { search: Searcher::Searxng, ..d0.clone() };
+    let b2 = premortem::web::build(&with_search, &loaded.tools, None).unwrap();
+    ok(b2.can_search(), "★ 配上自建 SearXNG 就有搜索，同样不要密钥");
+
+    let fc = WebCfg { fetch: Fetcher::Firecrawl, search: Searcher::None, ..d0.clone() };
+    ok(
+        premortem::web::build(&fc, &loaded.tools, None).is_none(),
+        "★ 选了要密钥的后端却没密钥 ⇒ 干脆不建，不留一个一调就 401 的工具",
+    );
+    ok(
+        premortem::web::build(&fc, &loaded.tools, Some("fc-key".into())).is_some(),
+        "填了密钥就能建起来",
+    );
+    let off = premortem::policy::PolicyCfg { net: false, ..loaded.tools.clone() };
+    ok(premortem::web::build(&d0, &off, None).is_none(), "总开关关掉时连后端都不建");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s40_wire_format() {
+    head("S40", "★ 真实 API 的消息映射与 SSE 解析（离线测，不联网）");
+    use premortem::client::{anthropic_messages, openai_messages, parse_sse};
+    use premortem::config::Api;
+    use premortem::model::{Message, StreamEvent};
+
+    // ── 消息映射 ──
+    let msgs = vec![
+        Message::system("规则 A"),
+        Message::system("规则 B"),
+        Message::user("帮我看看"),
+        Message::assistant_with_calls("我查一下", vec![call("c1", "fs_read"), call("c2", "fs_grep")]),
+        Message::tool("c1", "文件内容"),
+        Message::tool("c2", "检索结果"),
+        Message::user("接着说"),
+    ];
+    let (system, out) = anthropic_messages(&msgs);
+    ok(system.contains("规则 A") && system.contains("规则 B"), "system 段并成一段（Anthropic 是顶层字段）");
+    ok(out.iter().all(|m| m["role"] != "system"), "system 不留在 messages 里");
+    ok(out[0]["role"] == "user", "第一条是 user");
+    let roles: Vec<String> = out.iter().map(|m| m["role"].as_str().unwrap_or("").to_string()).collect();
+    let alternating = roles.windows(2).all(|w| w[0] != w[1]);
+    ok(alternating, "★ user/assistant 严格交替 —— 不合并的话 Anthropic 直接 400");
+    let merged = out.iter().find(|m| {
+        m["content"].as_array().map(|a| a.iter().filter(|b| b["type"] == "tool_result").count() >= 2)
+            .unwrap_or(false)
+    });
+    ok(merged.is_some(), "★ 连着两条工具返回被合进同一条 user 消息");
+    let asst = out.iter().find(|m| m["role"] == "assistant").unwrap();
+    let blocks = asst["content"].as_array().unwrap();
+    ok(blocks.iter().any(|b| b["type"] == "text"), "assistant 的正文是 text 块");
+    ok(blocks.iter().filter(|b| b["type"] == "tool_use").count() == 2, "两个工具调用都成了 tool_use 块");
+
+    let oa = openai_messages(&msgs);
+    ok(oa.len() == msgs.len(), "OpenAI 侧一一对应（它允许连续同角色）");
+    let a2 = oa.iter().find(|m| m["role"] == "assistant").unwrap();
+    ok(
+        a2["tool_calls"][0]["function"]["arguments"].is_string(),
+        "★ OpenAI 的 arguments 是字符串不是对象 —— 发成对象会被拒",
+    );
+    let t2 = oa.iter().find(|m| m["role"] == "tool").unwrap();
+    ok(t2["tool_call_id"] == "c1", "工具返回带回了 tool_call_id");
+
+    // ── Anthropic SSE ──
+    let a_blocks = vec![
+        r#"event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":120}}}"#,
+        r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"先"}}"#,
+        r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"复现"}}"#,
+        r#"event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"fs_read"}}"#,
+        r#"event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#,
+        r#"event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"src/a.rs\"}"}}"#,
+        r#"event: message_delta
+data: {"type":"message_delta","usage":{"output_tokens":45}}"#,
+        r#"event: message_stop
+data: {"type":"message_stop"}"#,
+    ];
+    let evs = parse_sse(Api::Anthropic, &a_blocks);
+    let text: String = evs.iter().filter_map(|e| match e {
+        StreamEvent::Chunk(t) => Some(t.clone()), _ => None }).collect();
+    ok(text == "先复现", "正文分片按序拼起来");
+    let calls = evs.iter().find_map(|e| match e {
+        StreamEvent::ToolCalls(c) => Some(c.clone()), _ => None });
+    ok(calls.is_some(), "工具调用解出来了");
+    let calls = calls.unwrap_or_default();
+    ok(calls.len() == 1 && calls[0].name == "fs_read", "工具名对");
+    ok(
+        calls[0].args["path"] == "src/a.rs",
+        "★ 分片到达的参数 JSON 拼完整了才解析 —— 这是流式最容易错的一处",
+    );
+    let usage = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None });
+    ok(usage.map(|u| u.prompt) == Some(120), "输入 token 从 message_start 拿到");
+    ok(usage.map(|u| u.completion) == Some(45), "★ 输出 token 从 message_delta 拿到（不然账全靠估）");
+
+    // ── OpenAI SSE ──
+    let o_blocks = vec![
+        r#"data: {"choices":[{"delta":{"content":"好"}}]}"#,
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"web_","arguments":"{\"url"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"fetch","arguments":"\":\"https://a.b\"}"}}]}}]}"#,
+        r#"data: {"choices":[],"usage":{"prompt_tokens":80,"completion_tokens":12}}"#,
+        r#"data: [DONE]"#,
+    ];
+    let evs = parse_sse(Api::OpenAiCompat, &o_blocks);
+    let calls = evs.iter().find_map(|e| match e {
+        StreamEvent::ToolCalls(c) => Some(c.clone()), _ => None }).unwrap_or_default();
+    ok(calls.len() == 1, "OpenAI 侧也解出一个调用");
+    ok(calls[0].name == "web_fetch", "★ 分片到达的工具名也要拼（web_ + fetch）");
+    ok(calls[0].args["url"] == "https://a.b", "参数拼完整了");
+    let usage = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None });
+    ok(usage.map(|u| (u.prompt, u.completion)) == Some((80, 12)), "usage 从末尾那块拿到");
+    ok(!evs.iter().any(|e| matches!(e, StreamEvent::Failed(_))), "[DONE] 不该被当成错误");
+
+    // ── 参数被截断时不该整轮失败 ──
+    let broken = vec![
+        r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"fs_read"}}"#,
+        r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"pa"}}"#,
+    ];
+    let evs = parse_sse(Api::Anthropic, &broken);
+    let calls = evs.iter().find_map(|e| match e {
+        StreamEvent::ToolCalls(c) => Some(c.clone()), _ => None }).unwrap_or_default();
+    ok(calls.len() == 1 && calls[0].args.is_object(), "★ 参数拼不完整时给空对象，让工具去报「缺少参数」");
+
+    // ── 工具 schema 真的传出去了 ──
+    let dir = tmpdir("schema");
+    let (_, reg) = toolchain(&dir, None);
+    let specs = reg.specs(&reg.names());
+    let read = specs.iter().find(|s| s.name == "fs_read").unwrap();
+    ok(read.schema["properties"]["offset"]["type"] == "integer", "★ fs_read 报了准确的参数 schema");
+    ok(read.schema["required"][0] == "path", "必填项标出来了");
+    ok(specs.iter().all(|s| s.schema["type"] == "object"), "每个工具都有 schema");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1809,11 +1939,12 @@ async fn main() {
     s37_fetch_lands_in_workspace().await;
     s38_toolchain_in_a_turn().await;
     s39_config_reaches_the_gate().await;
+    s40_wire_format().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);
     println!("\n{}", "═".repeat(64));
-    println!("39 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
+    println!("40 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
     if f > 0 {
         std::process::exit(1);
     }

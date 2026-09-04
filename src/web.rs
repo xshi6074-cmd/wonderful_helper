@@ -1,25 +1,36 @@
-//! 联网后端：搜索与抓取。**接口在这里，实现可换。**
+//! 联网后端：**抓**与**搜**分开配，各自可换。
 //!
-//! # 为什么是一个 trait 而不是直接写死
+//! # 为什么拆成两半
 //!
-//! 三个理由，按重要性排：
+//! 上一版按厂商切（一个 `Firecrawl` 同时管搜和抓），换成 crawl4ai 时立刻暴露问题：
+//! **crawl4ai 只做抓取，不做搜索**。按厂商切就只能要么丢掉搜索，要么为了搜索
+//! 继续绑着一个要密钥的服务。拆成 `fetch` / `search` 两个位置之后，
+//! 「本地 crawl4ai 抓 + 自建 SearXNG 搜」这种全本地、全免密钥的组合才配得出来。
 //!
-//! 1. **测试。** 链路测试不能真的联网 —— 那样测试会因为别人的网站改版而变红。
-//!    [`MockWeb`] 让整条工具链在没有网络的机器上跑得通。
-//! 2. **换实现。** 现在走 firecrawl 的 HTTP API，将来换成自建的抓取服务、
-//!    或者项目引入 `reqwest` 之后走进程内 HTTP，换的只是这个文件。
-//! 3. **降级。** 没配 firecrawl 密钥时退到裸 [`Curl`]：搜不了，但「抓这个网址」
-//!    还能用。有一半能力比整块功能消失好。
+//! # 本地优先，不要密钥
 //!
-//! # 密钥不进 argv
+//! | 位置 | 默认 | 要密钥 | 怎么起 |
+//! |---|---|---|---|
+//! | 抓 | crawl4ai 服务 | 否 | `docker run -p 11235:8080 unclecode/crawl4ai` |
+//! | 抓 | crawl4ai CLI | 否 | `pip install crawl4ai && crawl4ai-setup` |
+//! | 抓 | firecrawl | 是 | 云服务 |
+//! | 抓 | http | 否 | 裸 GET + 剥标签，兜底 |
+//! | 搜 | searxng | 否 | 自建，`GET /search?format=json` |
+//! | 搜 | firecrawl | 是 | 云服务 |
 //!
-//! `ps` 能看到任何进程的命令行。把 `Authorization: Bearer sk-...` 放进 curl 的
-//! 参数里，等于在多用户机器上把密钥广播出去。所以走 curl 的 `--config` 文件：
-//! 临时文件、0600、用完删掉，参数里只有文件路径。
+//! # 后端自己的地址不过闸门
+//!
+//! [`crate::policy::Policy::check_url`] 挡的是**模型请求的目标网址**。
+//! 后端自身的 base_url（`http://localhost:11235`）是运维配置，不是模型输入，
+//! 所以它不该被内网检查挡住 —— 否则本地部署一个都用不了。
+//! 模型给的目标网址仍然照常过闸门，SSRF 防线没有松。
 
 use crate::model::BoxFuture;
 use crate::shell::Shell;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// 一条搜索结果。
@@ -40,8 +51,8 @@ pub struct Page {
 
 pub trait WebBackend: Send + Sync {
     fn name(&self) -> &str;
-    /// 这个后端支持搜索吗。裸 curl 不支持 —— 那时 `web_search` 工具干脆不注册，
-    /// 而不是注册一个一调就报错的工具。
+    /// 这个后端支持搜索吗。不支持时 `web_search` 干脆不注册 ——
+    /// 不给模型一个一调就报错的工具。
     fn can_search(&self) -> bool;
     fn search<'a>(
         &'a self,
@@ -54,52 +65,418 @@ pub trait WebBackend: Send + Sync {
         url: &'a str,
         token: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Page, String>>;
+    /// 探活：**给真实链路测试用**。返回一句人能看懂的话。
+    ///
+    /// 有它才能把「抓取失败」拆成「服务没起来」和「这个页面抓不了」——
+    /// 两者的下一步完全不同，混在一起会让人去改错的东西。
+    fn probe<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        let _ = token;
+        Box::pin(async { Ok("（这个后端没有探活）".to_string()) })
+    }
 }
 
-// ───────────────────────── firecrawl ─────────────────────────
+// ───────────────────────── 配置 ─────────────────────────
 
-/// 走 firecrawl 的 v1 HTTP API，用 curl 发请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fetcher {
+    /// crawl4ai 的本地服务。**默认，不要密钥。**
+    Crawl4ai,
+    /// crawl4ai 的命令行。同样不要密钥，适合不想跑 Docker 的情况。
+    Crawl4aiCli,
+    /// firecrawl 云服务，要密钥。
+    Firecrawl,
+    /// 裸 GET + 剥标签。永远可用，但正文抽取很粗。
+    Http,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Searcher {
+    /// 自建 SearXNG，不要密钥。
+    Searxng,
+    Firecrawl,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebCfg {
+    pub fetch: Fetcher,
+    /// crawl4ai 服务 / firecrawl 的地址。
+    pub fetch_base: String,
+    pub search: Searcher,
+    /// SearXNG 的地址。
+    pub search_base: String,
+}
+
+impl Default for WebCfg {
+    fn default() -> Self {
+        WebCfg {
+            // 默认走本地 crawl4ai：不用密钥，起一条 docker 就能用
+            fetch: Fetcher::Crawl4ai,
+            fetch_base: "http://localhost:11235".into(),
+            // 搜索没有免密钥的默认可用项，所以默认关掉而不是配一个起不来的
+            search: Searcher::None,
+            search_base: "http://localhost:8080".into(),
+        }
+    }
+}
+
+/// 按配置搭后端。`key` 只有 firecrawl 用得上。
 ///
-/// 选 HTTP API 而不是 firecrawl 的 CLI：CLI 的参数会随版本漂，而 v1 的
-/// `/search` 与 `/scrape` 是稳定契约。curl 到处都有，不用额外装东西。
-pub struct Firecrawl {
+/// 返回 `None` 表示这一轮不注册任何联网工具。
+pub fn build(cfg: &WebCfg, policy: &crate::policy::PolicyCfg, key: Option<String>) -> Option<Arc<dyn WebBackend>> {
+    if !policy.net {
+        return None;
+    }
+    let http = client();
+    let key = key.filter(|k| !k.trim().is_empty());
+
+    let fetcher: Option<Arc<dyn WebBackend>> = match cfg.fetch {
+        Fetcher::Crawl4ai => Some(Arc::new(Crawl4ai::new(http.clone(), &cfg.fetch_base))),
+        Fetcher::Crawl4aiCli => {
+            let sh = Shell::new(policy.exec_allow.clone()).timeout(Duration::from_secs(90));
+            sh.have("crwl").then(|| Arc::new(Crawl4aiCli::new(sh)) as Arc<dyn WebBackend>)
+        }
+        Fetcher::Firecrawl => key
+            .clone()
+            .map(|k| Arc::new(Firecrawl::new(http.clone(), k, &cfg.fetch_base)) as Arc<dyn WebBackend>),
+        Fetcher::Http => Some(Arc::new(PlainHttp::new(http.clone()))),
+        Fetcher::None => None,
+    };
+    let searcher: Option<Arc<dyn WebBackend>> = match cfg.search {
+        Searcher::Searxng => Some(Arc::new(Searxng::new(http.clone(), &cfg.search_base))),
+        Searcher::Firecrawl => key
+            .map(|k| Arc::new(Firecrawl::new(http, k, "https://api.firecrawl.dev")) as Arc<dyn WebBackend>),
+        Searcher::None => None,
+    };
+    match (fetcher, searcher) {
+        (None, None) => None,
+        (f, s) => Some(Arc::new(Combo { fetch: f, search: s })),
+    }
+}
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(90))
+        .user_agent("premortem/0.1 (research assistant)")
+        .build()
+        .unwrap_or_default()
+}
+
+/// 把「抓」和「搜」两个后端粘起来。
+pub struct Combo {
+    pub fetch: Option<Arc<dyn WebBackend>>,
+    pub search: Option<Arc<dyn WebBackend>>,
+}
+
+impl WebBackend for Combo {
+    fn name(&self) -> &str {
+        "combo"
+    }
+
+    fn can_search(&self) -> bool {
+        self.search.as_ref().is_some_and(|s| s.can_search())
+    }
+
+    fn search<'a>(
+        &'a self,
+        q: &'a str,
+        n: usize,
+        t: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            match &self.search {
+                Some(s) => s.search(q, n, t).await,
+                None => Err("没有配置搜索后端（config.json 的 web.search）".into()),
+            }
+        })
+    }
+
+    fn fetch<'a>(&'a self, url: &'a str, t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
+        Box::pin(async move {
+            match &self.fetch {
+                Some(f) => f.fetch(url, t).await,
+                None => Err("没有配置抓取后端（config.json 的 web.fetch）".into()),
+            }
+        })
+    }
+
+    fn probe<'a>(&'a self, t: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for (tag, b) in [("抓", &self.fetch), ("搜", &self.search)] {
+                match b {
+                    None => out.push(format!("{tag}：未配置")),
+                    Some(b) => match b.probe(t).await {
+                        Ok(m) => out.push(format!("{tag}：{} {m}", b.name())),
+                        Err(e) => out.push(format!("{tag}：{} 不可用 —— {e}", b.name())),
+                    },
+                }
+            }
+            Ok(out.join("\n"))
+        })
+    }
+}
+
+// ───────────────────────── crawl4ai（服务） ─────────────────────────
+
+/// 本地 crawl4ai 服务。**不需要密钥。**
+///
+/// `docker run -d -p 11235:8080 --shm-size=1g unclecode/crawl4ai:latest`
+///
+/// 先打 `/md`（0.6+ 有，最省事），404 就退回 `/crawl` —— 后者从第一版就有。
+/// 两条都试是因为版本差异在本地部署里太常见，而症状（404）看起来像地址写错了。
+pub struct Crawl4ai {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl Crawl4ai {
+    pub fn new(http: reqwest::Client, base: &str) -> Crawl4ai {
+        Crawl4ai { http, base: base.trim_end_matches('/').to_string() }
+    }
+}
+
+impl WebBackend for Crawl4ai {
+    fn name(&self) -> &str {
+        "crawl4ai"
+    }
+
+    fn can_search(&self) -> bool {
+        false
+    }
+
+    fn search<'a>(
+        &'a self,
+        _q: &'a str,
+        _n: usize,
+        _t: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async { Err("crawl4ai 只做抓取，搜索要另配（config.json 的 web.search）".into()) })
+    }
+
+    fn fetch<'a>(&'a self, url: &'a str, t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
+        Box::pin(async move {
+            let md = self.http.post(format!("{}/md", self.base)).json(&serde_json::json!({
+                "url": url, "f": "fit"
+            }));
+            let r = guard(t, md.send()).await?;
+            if r.status().is_success() {
+                let v: Value = r.json().await.map_err(|e| format!("/md 响应不是 JSON：{e}"))?;
+                let text = v["markdown"].as_str().unwrap_or("").to_string();
+                if !text.trim().is_empty() {
+                    return Ok(Page { url: url.into(), title: title_of(&text, url), text });
+                }
+            }
+            // 老版本没有 /md，退回 /crawl
+            let body = serde_json::json!({
+                "urls": [url],
+                "browser_config": { "type": "BrowserConfig", "params": { "headless": true } },
+                "crawler_config": { "type": "CrawlerRunConfig", "params": {} }
+            });
+            let r = guard(t, self.http.post(format!("{}/crawl", self.base)).json(&body).send()).await?;
+            let st = r.status();
+            let v: Value = r.json().await.map_err(|e| format!("/crawl 响应不是 JSON（{st}）：{e}"))?;
+            let first = v["results"].get(0).cloned().unwrap_or(Value::Null);
+            let text = first["markdown"]["fit_markdown"]
+                .as_str()
+                .or_else(|| first["markdown"]["raw_markdown"].as_str())
+                .or_else(|| first["markdown"].as_str())
+                .unwrap_or("")
+                .to_string();
+            if text.trim().is_empty() {
+                return Err(format!(
+                    "抓回来是空的（{st}）。页面可能需要登录，或 crawl4ai 没渲染出内容"
+                ));
+            }
+            let title = first["metadata"]["title"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| title_of(&text, url));
+            Ok(Page { url: url.into(), title, text })
+        })
+    }
+
+    fn probe<'a>(&'a self, t: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let r = guard(t, self.http.get(format!("{}/health", self.base)).send()).await?;
+            if r.status().is_success() {
+                let v: Value = r.json().await.unwrap_or(Value::Null);
+                let ver = v["version"].as_str().unwrap_or("?");
+                Ok(format!("服务在 {}（版本 {ver}）", self.base))
+            } else {
+                Err(format!("{} 返回 {}", self.base, r.status()))
+            }
+        })
+    }
+}
+
+// ───────────────────────── crawl4ai（CLI） ─────────────────────────
+
+/// crawl4ai 的命令行。`pip install crawl4ai && crawl4ai-setup`，同样不要密钥。
+///
+/// 给不想跑 Docker 的情况留的。走 [`Shell`] ⇒ argv 数组、有超时、会 kill。
+pub struct Crawl4aiCli {
     shell: Shell,
+}
+
+impl Crawl4aiCli {
+    pub fn new(shell: Shell) -> Crawl4aiCli {
+        Crawl4aiCli { shell }
+    }
+}
+
+impl WebBackend for Crawl4aiCli {
+    fn name(&self) -> &str {
+        "crawl4ai-cli"
+    }
+
+    fn can_search(&self) -> bool {
+        false
+    }
+
+    fn search<'a>(
+        &'a self,
+        _q: &'a str,
+        _n: usize,
+        _t: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async { Err("crawl4ai 只做抓取".into()) })
+    }
+
+    fn fetch<'a>(&'a self, url: &'a str, t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
+        Box::pin(async move {
+            let args: Vec<String> =
+                ["crwl-placeholder", url, "-o", "markdown"].iter().skip(1).map(|s| s.to_string()).collect();
+            let out = self.shell.run("crwl", &args, t).await.map_err(|e| e.to_string())?;
+            if !out.ok() {
+                return Err(format!("crwl {}", out.brief_error()));
+            }
+            let text = out.stdout;
+            if text.trim().is_empty() {
+                return Err("crwl 没有输出正文".into());
+            }
+            Ok(Page { url: url.into(), title: title_of(&text, url), text })
+        })
+    }
+
+    fn probe<'a>(&'a self, _t: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            if self.shell.have("crwl") {
+                Ok("crwl 在 PATH 上".into())
+            } else {
+                Err("PATH 上没有 crwl（pip install crawl4ai && crawl4ai-setup）".into())
+            }
+        })
+    }
+}
+
+// ───────────────────────── SearXNG ─────────────────────────
+
+/// 自建 SearXNG。不要密钥，JSON API 要在实例的 `settings.yml` 里打开
+/// （`search.formats` 加上 `json`）—— 探活会把这条报出来。
+pub struct Searxng {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl Searxng {
+    pub fn new(http: reqwest::Client, base: &str) -> Searxng {
+        Searxng { http, base: base.trim_end_matches('/').to_string() }
+    }
+}
+
+impl WebBackend for Searxng {
+    fn name(&self) -> &str {
+        "searxng"
+    }
+
+    fn can_search(&self) -> bool {
+        true
+    }
+
+    fn search<'a>(
+        &'a self,
+        q: &'a str,
+        limit: usize,
+        t: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
+        Box::pin(async move {
+            let r = guard(
+                t,
+                self.http
+                    .get(format!("{}/search", self.base))
+                    .query(&[("q", q), ("format", "json")])
+                    .send(),
+            )
+            .await?;
+            let st = r.status();
+            let v: Value = r.json().await.map_err(|e| {
+                format!("SearXNG 响应不是 JSON（{st}）：{e}。实例的 settings.yml 里要把 json 加进 search.formats")
+            })?;
+            Ok(v["results"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .take(limit)
+                .map(|d| Hit {
+                    title: d["title"].as_str().unwrap_or("").into(),
+                    url: d["url"].as_str().unwrap_or("").into(),
+                    snippet: d["content"].as_str().unwrap_or("").into(),
+                })
+                .filter(|h| !h.url.is_empty())
+                .collect())
+        })
+    }
+
+    fn fetch<'a>(&'a self, _u: &'a str, _t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
+        Box::pin(async { Err("SearXNG 只做搜索".into()) })
+    }
+
+    fn probe<'a>(&'a self, t: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            match self.search("premortem probe", 1, t).await {
+                Ok(h) => Ok(format!("{} 可用（{} 条结果）", self.base, h.len())),
+                Err(e) => Err(e),
+            }
+        })
+    }
+}
+
+// ───────────────────────── firecrawl（要密钥） ─────────────────────────
+
+/// firecrawl 云服务。**唯一要密钥的后端**，留着是因为它抓取质量最好。
+pub struct Firecrawl {
+    http: reqwest::Client,
     key: String,
     base: String,
 }
 
 impl Firecrawl {
-    pub fn new(shell: Shell, key: impl Into<String>) -> Firecrawl {
-        Firecrawl { shell, key: key.into(), base: "https://api.firecrawl.dev".into() }
+    pub fn new(http: reqwest::Client, key: impl Into<String>, base: &str) -> Firecrawl {
+        Firecrawl { http, key: key.into(), base: base.trim_end_matches('/').to_string() }
     }
 
-    pub fn base(mut self, b: impl Into<String>) -> Firecrawl {
-        self.base = b.into();
-        self
-    }
-
-    async fn post(&self, path: &str, body: Value, token: &CancellationToken) -> Result<Value, String> {
-        let cfg = CurlConfig::post(
-            &format!("{}{}", self.base, path),
-            &[
-                ("Authorization", &format!("Bearer {}", self.key)),
-                ("Content-Type", "application/json"),
-            ],
-            &body.to_string(),
-        )?;
-        let out = self
-            .shell
-            .run("curl", &["--config".into(), cfg.path_arg()], token)
-            .await
-            .map_err(|e| e.to_string())?;
-        if !out.ok() {
-            return Err(format!("curl {}", out.brief_error()));
-        }
-        let v: Value =
-            serde_json::from_str(&out.stdout).map_err(|e| format!("响应不是 JSON：{e}"))?;
-        if v.get("success").and_then(Value::as_bool) == Some(false) {
-            let msg = v.get("error").and_then(Value::as_str).unwrap_or("未知错误");
-            return Err(format!("firecrawl 拒绝了请求：{msg}"));
+    async fn post(&self, path: &str, body: Value, t: &CancellationToken) -> Result<Value, String> {
+        let r = guard(
+            t,
+            self.http
+                .post(format!("{}{}", self.base, path))
+                // 密钥走 header —— 不进 URL、不进命令行参数
+                .bearer_auth(&self.key)
+                .json(&body)
+                .send(),
+        )
+        .await?;
+        let st = r.status();
+        let v: Value = r.json().await.map_err(|e| format!("响应不是 JSON（{st}）：{e}"))?;
+        if v["success"].as_bool() == Some(false) {
+            return Err(format!("firecrawl 拒绝了请求：{}", v["error"].as_str().unwrap_or("未知")));
         }
         Ok(v)
     }
@@ -116,71 +493,62 @@ impl WebBackend for Firecrawl {
 
     fn search<'a>(
         &'a self,
-        query: &'a str,
+        q: &'a str,
         limit: usize,
-        token: &'a CancellationToken,
+        t: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
         Box::pin(async move {
-            let v = self
-                .post("/v1/search", serde_json::json!({"query": query, "limit": limit}), token)
-                .await?;
-            let arr = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
-            Ok(arr
+            let v = self.post("/v1/search", serde_json::json!({"query": q, "limit": limit}), t).await?;
+            Ok(v["data"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
                 .iter()
                 .map(|d| Hit {
-                    title: str_of(d, "title"),
-                    url: str_of(d, "url"),
-                    snippet: str_of(d, "description"),
+                    title: d["title"].as_str().unwrap_or("").into(),
+                    url: d["url"].as_str().unwrap_or("").into(),
+                    snippet: d["description"].as_str().unwrap_or("").into(),
                 })
                 .filter(|h| !h.url.is_empty())
                 .collect())
         })
     }
 
-    fn fetch<'a>(
-        &'a self,
-        url: &'a str,
-        token: &'a CancellationToken,
-    ) -> BoxFuture<'a, Result<Page, String>> {
+    fn fetch<'a>(&'a self, url: &'a str, t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
         Box::pin(async move {
             let v = self
-                .post(
-                    "/v1/scrape",
-                    serde_json::json!({"url": url, "formats": ["markdown"]}),
-                    token,
-                )
+                .post("/v1/scrape", serde_json::json!({"url": url, "formats": ["markdown"]}), t)
                 .await?;
-            let d = v.get("data").cloned().unwrap_or(Value::Null);
-            let text = str_of(&d, "markdown");
+            let text = v["data"]["markdown"].as_str().unwrap_or("").to_string();
             if text.trim().is_empty() {
                 return Err("抓回来是空的（页面可能需要登录或全是脚本渲染）".into());
             }
-            let title = d
-                .get("metadata")
-                .map(|m| str_of(m, "title"))
+            let title = v["data"]["metadata"]["title"]
+                .as_str()
                 .filter(|t| !t.is_empty())
+                .map(String::from)
                 .unwrap_or_else(|| url.to_string());
-            Ok(Page { url: url.to_string(), title, text })
+            Ok(Page { url: url.into(), title, text })
         })
     }
 }
 
-// ───────────────────────── 裸 curl ─────────────────────────
+// ───────────────────────── 裸 HTTP ─────────────────────────
 
-/// 没有 firecrawl 密钥时的降级：能抓、不能搜。HTML 用一个粗糙的剥标签器转成文本。
-pub struct Curl {
-    shell: Shell,
+/// 兜底：GET 一下，剥掉标签。**正文抽取很粗**，能用但别指望质量。
+pub struct PlainHttp {
+    http: reqwest::Client,
 }
 
-impl Curl {
-    pub fn new(shell: Shell) -> Curl {
-        Curl { shell }
+impl PlainHttp {
+    pub fn new(http: reqwest::Client) -> PlainHttp {
+        PlainHttp { http }
     }
 }
 
-impl WebBackend for Curl {
+impl WebBackend for PlainHttp {
     fn name(&self) -> &str {
-        "curl"
+        "http"
     }
 
     fn can_search(&self) -> bool {
@@ -193,38 +561,27 @@ impl WebBackend for Curl {
         _n: usize,
         _t: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Vec<Hit>, String>> {
-        Box::pin(async { Err("当前后端不支持搜索（没配 firecrawl 密钥）".to_string()) })
+        Box::pin(async { Err("裸 HTTP 不支持搜索".into()) })
     }
 
-    fn fetch<'a>(
-        &'a self,
-        url: &'a str,
-        token: &'a CancellationToken,
-    ) -> BoxFuture<'a, Result<Page, String>> {
+    fn fetch<'a>(&'a self, url: &'a str, t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
         Box::pin(async move {
-            let args: Vec<String> = [
-                "-sS", "-L", "--max-time", "30",
-                // 有些站对空 UA 直接 403
-                "-H", "User-Agent: premortem/0.1 (research assistant)",
-                url,
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-            let out = self.shell.run("curl", &args, token).await.map_err(|e| e.to_string())?;
-            if !out.ok() {
-                return Err(format!("curl {}", out.brief_error()));
+            let r = guard(t, self.http.get(url).send()).await?;
+            let st = r.status();
+            let html = r.text().await.map_err(|e| format!("读响应失败（{st}）：{e}"))?;
+            if !st.is_success() {
+                return Err(format!("{st}：{}", clip(&html, 200)));
             }
-            let title = between(&out.stdout, "<title", "</title>")
+            let title = between(&html, "<title", "</title>")
                 .and_then(|t| t.split_once('>').map(|(_, v)| v.trim().to_string()))
                 .unwrap_or_else(|| url.to_string());
-            Ok(Page { url: url.to_string(), title, text: html_to_text(&out.stdout) })
+            Ok(Page { url: url.into(), title, text: html_to_text(&html) })
         })
     }
 }
 
 /// 剥标签。**明确是个近似**：`script` / `style` 整块丢掉，其余标签去掉，
-/// 常见实体还原。要真正的正文抽取就该走 firecrawl，这里只是让降级路径有东西可看。
+/// 常见实体还原。要真正的正文抽取就该用 crawl4ai。
 pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let b = html.as_bytes();
@@ -244,15 +601,10 @@ pub fn html_to_text(html: &str) -> String {
             }
             match lower[i..].find('>') {
                 Some(off) => {
-                    // 块级标签换行，行内标签不换，免得每个 <b> 都断行
                     let tag = &lower[i..i + off];
-                    if tag.starts_with("<p")
-                        || tag.starts_with("<div")
-                        || tag.starts_with("<br")
-                        || tag.starts_with("<li")
-                        || tag.starts_with("<h")
-                        || tag.starts_with("</p")
-                        || tag.starts_with("</div")
+                    if ["<p", "<div", "<br", "<li", "<h", "</p", "</div"]
+                        .iter()
+                        .any(|t| tag.starts_with(t))
                     {
                         out.push('\n');
                     }
@@ -272,7 +624,6 @@ pub fn html_to_text(html: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'");
-    // 压掉剥标签留下的成片空行
     let mut lines: Vec<&str> = Vec::new();
     for l in out.lines() {
         let t = l.trim();
@@ -284,6 +635,37 @@ pub fn html_to_text(html: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
+// ───────────────────────── 小工具 ─────────────────────────
+
+/// 把一次请求套上取消。用户打断时立刻放弃，不等它跑完。
+async fn guard<F>(t: &CancellationToken, fut: F) -> Result<reqwest::Response, String>
+where
+    F: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+{
+    tokio::select! {
+        biased;
+        _ = t.cancelled() => Err("已取消".into()),
+        r = fut => r.map_err(|e| {
+            if e.is_connect() {
+                format!("连不上（服务没起来？）：{e}")
+            } else if e.is_timeout() {
+                format!("超时：{e}")
+            } else {
+                e.to_string()
+            }
+        }),
+    }
+}
+
+/// markdown 的第一个标题当页面标题；没有就用网址。
+fn title_of(text: &str, url: &str) -> String {
+    text.lines()
+        .find(|l| l.trim_start().starts_with('#'))
+        .map(|l| l.trim_start_matches('#').trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| url.to_string())
+}
+
 fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
     let lower = s.to_ascii_lowercase();
     let a = lower.find(open)?;
@@ -291,87 +673,8 @@ fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
     Some(&s[a..b])
 }
 
-fn str_of(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-// ───────────────────────── curl 的配置文件 ─────────────────────────
-
-/// 一次性的 curl `--config` 文件。**密钥只写在这里，不进命令行参数。**
-///
-/// Drop 时删除。删失败也不重试 —— 那只是临时目录里一个 0600 的小文件，
-/// 为它引一层重试逻辑不值得，但**必须**是 0600，因为它含密钥。
-struct CurlConfig {
-    path: std::path::PathBuf,
-}
-
-impl CurlConfig {
-    fn post(url: &str, headers: &[(&str, &str)], body: &str) -> Result<CurlConfig, String> {
-        let mut s = String::new();
-        s.push_str(&format!("url = {}\n", quote(url)));
-        s.push_str("request = POST\n");
-        for (k, v) in headers {
-            s.push_str(&format!("header = {}\n", quote(&format!("{k}: {v}"))));
-        }
-        s.push_str(&format!("data = {}\n", quote(body)));
-        s.push_str("silent\nshow-error\nlocation\nmax-time = 60\n");
-
-        let name = format!("premortem-curl-{}.cfg", uuid::Uuid::new_v4().simple());
-        // 刻意放系统临时目录，**不**放 workspace/：workspace 在工具的可读白名单里，
-        // 放那儿等于让模型能用 fs_read 把密钥读出来。
-        let path = std::env::temp_dir().join(name);
-        std::fs::write(&path, s).map_err(|e| format!("写 curl 配置失败：{e}"))?;
-        set_private(&path);
-        Ok(CurlConfig { path })
-    }
-
-    fn path_arg(&self) -> String {
-        self.path.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for CurlConfig {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// curl 配置文件的引号规则：双引号包起来，反斜杠与双引号转义。
-fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-#[cfg(unix)]
-fn set_private(p: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-}
-
-#[cfg(not(unix))]
-fn set_private(_p: &std::path::Path) {}
-
-/// 按配置挑一个后端。**这是「填了密钥就生效」那条链的落点。**
-///
-/// 有密钥 ⇒ firecrawl（能搜能抓）；没密钥但有 curl ⇒ 裸 curl（只能抓）；
-/// 都没有 ⇒ `None`，联网工具干脆不注册。
-///
-/// 降级而不是报错：**有一半能力比整块功能消失好**，而且模型看得见
-/// `web_search` 在不在工具清单里，比调用之后收到一句「未配置」有用。
-pub fn pick(
-    cfg: &crate::policy::PolicyCfg,
-    key: Option<String>,
-) -> Option<std::sync::Arc<dyn WebBackend>> {
-    if !cfg.net {
-        return None;
-    }
-    let shell = Shell::new(cfg.exec_allow.clone());
-    if !shell.have("curl") {
-        return None;
-    }
-    match key.filter(|k| !k.trim().is_empty()) {
-        Some(k) => Some(std::sync::Arc::new(Firecrawl::new(shell, k))),
-        None => Some(std::sync::Arc::new(Curl::new(shell))),
-    }
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n).collect() }
 }
 
 // ───────────────────────── 测试用 ─────────────────────────
@@ -389,19 +692,13 @@ impl MockWeb {
     }
 
     pub fn hit(mut self, title: &str, url: &str, snippet: &str) -> MockWeb {
-        self.hits.push(Hit {
-            title: title.into(),
-            url: url.into(),
-            snippet: snippet.into(),
-        });
+        self.hits.push(Hit { title: title.into(), url: url.into(), snippet: snippet.into() });
         self
     }
 
     pub fn page(mut self, url: &str, title: &str, text: &str) -> MockWeb {
-        self.pages.insert(
-            url.to_string(),
-            Page { url: url.into(), title: title.into(), text: text.into() },
-        );
+        self.pages
+            .insert(url.to_string(), Page { url: url.into(), title: title.into(), text: text.into() });
         self
     }
 
@@ -440,11 +737,7 @@ impl WebBackend for MockWeb {
         })
     }
 
-    fn fetch<'a>(
-        &'a self,
-        url: &'a str,
-        _t: &'a CancellationToken,
-    ) -> BoxFuture<'a, Result<Page, String>> {
+    fn fetch<'a>(&'a self, url: &'a str, _t: &'a CancellationToken) -> BoxFuture<'a, Result<Page, String>> {
         Box::pin(async move {
             if let Some(e) = &self.fail {
                 return Err(e.clone());

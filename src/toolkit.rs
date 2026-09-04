@@ -147,6 +147,17 @@ impl Tool for FsRead {
          工具抓回来的网页也在这里读，路径形如 workspace/xxx.md。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "相对或绝对路径，如 src/core.rs 或 workspace/xxx.md" },
+                "offset": { "type": "integer", "description": "从第几行开始读，1 起，默认 1" },
+                "limit": { "type": "integer", "description": "读多少行" }
+            },
+            "required": ["path"]
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }
@@ -241,6 +252,18 @@ impl Tool for FsGrep {
          先用它定位，再用 fs_read 读那一段 —— 不要为了找一行内容去通读整个文件。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "正则表达式" },
+                "path": { "type": "string", "description": "从哪个目录开始，默认当前目录" },
+                "glob": { "type": "string", "description": "只搜匹配的文件，如 *.py 或 src/**/*.rs" },
+                "max": { "type": "integer", "description": "最多返回几条" }
+            },
+            "required": ["pattern"]
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }
@@ -374,6 +397,16 @@ impl Tool for FsFind {
          想知道某个东西在哪个文件里用 fs_grep；只想按名字找用这个。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "glob": { "type": "string", "description": "文件名模式，如 **/*.py 或 train*.py" },
+                "path": { "type": "string", "description": "从哪个目录开始" }
+            },
+            "required": ["glob"]
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }
@@ -444,6 +477,16 @@ impl Tool for RepoTree {
          刚接触一个仓库时先用它，比一个个 fs_find 快得多。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "目录，默认当前目录" },
+                "depth": { "type": "integer", "description": "展开几层，默认 3" }
+            },
+            "required": []
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }
@@ -541,6 +584,16 @@ impl Tool for WebSearch {
          结果只是线索：要看正文得再用 web_fetch 抓具体网址。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "查询词" },
+                "limit": { "type": "integer", "description": "返回几条，默认 5" }
+            },
+            "required": ["query"]
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }
@@ -610,6 +663,16 @@ impl Tool for WebFetch {
          不要指望这个工具把整页内容都吐给你。"
     }
 
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "完整网址，必须带 http:// 或 https://" },
+                "lines": { "type": "integer", "description": "先看开头多少行，默认 80" }
+            },
+            "required": ["url"]
+        })
+    }
     fn concurrency(&self) -> Concurrency {
         Concurrency::Parallel
     }

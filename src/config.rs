@@ -129,6 +129,9 @@ pub struct Settings {
     /// 工具的权限与体量上限。和模型配置放同一个文件，因为用户改它们的时机是一样的。
     #[serde(default)]
     pub tools: crate::policy::PolicyCfg,
+    /// 抓 / 搜各用什么后端。默认是本地 crawl4ai，**不要密钥**。
+    #[serde(default)]
+    pub web: crate::web::WebCfg,
     /// 每个字段的来源。**不落盘** —— 它描述的是「这一次是怎么加载的」。
     #[serde(skip)]
     pub origins: Vec<(String, Src)>,
@@ -181,6 +184,7 @@ impl Default for Settings {
                 },
             },
             tools: crate::policy::PolicyCfg::default(),
+            web: crate::web::WebCfg::default(),
             origins: Vec::new(),
             warnings: Vec::new(),
         }
@@ -212,6 +216,7 @@ impl Settings {
                     s.providers = parsed.providers;
                     s.roles = parsed.roles;
                     s.tools = parsed.tools;
+                    s.web = parsed.web;
                     from_file = true;
                 }
                 Err(e) => s.warnings.push(format!("{CONFIG_FILE} 解析失败，已回退到默认：{e}")),
@@ -347,6 +352,43 @@ impl Settings {
             }
         }
         out
+    }
+
+    /// 按配置搭出三个角色的真实客户端。**这是「填了 key 就能跑」的落点。**
+    ///
+    /// 任一角色缺密钥就整体失败并说清缺哪个、该设哪个变量 —— 不做部分降级：
+    /// 三个角色里少一个，跑起来的症状是某一段莫名其妙不工作，比启动时报错难查得多。
+    pub fn build_models(
+        &self,
+        secrets: &Secrets,
+        env: Env<'_>,
+    ) -> Result<crate::model::Models, String> {
+        let mk = |r: Role| -> Result<std::sync::Arc<dyn crate::model::ModelClient>, String> {
+            let m = self.roles.of(r);
+            let p = self.providers.get(&m.provider).ok_or_else(|| {
+                format!("角色 {} 指定的 provider「{}」没有定义", role_key(r).to_lowercase(), m.provider)
+            })?;
+            let (key, _) = secrets.resolve(&m.provider, p, env).ok_or_else(|| {
+                format!(
+                    "provider「{}」缺密钥：设环境变量 {} 或写进 {}",
+                    m.provider, p.key_env, SECRETS_FILE
+                )
+            })?;
+            Ok(std::sync::Arc::new(crate::client::HttpClient::new(p, m, key)?))
+        };
+        Ok(crate::model::Models {
+            judge: mk(Role::Judge)?,
+            answer: mk(Role::Answer)?,
+            subagent: mk(Role::Subagent)?,
+        })
+    }
+
+    /// firecrawl 的密钥。它不是模型 provider，所以单独走一条。
+    /// 本地 crawl4ai 用不到它 —— 缺了就是 `None`，不是错误。
+    pub fn web_key(&self, secrets: &Secrets, env: Env<'_>) -> Option<String> {
+        env("FIRECRAWL_API_KEY")
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| secrets.get("firecrawl"))
     }
 
     /// 密钥齐不齐。缺的 provider 名单，供 UI 提示「去填一下」。

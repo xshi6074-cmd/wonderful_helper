@@ -28,6 +28,11 @@ globset       = "0.4"   # --glob 过滤
 grep-searcher = "0.1"   # 行搜索 + 上下文行 + 二进制检测
 grep-regex    = "0.1"   # 搜索用的正则匹配器
 grep-matcher  = "0.1"   # Matcher trait
+# 真实模型调用：HTTPS + 流式。rustls 而不是 openssl，省掉在 Windows/WSL 两边
+# 各装一套系统库的麻烦。SSE 自己解（十几行），不再引一个 eventsource crate。
+# SSE 那段流式转换写成 stream! 宏，比手搓 unfold 状态机可读得多
+async-stream  = "0.3"
+reqwest       = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "test-util"] }

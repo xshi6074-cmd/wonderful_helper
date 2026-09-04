@@ -91,7 +91,8 @@ impl Default for PolicyCfg {
             max_entries: 300,
             max_depth: 8,
             max_file_bytes: 8 * 1024 * 1024,
-            exec_allow: vec!["rg".into(), "curl".into(), "firecrawl".into()],
+            // crwl 是 crawl4ai 的命令行（本地、免密钥的抓取路径之一）
+            exec_allow: vec!["rg".into(), "curl".into(), "crwl".into()],
         }
     }
 }
