@@ -34,7 +34,7 @@ export ANTHROPIC_API_KEY="sk-..."
 cargo run --bin serve -- . 7878
 ```
 
-服务只监听本机 `127.0.0.1`。HTML、CSS 和 JavaScript 已编进 Rust 二进制，不需要 Node 构建步骤。网页抓取也内置在 Rust 进程中：它会识别正文、保留 Markdown 结构并把相对链接补成绝对 URL，不需要 Docker、Python 或独立后端。抓取开关、域名白名单和体量限制可在“配置 → 工具权限与上限”中调整。
+服务只监听本机 `127.0.0.1`。HTML、CSS 和 JavaScript 已编进 Rust 二进制，不需要 Node 构建步骤。网页抓取也内置在 Rust 进程中：抓取开关、域名白名单和体量限制可在“配置 → 工具权限与上限”中调整。
 
 ## 主要应用场景与功能
 
