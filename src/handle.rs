@@ -20,7 +20,7 @@ use crate::model::{Role, Usage};
 use crate::ids::SessionId;
 use crate::msg::{Ack, Applied, CoreMsg, Emit, Injected, SendMode, Snap, TurnOutcome, TurnView};
 use crate::scene::SceneId;
-use crate::state::{Op, Phase};
+use crate::state::Op;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -176,15 +176,10 @@ impl CoreHandle {
         self.tx.send(CoreMsg::Interrupt { turn }).await.ok()
     }
 
-    /// 阶段闸门在用户手里。turn 侧没有对应的方法。
-    pub async fn session_advance_phase(&self, to: Phase) -> Option<()> {
-        self.tx.send(CoreMsg::AdvancePhase { to }).await.ok()
-    }
-
     /// 一键更换场景。**下一轮生效** —— 新场景的 guidance 与案例会真的注入进去，
     /// 不只是换个标签。想立刻生效就先打断。
-    pub async fn session_override_scene(&self, to: impl Into<SceneId>) -> Option<()> {
-        self.tx.send(CoreMsg::OverrideScene { to: to.into() }).await.ok()
+    pub async fn session_override_scene(&self, to: Vec<SceneId>) -> Option<()> {
+        self.tx.send(CoreMsg::OverrideScene { to }).await.ok()
     }
 
     /// 一键蒸馏：把这段会话沉淀成持久层的更新草稿。**用户操作，不是自动行为。**

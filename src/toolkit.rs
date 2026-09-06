@@ -115,11 +115,8 @@ pub fn register(mut reg: Registry, d: &Deps) -> Registry {
         .with(Arc::new(FsGrep(d.clone())))
         .with(Arc::new(FsFind(d.clone())))
         .with(Arc::new(RepoTree(d.clone())));
-    if let Some(w) = &d.web {
+    if d.web.is_some() {
         reg = reg.with(Arc::new(WebFetch(d.clone())));
-        if w.can_search() {
-            reg = reg.with(Arc::new(WebSearch(d.clone())));
-        }
     }
     reg
 }
@@ -578,84 +575,6 @@ impl Tool for RepoTree {
     }
 }
 
-// ───────────────────────── web_search ─────────────────────────
-
-struct WebSearch(Deps);
-
-impl Tool for WebSearch {
-    fn name(&self) -> &str {
-        "web_search"
-    }
-
-    fn description(&self) -> &str {
-        "网页搜索，返回标题 / 网址 / 摘要。\
-         args: {query: 查询词, limit?: 几条（默认 5）}。\
-         结果只是线索：要看正文得再用 web_fetch 抓具体网址。"
-    }
-
-    fn schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "查询词" },
-                "limit": { "type": "integer", "description": "返回几条，默认 5" }
-            },
-            "required": ["query"]
-        })
-    }
-    fn concurrency(&self) -> Concurrency {
-        Concurrency::Parallel
-    }
-
-    fn run<'a>(&'a self, call: Call, token: CancellationToken) -> BoxFuture<'a, ToolResult> {
-        Box::pin(async move {
-            let d = &self.0;
-            d.metrics.call();
-            let Some(web) = &d.web else {
-                return ToolResult::failed(&call, "没有可用的联网后端");
-            };
-            let Some(q) = s_arg(&call.args, "query") else {
-                return need(&call, "query", "{query: \"contrastive learning tau\", limit: 5}");
-            };
-            let limit = u_arg(&call.args, "limit").unwrap_or(5).clamp(1, 20);
-            let hits = match web.search(&q, limit, &token).await {
-                Ok(h) => h,
-                Err(e) => {
-                    d.metrics.web_errors.fetch_add(1, Ordering::Relaxed);
-                    return ToolResult::failed(&call, format!("搜索失败：{e}"));
-                }
-            };
-            if hits.is_empty() {
-                return ToolResult::ok(&call, format!("「{q}」没有结果"));
-            }
-            // 全量结果落盘，返回值只给精简版 —— 摘要有时一条就好几百字
-            let full = hits
-                .iter()
-                .map(|h| format!("## {}\n{}\n\n{}\n", h.title, h.url, h.snippet))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let saved = d.scratch.put(&q, &q, "md", &full).ok();
-            if saved.is_some() {
-                d.metrics.files_written.fetch_add(1, Ordering::Relaxed);
-            }
-            let brief = hits
-                .iter()
-                .enumerate()
-                .map(|(i, h)| {
-                    format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, short(&h.snippet, 160))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let mut out = format!("「{q}」{} 条结果：\n{brief}", hits.len());
-            if let Some(s) = saved {
-                out.push_str(&format!("\n\n[完整摘要已存到 {}，需要时 fs_read]", s.rel));
-            }
-            d.metrics.out(out.len(), false);
-            ToolResult::ok(&call, out)
-        })
-    }
-}
-
 // ───────────────────────── web_fetch ─────────────────────────
 
 struct WebFetch(Deps);
@@ -786,15 +705,6 @@ fn build_globset(pat: Option<&str>) -> Result<Option<globset::GlobSet>, String> 
 
 fn rel_of(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
-}
-
-fn short(s: &str, n: usize) -> String {
-    let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.chars().count() <= n {
-        t
-    } else {
-        format!("{}…", t.chars().take(n).collect::<String>())
-    }
 }
 
 /// 从 `config.json` 直接搭出依赖。**这一条把配置文件和闸门接起来** ——

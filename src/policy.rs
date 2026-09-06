@@ -91,10 +91,8 @@ impl Default for PolicyCfg {
             max_entries: 300,
             max_depth: 8,
             max_file_bytes: 8 * 1024 * 1024,
-            // 只有 crwl（crawl4ai 的命令行）会用到。
-            // 这里一度还列着 "rg"，但本地检索最后走的是 ripgrep 的 crate 不是它的
-            // 二进制，那条是个没人用的白名单条目 —— 留着只会让人以为有个 shell 路径。
-            exec_allow: vec!["crwl".into()],
+            // 当前工具链不启动任何外部程序；字段保留给未来明确受控的 sidecar。
+            exec_allow: vec![],
         }
     }
 }
@@ -205,40 +203,7 @@ impl Policy {
 
     /// 网址闸门。返回规范化后的 URL。
     pub fn check_url(&self, raw: &str) -> Result<String, Denied> {
-        if !self.cfg.net {
-            return Err(self.deny("联网已关闭（config.json 的 tools.net）"));
-        }
-        let raw = raw.trim();
-        let rest = match raw.split_once("://") {
-            Some(("http", r)) | Some(("https", r)) => r,
-            Some((scheme, _)) => {
-                return Err(self.deny(format!("只支持 http/https，收到 {scheme}")));
-            }
-            None => return Err(self.deny("网址要带 http:// 或 https://")),
-        };
-        let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
-        // 用户名密码形式的 authority（user@host）是经典的绕过写法，直接不收
-        if hostport.contains('@') {
-            return Err(self.deny("网址里不接受 user@host 形式"));
-        }
-        let host = hostport.split(':').next().unwrap_or("").to_ascii_lowercase();
-        if host.is_empty() {
-            return Err(self.deny("网址里没有主机名"));
-        }
-        if is_internal(&host) {
-            return Err(self.deny(format!("{host} 指向本机或内网，拒绝访问")));
-        }
-        if self.cfg.deny_hosts.iter().any(|d| host_matches(&host, d)) {
-            return Err(self.deny(format!("{host} 在黑名单里")));
-        }
-        let allowed = self.cfg.allow_hosts.iter().any(|a| a == "*" || host_matches(&host, a));
-        if !allowed {
-            return Err(self.deny(format!(
-                "{host} 不在允许抓取的域名里。当前允许：{}（在 config.json 的 tools.allow_hosts 里加）",
-                self.cfg.allow_hosts.join(" / ")
-            )));
-        }
-        Ok(raw.to_string())
+        validate_web_url(&self.cfg, raw).map_err(|e| self.deny(e))
     }
 
     pub fn clip(&self) -> Clip {
@@ -253,6 +218,42 @@ impl Policy {
     pub fn note_clipped(&self) {
         self.clipped.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// 不带计数副作用的网址校验。HTTP 客户端用它逐跳检查重定向；入口处仍通过
+/// [`Policy::check_url`] 记录拒绝指标。
+pub(crate) fn validate_web_url(cfg: &PolicyCfg, raw: &str) -> Result<String, String> {
+    if !cfg.net {
+        return Err("联网已关闭（config.json 的 tools.net）".into());
+    }
+    let raw = raw.trim();
+    let rest = match raw.split_once("://") {
+        Some(("http", r)) | Some(("https", r)) => r,
+        Some((scheme, _)) => return Err(format!("只支持 http/https，收到 {scheme}")),
+        None => return Err("网址要带 http:// 或 https://".into()),
+    };
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if hostport.contains('@') {
+        return Err("网址里不接受 user@host 形式".into());
+    }
+    let host = hostport.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("网址里没有主机名".into());
+    }
+    if is_internal(&host) {
+        return Err(format!("{host} 指向本机或内网，拒绝访问"));
+    }
+    if cfg.deny_hosts.iter().any(|d| host_matches(&host, d)) {
+        return Err(format!("{host} 在黑名单里"));
+    }
+    let allowed = cfg.allow_hosts.iter().any(|a| a == "*" || host_matches(&host, a));
+    if !allowed {
+        return Err(format!(
+            "{host} 不在允许抓取的域名里。当前允许：{}（在 config.json 的 tools.allow_hosts 里加）",
+            cfg.allow_hosts.join(" / ")
+        ));
+    }
+    Ok(raw.to_string())
 }
 
 /// 后缀匹配：`arxiv.org` 命中 `arxiv.org` 与 `www.arxiv.org`，

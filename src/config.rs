@@ -208,7 +208,7 @@ pub struct Settings {
     /// 工具的权限与体量上限。和模型配置放同一个文件，因为用户改它们的时机是一样的。
     #[serde(default)]
     pub tools: crate::policy::PolicyCfg,
-    /// 抓 / 搜各用什么后端。默认是本地 crawl4ai，**不要密钥**。
+    /// 旧版联网后端配置。当前运行统一使用内置 fetch，字段只为兼容已有配置。
     #[serde(default)]
     pub web: crate::web::WebCfg,
     /// 每个字段的来源。**不落盘** —— 它描述的是「这一次是怎么加载的」。

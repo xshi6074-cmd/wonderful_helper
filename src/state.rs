@@ -365,25 +365,15 @@ impl Graph {
 /// 嵌套上限。超过就是模型在造迷宫，不是在画图。
 pub const MAX_DEPTH: usize = 8;
 
-/// 阶段闸门。
-///
-/// **推进只能由用户确认**（[`crate::event::Body::PhaseSet`] 只从 UI 来）。
-/// 模型可以在正文里建议收尾，但没有推进权 —— 也没有阻断权。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Phase {
-    #[default]
-    Designing,
-    Handoff,
-}
-
-impl Phase {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Phase::Designing => "设计讨论",
-            Phase::Handoff => "交接",
-        }
-    }
-}
+// 这里原来有个 `Phase`（设计讨论 / 交接）。删了。
+//
+// 它是个只有两档、只能单向推、推了之后除了在 prompt 里多一句「当前阶段：X」
+// 什么都不影响的开关 —— 用户要做的判断（现在该收尾了吗）本来就在他脑子里，
+// 让他再去点一个下拉框只是多一道手续。真正管收尾的是
+// `stop_and_implement` 场景的 guidance，那个有内容。
+//
+// `Body::PhaseSet` 作为**已废弃但仍可反序列化**的事件保留着，
+// 老时间线才重放得回来，见 `crate::event::Body`。
 
 /// 推断层：**从线性对话里抽出来的「我们现在定下了什么」。**
 ///
@@ -407,7 +397,6 @@ impl Phase {
 /// 都是时间线上的事件，塞在这里会让重启后 UI 显示上次会话最后一轮的场景。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workspace {
-    pub phase: Phase,
     /// **图内**：实验流程 / 模型架构。有拓扑的东西。
     #[serde(default)]
     pub flow: Graph,
@@ -432,7 +421,6 @@ impl Workspace {
         match &e.body {
             Body::Edited { ops } => self.write_all(ops, Origin::User, e.seq),
             Body::Inferred { ops, .. } => self.write_all(ops, Origin::Model, e.seq),
-            Body::PhaseSet { to } => self.phase = *to,
             _ => {}
         }
     }

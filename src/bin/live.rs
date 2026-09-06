@@ -183,8 +183,8 @@ async fn main() {
                 let _ = std::io::stdout().flush();
             }
             UiEvent::Appended { body, .. } => match *body {
-                Body::Judged { scene, rationale } => {
-                    println!("\n  [判断段] 场景 {scene} —— {rationale}");
+                Body::Judged { scenes, rationale } => {
+                    println!("\n  [判断段] 场景 {} —— {rationale}", scenes.join(" + "));
                 }
                 Body::Called { calls, .. } => {
                     for c in calls {

@@ -433,10 +433,10 @@
       <tr><td>取消传播</td><td class="k">tokio-util · CancellationToken</td><td>父子 token 表达任务层级，一次 cancel 收敛整棵</td></tr>
       <tr><td>模型调用</td><td class="k">reqwest + serde_json</td><td>自封 <code>ModelClient</code> trait，多 provider 可换，记账点统一在这一层</td></tr>
       <tr><td>流式解析</td><td class="k">reqwest bytes_stream + async-stream</td><td>按行解析 SSE，增量正文、工具调用与 usage 统一映射为 <code>StreamEvent</code></td></tr>
-      <tr><td>配置与项目记忆</td><td class="k">serde_json + toml + Markdown</td><td><code>config.json</code> 配 provider、三个模型角色、工具策略与联网后端；场景 / prompt 用 TOML，项目记忆与案例用 Markdown</td></tr>
+      <tr><td>配置与项目记忆</td><td class="k">serde_json + toml + Markdown</td><td><code>config.json</code> 配 provider、三个模型角色与工具策略；场景 / prompt 用 TOML，项目记忆与案例用 Markdown</td></tr>
       <tr><td>会话持久化</td><td class="k">rusqlite（bundled SQLite）</td><td>WAL 模式下追加会话事件，以 checkpoint 加后续事件恢复物化状态；分支会话共享分叉点之前的历史</td></tr>
       <tr><td>仓库检索</td><td class="k">ignore + grep-searcher</td><td>尊重 .gitignore 的遍历与搜索</td></tr>
-      <tr><td>联网获取</td><td class="k">可组合 fetch / search 后端</td><td>抓取支持 crawl4ai 服务或 CLI、Firecrawl、普通 HTTP；搜索支持 SearXNG 或 Firecrawl，均受域名与体量策略约束</td></tr>
+      <tr><td>联网获取</td><td class="k">内置 Smart Fetch</td><td>HTTP 获取后以 Readability 风格的 DOM 评分抽取正文，再转为保留标题、列表、引用、代码、表格和完整链接的 Markdown；不注册网页搜索，不依赖外部服务，受域名、重定向与体量策略约束</td></tr>
       <tr><td>Token 账本</td><td class="k">API usage 优先，估算兜底</td><td>按 judge / answer / subagent 角色记 token；流式被打断时估算并单独标记。当前不换算货币费用</td></tr>
       <tr><td>服务与界面</td><td class="k">axum + WebSocket + 原生单页前端</td><td>面向 Windows、WSL 与 macOS；HTML / CSS / JavaScript 通过 <code>include_str!</code> 编进二进制，无 Node 构建步骤；服务仅监听 <code>127.0.0.1</code></td></tr>
       <tr><td>图渲染</td><td class="k">确定性 Mermaid 源码 + 前端自绘 SVG</td><td>Rust 生成给模型与审计使用的 Mermaid；浏览器为结构化图做分层布局和可点选编辑</td></tr>

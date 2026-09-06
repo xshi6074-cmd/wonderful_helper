@@ -32,7 +32,7 @@ use crate::memory::Memory;
 use crate::model::Mode;
 use crate::msg::{SendMode, UiEvent};
 use crate::persist::{restore, spawn_writer};
-use crate::state::{Op, Phase};
+use crate::state::Op;
 use crate::store::{SqliteStore, Store};
 use crate::tools::Registry;
 use crate::{render, toolkit, web};
@@ -270,7 +270,6 @@ fn fanout(e: UiEvent) -> Option<Value> {
         UiEvent::ContextFootprint { total, cacheable, events } => json!({
             "t": "footprint", "total": total, "cacheable": cacheable, "events": events
         }),
-        UiEvent::PhaseChanged { to } => json!({ "t": "phase", "to": phase_str(to) }),
         UiEvent::CostTick { role, usage, session_total } => json!({
             "t": "cost", "role": format!("{role:?}"),
             "prompt": usage.prompt, "completion": usage.completion,
@@ -302,13 +301,6 @@ fn markdown_of(b: &Body) -> Option<String> {
         Body::Called { text, .. } if !text.trim().is_empty() => Some(text.clone()),
         Body::Asked { question, .. } => Some(question.clone()),
         _ => None,
-    }
-}
-
-fn phase_str(p: Phase) -> &'static str {
-    match p {
-        Phase::Designing => "designing",
-        Phase::Handoff => "handoff",
     }
 }
 
@@ -387,7 +379,10 @@ async fn boot(app: &Arc<App>) -> Option<Value> {
         })).collect::<Vec<_>>(),
         "snap": snap.map(|s| snap_json(&s, &memory.prompts.graph)),
         "presets": crate::config::presets_json(),
-        "scenes": memory.playbook.scenes.values().map(|s| json!({"id":s.id,"label":s.label})).collect::<Vec<_>>(),
+        // 场景带全字段：左栏要把每个场景做成一个可点开就改的块，
+        // 只给 id + label 的话点开是空的。
+        "scenes": scenes_json(&memory.playbook)["scenes"],
+        "default_tools": memory.playbook.default_tools,
         "memory": memory_files(app),
     }))
 }
@@ -398,9 +393,8 @@ fn snap_json(s: &crate::msg::Snap, style: &crate::memory::GraphStyle) -> Value {
         "seq": s.seq.0,
         "turn": s.turn.map(|t| t.0),
         "queued": s.queued,
-        "scene": s.scene,
+        "scenes": s.scenes,
         "mode": match s.mode { Mode::Explore => "explore", Mode::Go => "go" },
-        "phase": phase_str(s.ws.phase),
         "open_questions": s.open_questions.iter().map(|q| json!({
             "seq": q.id.0, "question": q.question, "options": q.options
         })).collect::<Vec<_>>(),
@@ -536,21 +530,54 @@ async fn handle(app: &Arc<App>, v: Value) {
                 app.push(json!({ "t": "mode", "to": v["to"] }));
             }
         }
-        "phase" => {
-            if let Some(h) = h {
-                let p = if v["to"].as_str() == Some("handoff") {
-                    Phase::Handoff
-                } else {
-                    Phase::Designing
-                };
-                h.session_advance_phase(p).await;
-            }
-        }
+        // 场景是多选：用户能同时选「目标没说清」和「预算对不上」，
+        // 两份 guidance 都会真的注入。一个都不选就回到 none。
         "scene" => {
             if let Some(h) = h {
-                h.session_override_scene(v["to"].as_str().unwrap_or("none").to_string()).await;
+                let to: Vec<String> = v["to"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .or_else(|| v["to"].as_str().map(|s| vec![s.to_string()]))
+                    .unwrap_or_default();
+                let to = if to.is_empty() { vec!["none".to_string()] } else { to };
+                h.session_override_scene(to).await;
             }
         }
+        // ── 场景库：一个场景一个块，改/删都落回 playbook.toml ──
+        //
+        // 写回前整份校验：`Playbook::from_toml_str` 过不了就不写。
+        // 场景库坏掉的症状要到下一轮才以「场景全没了」的形式冒出来。
+        "scene_put" => app.push(scene_write(app, &v["scene"], false)),
+        "scene_del" => app.push(scene_write(app, &v["scene"], true)),
+
+        // 重命名只改 session 行的 title。
+        "session_rename" => {
+            let id = SessionId(v["session"].as_str().unwrap_or("").to_string());
+            let title = v["title"].as_str().unwrap_or("").trim().to_string();
+            match app.store.get_session(&id) {
+                Ok(Some(mut s)) => {
+                    s.title = title;
+                    if let Err(e) = app.store.create_session(&s) {
+                        return app.err(&format!("改名失败：{e}"));
+                    }
+                    app.push(json!({ "t": "sessions", "sessions": sessions_json(app) }));
+                }
+                _ => app.err("找不到这条会话"),
+            }
+        }
+        // 删除 = 从列表里拿掉。**事件不删**，见 `Store::forget_session`。
+        "session_del" => {
+            let id = SessionId(v["session"].as_str().unwrap_or("").to_string());
+            let cur = app.live.lock().await.as_ref().map(|l| l.session.clone());
+            if cur.as_ref() == Some(&id) {
+                return app.err("这是当前正在用的会话，先切到别的再删");
+            }
+            if let Err(e) = app.store.forget_session(&id) {
+                return app.err(&format!("删除失败：{e}"));
+            }
+            app.push(json!({ "t": "sessions", "sessions": sessions_json(app) }));
+        }
+
         "distill" => {
             // 这是 `session_distill` 的第一个调用者 —— 之前它零引用。
             if let Some(h) = h {
@@ -691,6 +718,66 @@ async fn handle(app: &Arc<App>, v: Value) {
     }
 }
 
+/// 改写 `playbook.toml` 里的一个场景。`del = true` 就是删掉它。
+///
+/// **整份读出来、改、校验、再写回**，不是往文件里做局部文本替换 ——
+/// 后者遇到用户手写的注释和奇怪缩进就会错，而错法是把文件写坏。
+/// 代价是用户写在 toml 里的注释会在这次写回时丢掉，所以只有点了改才走这条路。
+fn scene_write(app: &Arc<App>, raw: &Value, del: bool) -> Value {
+    let path = app.dir.join("memory").join("playbook.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut pb = match crate::scene::Playbook::from_toml_str(&text) {
+        Ok(p) => p,
+        Err(e) => return json!({ "t": "err", "msg": format!("现在的 playbook.toml 就读不出来：{e}") }),
+    };
+    let id = raw["id"].as_str().unwrap_or("").trim().to_string();
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return json!({ "t": "err", "msg": "场景 id 只能用字母数字和 - _" });
+    }
+    if del {
+        if id == "none" {
+            return json!({ "t": "err", "msg": "none 是判不出场景时的回退，不能删" });
+        }
+        pb.scenes.remove(&id);
+    } else {
+        pb.scenes.insert(
+            id.clone(),
+            crate::scene::Scene {
+                id: id.clone(),
+                label: raw["label"].as_str().unwrap_or(&id).to_string(),
+                when: raw["when"].as_str().unwrap_or("").to_string(),
+                guidance: raw["guidance"].as_str().unwrap_or("").to_string(),
+                tools: raw["tools"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+            },
+        );
+    }
+    let out = pb.to_toml_string();
+    // 自己写出来的东西自己读一遍再落盘。这一步挡的是「写完下一轮场景全没了」。
+    if let Err(e) = crate::scene::Playbook::from_toml_str(&out) {
+        return json!({ "t": "err", "msg": format!("改完之后读不回来了，没保存：{e}") });
+    }
+    if let Err(e) = std::fs::write(&path, out) {
+        return json!({ "t": "err", "msg": format!("写 playbook.toml 失败：{e}") });
+    }
+    scenes_json(&pb)
+}
+
+/// 给 UI 的场景库。**一处生成** —— boot、改场景、蒸馏追加，三条路都用它，
+/// 少一个字段就是界面上少一块内容。
+fn scenes_json(pb: &crate::scene::Playbook) -> Value {
+    json!({
+        "t": "scenes",
+        "scenes": pb.scenes.values().map(|s| json!({
+            "id": s.id, "label": s.label, "when": s.when,
+            "guidance": s.guidance, "tools": s.tools,
+        })).collect::<Vec<_>>(),
+        "default_tools": pb.default_tools,
+    })
+}
+
 /// 把蒸馏的若干节写回 `memory/`。返回一条给 UI 的结果。
 ///
 /// # 为什么写之前要校验
@@ -740,6 +827,18 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
     }
 
     app.push(json!({ "t": "memory", "files": memory_files(app) }));
+    // 蒸馏往 playbook 里追加了场景 ⇒ 场景块也得跟着刷。
+    // 不刷的话，界面上要到下次重启才看得到那条新场景 —— 而用户刚刚亲手写入了它。
+    if done.iter().any(|f| f == "playbook.toml")
+        && let Ok(text) = std::fs::read_to_string(root.join("playbook.toml"))
+        && let Ok(pb) = crate::scene::Playbook::from_toml_str(&text)
+    {
+        // quiet：这次刷新是蒸馏顺带的，上面已经报过「写入 3 个文件」了，
+        // 再弹一条「场景库已保存」是同一件事说两遍。
+        let mut v = scenes_json(&pb);
+        v["quiet"] = Value::Bool(true);
+        app.push(v);
+    }
     json!({ "t": "applied", "ok": done.len(), "files": done, "errors": errs })
 }
 

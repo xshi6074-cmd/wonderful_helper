@@ -199,8 +199,9 @@ impl Registry {
     }
 }
 
-/// 联网工具按 `Settings.web` 注册。场景里列着但没配 = 用户没开联网，不是写错了名字。
-const OPTIONAL: &[&str] = &["web_search", "web_fetch"];
+/// `web_fetch` 随联网开关注册。`web_search` 只作为旧 prompts.toml 的迁移兼容项：
+/// 新 prompt 不再写它，旧项目里残留它时静默忽略，不让升级变成一条假配置错误。
+const OPTIONAL: &[&str] = &["web_fetch", "web_search"];
 
 /// [`Registry::specs`] 的结果。
 pub struct Exposed {

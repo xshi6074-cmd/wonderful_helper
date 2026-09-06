@@ -30,8 +30,29 @@
 use crate::ids::{Seq, SessionId, TaskId, TurnId};
 use crate::model::{Call, Message, Mode, Role, Usage};
 use crate::scene::SceneId;
-use crate::state::{Op, Path, Phase};
+use crate::state::{Op, Path};
 use serde::{Deserialize, Serialize};
+
+/// 收一个字符串或一组字符串，都给成 `Vec`。
+///
+/// 场景从「一个」改成「一组」时用它兜住老时间线：库里存的是
+/// `"scene": "clarify_goal"`，新代码要的是 `["clarify_goal"]`。
+/// 没有它，改完之后所有历史会话都读不回来。
+fn one_or_many<'de, D>(d: D) -> Result<Vec<SceneId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
 
 /// 主时间线上的一条。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,16 +126,32 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dropped: Vec<Path>,
     },
-    /// 阶段推进。**只从 UI 来** —— 模型能建议收尾，没有推进权，也没有阻断权。
-    PhaseSet { to: Phase },
+    /// **已废弃。** 阶段闸门（设计讨论 / 交接）删掉了，见 `crate::state` 里那段说明。
+    ///
+    /// 变体留着**只为反序列化老时间线**：`Body` 是内部 tag 的枚举，
+    /// 少一个变体就意味着老库里的那条事件解不出来、整条会话读不回来。
+    /// 它不进 prompt、不改 Workspace、不再被任何地方产生。
+    PhaseSet { to: String },
 
     // ───────────── 流程与观测（不进 prompt） ─────────────
     TurnOpened { mode: Mode },
     TurnClosed { aborted: bool, stats: String },
     /// 判断段判定的场景。它不进 prompt —— 它**决定了拼什么**，不是被拼进去的内容。
-    Judged { scene: SceneId, rationale: String },
-    /// 用户一键更换场景。下一轮组装上下文时以它为准，并注入新场景的 guidance 与案例。
-    SceneOverridden { from: SceneId, to: SceneId },
+    ///
+    /// **是一组，不是一个。** 一轮里「目标还没说清」和「预算和方案对不上」
+    /// 可以同时成立，只准判一个的话，另一条的 guidance 就永远注不进去。
+    Judged {
+        #[serde(alias = "scene", deserialize_with = "one_or_many")]
+        scenes: Vec<SceneId>,
+        rationale: String,
+    },
+    /// 用户手动改场景。下一轮组装上下文时以它为准，并注入这些场景的 guidance 与案例。
+    SceneOverridden {
+        #[serde(deserialize_with = "one_or_many")]
+        from: Vec<SceneId>,
+        #[serde(deserialize_with = "one_or_many")]
+        to: Vec<SceneId>,
+    },
     /// 模型通过 `ask_user` 提的问题。`corr` 指向那条 `Called`。
     ///
     /// 它是**持久实体**而不是一条有损的 UI 事件：turn 结束、界面刷新、进程重启，

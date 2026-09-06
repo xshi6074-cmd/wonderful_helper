@@ -103,19 +103,43 @@ impl Playbook {
             .join("\n")
     }
 
-    /// 这个场景下模型能看到的全部工具名：默认 + 场景专属 + **当前 mode 额外给的**。
+    /// 本轮模型能看到的全部工具名：默认 + **这一组**场景各自要的 + 当前 mode 额外给的。
     ///
-    /// mode 也参与，是因为「探索期能开放搜索、行动期只按址抓」这类差别属于 mode
-    /// 不属于场景。三份来源合并去重，顺序按「默认 → 场景 → mode」，
+    /// mode 也参与，是因为不同阶段可能开放不同的辅助工具。三份来源合并去重，
+    /// 顺序按「默认 → 场景（按传入序）→ mode」，
     /// 模型看到的工具列表因此是稳定的。
-    pub fn exposed_tools(&self, scene: &Scene, mode_extra: &[String]) -> Vec<String> {
+    pub fn exposed_tools(&self, scenes: &[Scene], mode_extra: &[String]) -> Vec<String> {
         let mut v = self.default_tools.clone();
-        for t in scene.tools.iter().chain(mode_extra.iter()) {
+        let from_scenes = scenes.iter().flat_map(|s| s.tools.iter());
+        for t in from_scenes.chain(mode_extra.iter()) {
             if !v.contains(t) {
                 v.push(t.clone());
             }
         }
         v
+    }
+
+    /// 把一组 id 解析成场景，认不出的丢掉并回报。**顺序按 playbook 的 id 序**，
+    /// 所以 prompt 里场景的先后不受模型给出的顺序影响，缓存行为稳定。
+    pub fn resolve(&self, ids: &[SceneId]) -> (Vec<Scene>, Vec<SceneId>) {
+        let mut unknown = Vec::new();
+        let mut want: Vec<&SceneId> = Vec::new();
+        for id in ids {
+            if self.scenes.contains_key(id) {
+                if !want.contains(&id) {
+                    want.push(id);
+                }
+            } else if !unknown.contains(id) {
+                unknown.push(id.clone());
+            }
+        }
+        let out = self
+            .scenes
+            .values()
+            .filter(|s| want.iter().any(|w| **w == s.id))
+            .cloned()
+            .collect();
+        (out, unknown)
     }
 
     /// 从 TOML 加载。`playbook.toml` 是 L2 可插拔的入口，也是用户直接编辑的文件。
@@ -247,7 +271,7 @@ impl Playbook {
             //
             // 两个动作工具永远在：模型能不能把推断写下来，不该是个可选项。
             // 读类文件工具也永远在：它们不依赖任何外部服务，跟场景无关。
-            // 联网的两个不在这里 —— 它们按配置注册，由 mode 决定要不要给
+            // 联网 fetch 不在这里 —— 它按配置注册，由 mode 决定要不要给
             // （见 prompts.toml 的 [mode.*].tools）。
             default_tools: vec![
                 "record_graph".into(),

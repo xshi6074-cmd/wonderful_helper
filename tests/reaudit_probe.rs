@@ -66,6 +66,9 @@ struct BlockingCloseStore {
 }
 
 impl Store for BlockingCloseStore {
+    fn forget_session(&self, id: &premortem::ids::SessionId) -> Result<(), StoreError> {
+        self.inner.forget_session(id)
+    }
     fn append(&self, events: &[Event]) -> Result<(), StoreError> {
         if events
             .iter()
@@ -567,8 +570,8 @@ async fn scene_override_survives_restart_until_consumed() {
             at_ms: 1,
             corr: None,
             body: Body::SceneOverridden {
-                from: "none".into(),
-                to: "trace_code".into(),
+                from: vec!["none".into()],
+                to: vec!["trace_code".into()],
             },
         }])
         .unwrap();

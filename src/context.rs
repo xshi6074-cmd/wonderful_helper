@@ -69,7 +69,6 @@ impl Context {
         system.push_str(p.user_field.trim());
         system.push_str("\n\n");
         system.push_str(mode_note.trim());
-        system.push_str(&format!("\n\n当前阶段：{}。", ws.phase.label()));
 
         // 图在最前：拓扑是这段 metadata 里信息密度最高的东西，而且后面的图外推断
         // 要靠它才知道自己挂在哪儿。两种画法（程序画 / 模型画）在这里都收敛成源码。
@@ -128,16 +127,25 @@ impl Context {
         v
     }
 
-    /// 回答段：共享层 + 本轮场景的 guidance 与案例 + 检索材料 + 完整对话。
+    /// 回答段：共享层 + 本轮**这一组**场景的 guidance 与案例 + 检索材料 + 完整对话。
     ///
     /// **场景选定之后要真的灌进来** —— 只把场景 id 记在某个字段里、prompt 却没变，
     /// 等于用户换了半天场景模型什么都没感觉到。
-    pub fn for_answer(&self, scene: &Scene, cases: &str, retrieved: &[Message]) -> Vec<Message> {
+    ///
+    /// 一组场景各出一条 system 消息，而不是拼成一大段：它们是并列的约束，
+    /// 拼在一起模型容易只认第一条。顺序按 playbook 的 id 序，所以稳定。
+    pub fn for_answer(&self, scenes: &[Scene], cases: &str, retrieved: &[Message]) -> Vec<Message> {
         let mut v = self.shared();
-        if !scene.guidance.trim().is_empty() {
+        let live: Vec<&Scene> =
+            scenes.iter().filter(|s| !s.guidance.trim().is_empty()).collect();
+        for (i, scene) in live.iter().enumerate() {
+            let head = if live.len() > 1 {
+                format!("== 本轮场景 {}/{}：{} ==", i + 1, live.len(), scene.label)
+            } else {
+                format!("== 本轮场景：{} ==", scene.label)
+            };
             v.push(Message::system(format!(
-                "== 本轮场景：{} ==\n触发条件：{}\n\n{}",
-                scene.label,
+                "{head}\n触发条件：{}\n\n{}",
                 scene.when.trim(),
                 scene.guidance.trim()
             )));

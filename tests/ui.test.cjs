@@ -12,27 +12,61 @@ class Element {
   }
   set textContent(v) { this.text = String(v); this.children = []; }
   get textContent() { return (this.text || '') + this.children.map(c => c.textContent).join(''); }
-  append(...children) { for (const c of children) { this.children.push(c); c.parent = this; } }
+  append(...children) { for (const c of children) { if (c) { this.children.push(c); c.parent = this; } } }
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'value') this.value = v; }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
+  // 子树查询：`$(sel, root)` 这种带根的查找要走到这里。只认 #id / .class / tag，
+  // 够 app.js 用；不够的话它会抛，而不是悄悄返回 null。
+  querySelector(sel) {
+    const hit = (e) => sel.startsWith('#') ? e.attrs.id === sel.slice(1) || e.id === sel.slice(1)
+      : sel.startsWith('.') ? String(e.className || '').split(/\s+/).includes(sel.slice(1))
+      : e.tag === sel;
+    const walk = (e) => {
+      for (const c of e.children) { if (hit(c)) return c; const r = walk(c); if (r) return r; }
+      return null;
+    };
+    return walk(this);
+  }
+  querySelectorAll(sel) {
+    const out = [];
+    const hit = (e) => sel.startsWith('.') ? String(e.className || '').split(/\s+/).includes(sel.slice(1)) : e.tag === sel;
+    const walk = (e) => { for (const c of e.children) { if (hit(c)) out.push(c); walk(c); } };
+    walk(this);
+    return out;
+  }
+  // stopPropagation 必须真的停：不停的话，li 上那个「打开会话」会盖掉子按钮
+  // 刚发出去的改名/删除 —— 而那正是这个属性在真实 DOM 里防的事。
   fire(k, props = {}) {
-    const e = { target: this, preventDefault() {}, ...props };
-    for (let el = this; el; el = el.parent) for (const fn of el.listeners[k] || []) fn(e);
-    this['on' + k]?.(e);
+    let stopped = false;
+    const e = { target: this, preventDefault() {}, stopPropagation() { stopped = true; }, ...props };
+    for (let el = this; el && !stopped; el = el.parent) {
+      for (const fn of el.listeners[k] || []) fn(e);
+      if (!stopped) el['on' + k]?.(e);
+    }
   }
   focus() {}
   select() {}
+  setSelectionRange() {}
 }
 function setup() {
   const elements = new Map();
   const doc = {
     querySelector(s) { if (!elements.has(s)) elements.set(s, new Element()); return elements.get(s); },
+    // 真实 DOM 里 #modal 内部就有 .sheet-body；替身里让它们连上，
+    // 这样 modal() 那条路（场景选择器、目录浏览器都走它）真的跑得起来
+    _link() {
+      const m = this.querySelector('#modal');
+      const b = this.querySelector('.sheet-body');
+      b.className = 'sheet-body';
+      if (!m.children.includes(b)) m.append(b);
+    },
     querySelectorAll() { return []; },
     createElement: tag => new Element(tag),
     createElementNS: (_, tag) => new Element(tag),
     createTextNode: text => { const e = new Element('#text'); e.textContent = text; return e; },
     body: new Element(), documentElement: new Element(),
   };
+  doc._link();
   const ctx = vm.createContext({ document: doc, Node: Element, window: { innerHeight: 900 },
     addEventListener() {}, setTimeout() {}, clearTimeout() {}, console });
   const source = fs.readFileSync('ui/app.js', 'utf8').replace(/boot\(\);\s*$/, '');
@@ -63,33 +97,36 @@ test('role and permission form edits reach settings_put', () => {
   assert.equal(f.evalUI('sent.at(-1).settings.roles.answer.model'), 'new-model');
   assert.equal(f.evalUI('sent.at(-1).settings.tools.net'), true);
 });
-// 原来这条测的是左栏那个 rows=10 的 raw 框。整份 JSON 现在改在右栏编辑区里
-// （侧栏小框读不了也改不动），断言跟着搬过去，强度不变：合法的存得进，坏的一条都发不出去。
+test('config only exposes built-in fetch controls', () => {
+  const f = form();
+  const text = f.doc.querySelector('#config-form').textContent;
+  assert.match(text, /网页抓取/);
+  assert.doesNotMatch(text, /Crawl4AI|crawl4ai|SearXNG|searxng|Firecrawl|firecrawl|搜索/);
+});
+// 整份 JSON 在遮罩里改（侧栏小框读不了也改不动）。
+// 强度不变：合法 JSON 存得进、坏的一条都发不出去。
 test('config editor saves valid JSON and refuses malformed', () => {
   const f = form();
   f.evalUI(`S.saved = ${JSON.stringify(settings)}; openEditor('config');`);
-  const ed = f.doc.querySelector('#ed-text');
   const next = structuredClone(settings); next.roles.judge.model = 'raw-model';
-  ed.value = JSON.stringify(next);
-  f.evalUI('saveEditor()');
+  f.evalUI(`S.editor.el.value = ${JSON.stringify(JSON.stringify(next))}; saveEditor();`);
   assert.equal(f.evalUI('sent.at(-1).settings.roles.judge.model'), 'raw-model');
   const before = f.evalUI('sent.length');
-  ed.value = '{bad';
-  f.evalUI('saveEditor()');
+  f.evalUI(`S.editor.el.value = '{bad'; saveEditor();`);
   assert.equal(f.evalUI('sent.length'), before);
 });
 // 蒸馏的重点不是「模型写了什么」，是「用户不用自己搬」：分好的节要能逐节改、
 // 逐节取舍，写回的必须**正好**是屏幕上那份。
 test('distill sections are previewed, editable, and only the checked ones are written', () => {
   const f = setup();
-  f.evalUI(`switchRight = () => {};
-    onMsg({ t:'distilled', path:'/w/memory/draft-1.md', sections:[
+  f.evalUI(`onMsg({ t:'distilled', path:'/w/memory/draft-1.md', sections:[
       { file:'project.md', mode:'replace', text:'新的项目描述' },
       { file:'playbook.toml', mode:'append', text:'[[scene]]\\nid = "x"' },
     ]});`);
   assert.equal(f.evalUI('S.distill.sections.length'), 2);
+  assert.equal(f.doc.querySelector('#over').hidden, false, '草稿自己弹出来，不用去别处找');
 
-  const rows = all(f.doc.querySelector('#di-list'));
+  const rows = all(f.doc.querySelector('#ov-body'));
   const boxes = rows.filter(e => e.attrs.type === 'checkbox');
   const areas = rows.filter(e => e.tag === 'textarea');
   assert.equal(boxes.length, 2, '一节一个勾选框');
@@ -115,15 +152,20 @@ test('distill sections are previewed, editable, and only the checked ones are wr
   f.evalUI('applyDistill()');
   assert.equal(f.evalUI('sent.length'), before);
 });
-test('memory files open in the right pane instead of an inline box', () => {
+// 持久层列的是**给人看的名字**（「系统提示词」而不是 prompts.toml），
+// 正文开遮罩改 —— 侧栏里塞不下一篇 prompts.toml。
+test('persistent files show human names and open in the overlay', () => {
   const f = setup();
   f.evalUI(`S.memory = [{file:'prompts.toml', text:'a\\nb'}]; renderMemory();`);
   const rows = all(f.doc.querySelector('#memory-list'));
-  assert.equal(rows.some(e => e.tag === 'textarea'), false);
-  // h() 把 class 写在 className 上（不是 setAttribute），所以查这里
-  rows.find(e => String(e.className || '').includes('frow')).fire('click');
+  assert.equal(rows.some(e => e.tag === 'textarea'), false, '不内联大框');
+  const row = rows.find(e => String(e.className || '').includes('frow'));
+  assert.ok(row.textContent.includes('系统提示词'), '显示中文名：' + row.textContent);
+  assert.ok(row.textContent.includes('prompts.toml'), '文件名也还在，不藏起来');
+  row.fire('click');
   assert.equal(f.evalUI('S.editor.file'), 'prompts.toml');
-  assert.equal(f.doc.querySelector('#ed-text').value, 'a\nb');
+  assert.equal(f.evalUI('S.editor.el.value'), 'a\nb');
+  assert.equal(f.doc.querySelector('#over').hidden, false, '遮罩开着');
 });
 test('errors clear themselves but persistent states stay', () => {
   const f = setup();
@@ -154,6 +196,115 @@ test('preset provider lands in the roster with its base_url and key env', () => 
   nodes.find(e => e.tag === 'button' && e.textContent === '加进花名册').fire('click');
   assert.equal(f.evalUI("S.settings.providers.deepseek.base_url"), 'https://api.deepseek.com/v1');
   assert.equal(f.evalUI("S.settings.providers.deepseek.key_env"), 'DEEPSEEK_API_KEY');
+});
+// 场景是多选：判断段本来就能一次判出几个，用户插手时没道理只准挑一个。
+test('scene picker is multi-select and sends every checked id', () => {
+  const f = setup();
+  f.evalUI(`S.playbook = [
+      {id:'none',label:'不做特殊干预',when:'闲聊'},
+      {id:'clarify_goal',label:'澄清目标',when:'claim 模糊'},
+      {id:'cheap_first',label:'优先低成本',when:'预算对不上'}];
+    S.scenes = ['clarify_goal'];`);
+  f.evalUI('openScenePicker()');
+  const body = all(f.doc.querySelector('.sheet-body'));
+  const boxes = body.filter(e => e.attrs.type === 'checkbox');
+  assert.equal(boxes.length, 3, '每个场景一个勾选框');
+  assert.equal(boxes[1].checked, true, '当前命中的预先勾上');
+  boxes[2].checked = true; boxes[2].fire('change');
+  body.find(e => e.tag === 'button' && e.textContent === '用这些').fire('click');
+  const msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.op, 'scene');
+  assert.equal([...msg.to].sort().join(','), 'cheap_first,clarify_goal');
+});
+
+// 顶栏显示的是这一组场景，不是一个。
+test('topbar shows every live scene', () => {
+  const f = setup();
+  f.evalUI(`S.playbook = [{id:'clarify_goal',label:'澄清目标'},{id:'cheap_first',label:'优先低成本'}];
+    S.scenes = ['clarify_goal','cheap_first']; renderTop();`);
+  const t = f.doc.querySelector('#scene-chip').textContent;
+  assert.ok(t.includes('澄清目标') && t.includes('优先低成本'), t);
+});
+
+// 对话可改名 / 可删；当前这条不给删 —— 删了界面就挂在一个已经不存在的会话上。
+test('sessions can be renamed and removed, except the live one', () => {
+  const f = setup();
+  f.evalUI(`S.session = 'a'; S.sessions = [{id:'a',title:'甲'},{id:'b',title:'乙'}];
+    globalThis.prompt = () => '改过的名字'; globalThis.confirm = () => true;
+    renderSessions();`);
+  const rows = all(f.doc.querySelector('#session-list')).filter(e => e.tag === 'button');
+  // 每条两个按钮：改名、删除
+  assert.equal(rows.length, 4);
+  rows[0].fire('click');
+  assert.equal(f.evalUI('sent.at(-1).op'), 'session_rename');
+  assert.equal(f.evalUI('sent.at(-1).session'), 'a');
+  assert.equal(f.evalUI('sent.at(-1).title'), '改过的名字');
+  // h() 对布尔属性写的是 setAttribute(k, '')，和真实 DOM 一致
+  assert.equal(rows[1].attrs.disabled, '', '当前会话的删除是禁用的');
+  rows[3].fire('click');
+  assert.equal(f.evalUI('sent.at(-1).op'), 'session_del');
+  assert.equal(f.evalUI('sent.at(-1).session'), 'b');
+});
+
+// 待落定/已搁置是会一直长的清单。只给「整块编辑」的话，删一条要先读懂整块，
+// 于是没人删，于是它们只增不减。
+test('working memory lists drop and move single items', () => {
+  const f = setup();
+  f.evalUI(`S.snap = { ws: { flow:{nodes:{},edges:{}}, fields:{}, open:['甲','乙'], parked:['丙'] } };
+    drawGraph = () => {}; renderRight();`);
+  const open = all(f.doc.querySelector('#open-list')).filter(e => e.tag === 'button');
+  // 每条两个（挪走、删掉）+ 末尾一个「整块编辑」
+  assert.equal(open.length, 5);
+  open[1].fire('click');                       // 删掉「甲」
+  let msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.op, 'edit');
+  assert.equal([...msg.ops[0].open].join(','), '乙', '发的是删完之后剩下的整份');
+
+  f.evalUI(`renderRight();`);
+  const again = all(f.doc.querySelector('#open-list')).filter(e => e.tag === 'button');
+  again[0].fire('click');                      // 把「甲」挪去搁置
+  msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.ops.length, 2, '两个清单都是整份替换，所以要发两条');
+  assert.equal([...msg.ops[0].open].join(','), '乙');
+  assert.equal([...msg.ops[1].parked].join(','), '丙,甲');
+});
+
+// 场景是独立的块：用户要调的是「什么时候提醒我固定种子」，不是 playbook.toml 第 47 行。
+test('a scene edits as its own block and writes back one scene', () => {
+  const f = setup();
+  f.evalUI(`S.playbook = [{id:'seed',label:'种子',when:'旧的触发条件',guidance:'旧的说法',tools:[]}];
+    S.scenes = []; renderMemory();`);
+  const row = all(f.doc.querySelector('#scene-list')).find(e => String(e.className || '').includes('frow'));
+  assert.ok(row.textContent.includes('种子'));
+  row.fire('click');
+  assert.equal(f.doc.querySelector('#over').hidden, false);
+  const areas = all(f.doc.querySelector('#ov-body')).filter(e => e.tag === 'textarea');
+  areas[1].value = '新的说法';                  // guidance
+  areas[1].fire('input');
+  all(f.doc.querySelector('#ov-acts')).find(e => e.textContent === '保存').fire('click');
+  const msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.op, 'scene_put');
+  assert.equal(msg.scene.id, 'seed');
+  assert.equal(msg.scene.guidance, '新的说法');
+  assert.equal(msg.scene.when, '旧的触发条件', '没动的字段原样带回去');
+});
+
+// 那一坨 stats JSON 不该摊在对话里 —— 它是排查用的。
+test('turn footer shows a readable line, not the raw stats json', () => {
+  const f = setup();
+  const stats = JSON.stringify({ judge_ms: 2149, answer_ms: 8792, tool_ms: 0, loops: 1,
+    tools_run: 2, inferred_ops: 5, dropped_ops: 0, asked_user: 0, compacted: 0 });
+  f.evalUI(`S.timeline = [
+      {seq:1,kind:'turn_open',turn:1,body:{}},
+      {seq:2,kind:'wrote',turn:1,body:{text:'x'},html:'<p>x</p>'},
+      {seq:3,kind:'turn_close',turn:1,body:{aborted:false,stats:${JSON.stringify(stats)}}}];
+    renderStream();`);
+  const foot = all(f.doc.querySelector('#stream')).find(e => String(e.className || '') === 'turn-foot');
+  const txt = foot.textContent;
+  assert.ok(!txt.includes('judge_ms'), '原始 JSON 不出现：' + txt);
+  assert.ok(txt.includes('10.9s') && txt.includes('工具 2') && txt.includes('推断 5'), txt);
+  const line = foot.children.find(e => String(e.className || '').includes('hint'));
+  assert.ok(String(line.attrs.title).includes('judge_ms'), '全文挂在 title 上，想查还查得到');
 });
 test('boot restores active turn and resets stale per-session counters', () => {
   const f = setup();

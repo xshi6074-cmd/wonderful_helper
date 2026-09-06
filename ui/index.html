@@ -27,6 +27,11 @@
     <section class="pane" data-pane="chats">
       <button class="wide" id="new-chat">＋ 新对话</button>
       <ul id="session-list" class="list"></ul>
+      <!-- 蒸馏就挨着对话记录：它的输入是「这段对话」，放在这里才对得上。 -->
+      <div class="sect">
+        <button class="wide" id="distill-btn"
+          title="把这段会话沉淀成持久层的更新草稿。逐节预览、改完再一键写入 —— 只有你点了写入才会动持久层。">⚗ 一键蒸馏</button>
+      </div>
     </section>
 
     <section class="pane" data-pane="config" hidden>
@@ -35,26 +40,15 @@
 
     <section class="pane" data-pane="memory" hidden>
       <p class="hint">这里的每一块都是独立的模板。改完保存，<b>下一轮立刻生效</b>，不用重启。</p>
+      <h4>提示词与记忆</h4>
       <div id="memory-list"></div>
+      <h4>场景库 <span class="hint">判断段按这些描述判，回答段注入命中的 guidance</span></h4>
+      <div id="scene-list"></div>
+      <p class="hint" id="scene-note"></p>
     </section>
 
     <section class="pane" data-pane="tools" hidden>
       <div id="tools-panel"></div>
-    <!-- 蒸馏审阅：一节一个目标文件，改完勾选，一次写回。
-         不做成「打开草稿自己复制粘贴」，那一步本来就该程序做。 -->
-    <section class="pane distill" data-rp="distill" hidden>
-      <div class="ed-head">
-        <b>蒸馏草稿</b>
-        <span class="spacer"></span>
-        <span class="chip ghost" id="di-path" title="草稿全文落盘位置"></span>
-      </div>
-      <p class="hint" id="di-note"></p>
-      <div id="di-list"></div>
-      <div class="ed-acts">
-        <button class="primary" id="di-apply">写入选中的</button>
-        <span class="spacer"></span>
-        <button class="ghost" id="di-close">关闭</button>
-      </div>
     </section>
   </aside>
   <div class="grip" id="lgrip" title="拖动调宽"></div>
@@ -63,12 +57,11 @@
   <main id="center">
     <header id="topbar">
       <button class="icon" id="left-show" title="展开左栏" hidden>›</button>
-      <div class="seg" id="mode-seg" title="探索：可展开、可追问；行动：直接往前推">
+      <div class="seg" id="mode-seg" title="探索：可展开、可追问；行动：直接往前推，图要能交给编码 agent">
         <button data-mode="explore" class="on">探索</button>
         <button data-mode="go">行动</button>
       </div>
-      <span class="chip" id="phase-chip" title="阶段闸门在你手里，模型没有推进权">设计讨论</span>
-      <span class="chip ghost" id="scene-chip" hidden></span>
+      <span class="chip ghost" id="scene-chip" title="点开选场景。可以多选 —— 几份 guidance 会一起注入"></span>
       <span class="spacer"></span>
       <span class="chip ghost" id="token-chip" title="本会话累计 token">0 tok</span>
       <span class="chip ghost" id="conn-chip">连接中…</span>
@@ -101,18 +94,20 @@
     </footer>
   </main>
 
-  <!-- ───────── 右侧栏：推断 ───────── -->
+  <!-- ───────── 右侧栏：工作记忆 ─────────
+       图和图外的关键信息是同一件东西的两半（模型这一轮到底知道什么），
+       所以放在同一栏里切换，而不是上下堆着都挤在一屏。 -->
   <div class="grip" id="rgrip" title="拖动调宽"></div>
   <aside id="right">
     <div class="side-head">
       <div class="seg" id="right-seg">
         <button data-rt="infer" class="on">推断</button>
-        <button data-rt="edit" hidden>编辑</button>
-        <button data-rt="distill" hidden>蒸馏</button>
+        <button data-rt="mem">记忆</button>
       </div>
       <span class="spacer"></span>
       <button class="icon" id="graph-refresh" title="刷新">⟳</button>
     </div>
+
     <div class="pane" data-rp="infer">
       <h4>实验流程图 <span class="hint" id="graph-hint"></span></h4>
       <div id="graph"></div>
@@ -120,29 +115,16 @@
         <i>有依据</i><i class="guess">模型猜的</i><i class="user">你定的</i>
       </div>
       <details id="graph-src"><summary>mermaid 源码</summary><pre></pre></details>
-      <h4>图外推断</h4>
+    </div>
+
+    <div class="pane" data-rp="mem" hidden>
+      <h4>图外推断 <span class="hint">画不成节点的判断</span></h4>
       <div id="fields"></div>
-      <h4>待落定</h4>
+      <h4>待落定 <span class="hint">还没定下来的</span></h4>
       <div id="open-list"></div>
-      <h4>已搁置</h4>
+      <h4>已搁置 <span class="hint">先放着不管的</span></h4>
       <div id="parked-list"></div>
     </div>
-    <section class="pane editor" data-rp="edit" hidden>
-      <div class="ed-head">
-        <b id="ed-name" class="mono"></b>
-        <span class="spacer"></span>
-        <span class="chip ghost" id="ed-dirty" hidden>未保存</span>
-      </div>
-      <p class="hint" id="ed-note"></p>
-      <textarea id="ed-text" spellcheck="false"></textarea>
-      <div class="ed-acts">
-        <button class="primary" id="ed-save">保存</button>
-        <button id="ed-revert">还原</button>
-        <button class="danger" id="ed-del" hidden>删除</button>
-        <span class="spacer"></span>
-        <button class="ghost" id="ed-close">关闭</button>
-      </div>
-    </section>
   </aside>
 </div>
 
@@ -155,8 +137,26 @@
   <button id="find-close" title="关闭 (Esc)">✕</button>
 </div>
 
-<!-- 节点编辑弹层 -->
+<!-- 节点编辑弹层（小改动用它） -->
 <div id="modal" hidden><div class="sheet"><div class="sheet-body"></div></div></div>
+
+<!-- ───────── 编辑遮罩 ─────────
+     改文件、改场景、审阅蒸馏草稿都用它。这些都是**编辑时才需要一下**的东西：
+     占着一整栏的话，平时那一栏就是空的，而要用的时候又嫌窄。
+     遮罩铺开更宽、关掉就没了，三种编辑共用同一套外框。 -->
+<div id="over" hidden>
+  <div class="over-panel">
+    <header class="over-head">
+      <b id="ov-title"></b>
+      <span class="chip ghost" id="ov-dirty" hidden>未保存</span>
+      <span class="spacer"></span>
+      <button class="icon" id="ov-close" title="关闭 (Esc)">✕</button>
+    </header>
+    <p class="hint" id="ov-note"></p>
+    <div id="ov-body"></div>
+    <footer class="over-acts" id="ov-acts"></footer>
+  </div>
+</div>
 
 <script type="module" src="/app.js"></script>
 </body>

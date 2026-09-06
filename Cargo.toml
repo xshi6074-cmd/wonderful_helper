@@ -39,6 +39,11 @@ axum          = { version = "0.8", features = ["ws"] }
 # 模型输出里的 raw HTML 事件被直接丢掉，不可能进 DOM。
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 reqwest       = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "charset", "http2"] }
+# 内置网页抓取：Readability 按 DOM 结构/文本密度抽正文，再转成保留标题、列表、
+# 表格、代码与链接的 Markdown。全是 Rust 依赖，不要求 Python、浏览器或 Docker。
+dom_smoothie  = "0.18"
+htmd          = "0.5.5"
+encoding_rs   = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "test-util"] }

@@ -34,13 +34,17 @@ const S = {
   session: null, sessions: [], settings: null, keys: {}, warnings: [],
   tools: [], web: '无', metrics: '', memory: [],
   timeline: [], snap: null,
-  mode: 'explore', phase: 'designing', tokens: 0, queued: 0,
-  scene: null, running: false, turn: null, connected: false,
+  mode: 'explore', tokens: 0, queued: 0,
+  scenes: [],             // 本轮判成的一组场景（多选）
+  playbook: [],           // 场景库全文，左栏一块一块地改
+  defaultTools: [],
+  running: false, turn: null, connected: false,
   stream: null,           // { turn, text }
   fresh: new Set(),       // 刚被改过的图元素 id，画一次高亮就够
   presets: [],            // provider 预设，来自后端（base_url/密钥变量名只有那一份）
   saved: null,            // boot 时的配置原件。左栏表单会改 S.settings，这份不动
-  editor: null,           // 右栏正在编辑的文件 { kind, file, orig, note, deletable }
+  over: null,             // 遮罩里正开着什么 { kind, dirty(), ... }
+  editor: null,           // 遮罩里那个文件的 { kind, file, orig }
   browse: null,           // 目录浏览器的当前一层
   distill: null,          // 蒸馏草稿的分节结果，等用户勾选写回
   banners: [],            // { level, text, key }
@@ -76,15 +80,16 @@ function onMsg(m) {
       S.session = m.session; S.sessions = m.sessions; S.settings = m.settings;
       S.keys = m.keys; S.warnings = m.warnings || []; S.tools = m.tools || [];
       S.web = m.web; S.metrics = m.metrics; S.memory = m.memory || [];
-      S.scenes = m.scenes || [];
+      S.playbook = m.scenes || [];
+      S.defaultTools = m.default_tools || [];
       S.presets = m.presets || [];
       S.saved = m.settings ? JSON.parse(JSON.stringify(m.settings)) : null;
       S.timeline = m.timeline || []; S.snap = m.snap; S.stream = null;
       S.turn = m.snap?.turn ?? null; S.running = S.turn !== null;
-      S.mode = 'explore'; S.phase = 'designing'; S.scene = null; S.queued = 0;
+      S.mode = 'explore'; S.scenes = []; S.queued = 0;
       S.foot = null;
       S.tokens = S.timeline.filter(e => e.kind === 'cost').reduce((n, e) => n + (e.body.usage?.prompt || 0) + (e.body.usage?.completion || 0), 0);
-      if (m.snap) { S.mode = m.snap.mode; S.phase = m.snap.phase; S.scene = m.snap.scene; S.queued = m.snap.queued; }
+      if (m.snap) { S.mode = m.snap.mode; S.scenes = m.snap.scenes || []; S.queued = m.snap.queued; }
       S.banners = S.banners.filter(b => b.level === 'bad').concat(S.warnings.map((w, i) => ({ level: 'warn', text: w, key: 'cfg' + i })));
       renderAll();
       break;
@@ -116,14 +121,13 @@ function onMsg(m) {
       send('snap');
       break;
     case 'snap':
-      S.snap = m.snap; S.mode = m.snap.mode; S.phase = m.snap.phase;
-      S.scene = m.snap.scene; S.queued = m.snap.queued;
+      S.snap = m.snap; S.mode = m.snap.mode;
+      S.scenes = m.snap.scenes || []; S.queued = m.snap.queued;
       S.turn = m.snap.turn ?? null; S.running = S.turn !== null;
       renderRight(); renderTop(); renderAsk();
       break;
     case 'cost': S.tokens = m.total; renderTop(); break;
     case 'mode': S.mode = m.to; renderTop(); break;
-    case 'phase': S.phase = m.to; renderTop(); break;
     case 'still_running':
       banner('info', `工具仍在跑：${m.pending.join(', ')}（${(m.elapsed_ms / 1000) | 0}s）`, 'run');
       break;
@@ -132,18 +136,17 @@ function onMsg(m) {
       banner('info', `已折叠 ${m.folded} 条早期对话：${m.before} → ${m.after} tok`, 'fold');
       break;
     case 'distilled':
-      // 分好节的草稿直接进右栏审阅区。只有用户勾选并点写入，才会碰持久层。
+      // 分好节的草稿直接铺进遮罩。只有用户勾选并点写入，才会碰持久层。
       S.distill = { path: m.path, error: m.error, sections: (m.sections || []).map(s => ({ ...s, on: true })) };
-      renderDistill();
+      dropBanner('distill-run');
       if (m.error) banner('bad', m.error, 'distill');
-      else banner('info', `蒸馏出 ${S.distill.sections.length} 节，去右栏「蒸馏」看`, 'distill');
-      if (S.distill.sections.length) switchRight('distill');
+      if (S.distill.sections.length) openDistill();
       break;
     case 'applied':
       if (m.errors && m.errors.length) banner('bad', m.errors.join('；'), 'distill');
       if (m.ok) {
         banner('info', `写入 ${m.ok} 个文件：${(m.files || []).join('、')}`, 'distill');
-        S.distill = null; renderDistill(); switchRight('infer');
+        S.distill = null; closeOver(true);
       }
       break;
     case 'footprint': S.foot = m; renderTop(); break;
@@ -153,6 +156,13 @@ function onMsg(m) {
       break;
     case 'memory_bad': banner('warn', `${m.file} 解析失败，已回退内置：${m.err}`, 'mem' + m.file); break;
     case 'memory': S.memory = m.files; renderMemory(); break;
+    case 'scenes':
+      S.playbook = m.scenes || [];
+      S.defaultTools = m.default_tools || S.defaultTools;
+      renderMemory();
+      if (!m.quiet) banner('info', '场景库已保存，下一轮生效', 'scene');
+      break;
+    case 'sessions': S.sessions = m.sessions || []; renderSessions(); break;
     case 'recovered':
       banner('info', `恢复了上次的会话：${m.events} 条事件，修补 ${m.crashed} 个中断轮次，${m.reopened} 个提问重新打开`, 'rec');
       break;
@@ -193,11 +203,13 @@ function dropBanner(key) {
 
 function renderTop() {
   $$('#mode-seg button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
-  $('#phase-chip').textContent = S.phase === 'handoff' ? '交接' : '设计讨论';
+  // 场景是一组。判断段自己会判，用户想插手就点开多选 —— 选中的几份 guidance
+  // 会一起注入，不是「换个标签」。
   const sc = $('#scene-chip');
-  sc.hidden = false;
-  sc.textContent = '场景 ' + (S.scene || '自动');
-  sc.title = '选择下一轮场景';
+  const names = S.scenes.map(id => S.playbook.find(x => x.id === id)?.label || id);
+  const shown = names.filter(n => n !== '不做特殊干预');
+  sc.textContent = shown.length ? '场景 ' + shown.join(' + ') : '场景 自动';
+  sc.title = '点开选场景（可多选）。选中的 guidance 下一轮会一起注入。';
   const foot = S.foot ? `　·　上下文 ${S.foot.total} tok` : '';
   const tc = $('#token-chip');
   tc.textContent = `${S.tokens} tok${foot}`;
@@ -252,7 +264,7 @@ function blocks() {
 const PROC_LABEL = {
   judged: '场景判定', called: '发起工具', returned: '工具返回', aborted: '调用中止',
   inferred: '推断更新', edited: '你的编辑', noted: '备注', folded: '折叠',
-  cost: '计费', phase_set: '阶段', scene_overridden: '换场景',
+  cost: '计费', scene_overridden: '换场景',
 };
 
 function renderStream() {
@@ -286,12 +298,14 @@ function renderStream() {
       }
     }
     if (b.closed) {
+      // 那一坨 stats JSON 不摊在对话里 —— 它是排查用的，不是读对话时要看的。
+      // 挂成 title，想看的时候悬停；执行过程本来就在上面的折叠块里。
       box.append(h('div', { class: 'turn-foot' },
         h('button', {
           title: '从这一轮分出一条新分支。原会话一条都不动。',
           onclick: () => send('fork', { turn: b.turn, title: `从第 ${b.turn} 轮分支` }),
         }, '⑂ 从这里分支'),
-        b.stats ? h('span', { class: 'hint' }, b.stats) : null,
+        b.stats ? h('span', { class: 'hint mono-hint', title: b.stats }, statLine(b.stats)) : null,
         b.aborted ? h('span', { class: 'chip warn' }, '中止收尾') : null));
     }
     st.append(box);
@@ -327,6 +341,20 @@ function renderStream() {
   if (stick) st.scrollTop = st.scrollHeight;
   addCopyButtons();
   updateToBottom();
+}
+
+/** 一轮的指标压成一行人话。全文挂在 title 上，想查还是查得到。 */
+function statLine(raw) {
+  let s; try { s = JSON.parse(raw); } catch { return ''; }
+  const bits = [];
+  const secs = (ms) => (ms / 1000).toFixed(1) + 's';
+  bits.push(secs((s.judge_ms || 0) + (s.answer_ms || 0) + (s.tool_ms || 0)));
+  if (s.tools_run) bits.push(`工具 ${s.tools_run}`);
+  if (s.inferred_ops) bits.push(`推断 ${s.inferred_ops}`);
+  if (s.dropped_ops) bits.push(`丢弃 ${s.dropped_ops}`);
+  if (s.asked_user) bits.push(`提问 ${s.asked_user}`);
+  if (s.compacted) bits.push(`折叠 ${s.compacted}`);
+  return bits.join(' · ');
 }
 
 /** 代码块的复制按钮。聊天 UI 的基本便利，没有它就得手动框选。 */
@@ -409,7 +437,8 @@ function procStep(e) {
     case 'cost': v.append(`${B.role}　输入 ${B.usage?.prompt ?? 0} / 输出 ${B.usage?.completion ?? 0}${B.usage?.estimated ? '（估算）' : ''}`); break;
     case 'aborted': v.append(`${B.call_id}：${B.why}`); break;
     case 'scene_overridden': v.append(`${B.from} → ${B.to}`); break;
-    case 'phase_set': v.append(B.to); break;
+    // phase_set 是已废弃的事件，只有老会话里还有。显示原样那一个值就够了。
+    case 'phase_set': v.append(String(B.to)); break;
     default: v.append(JSON.stringify(B));
   }
   const bad = e.kind === 'aborted' || (e.kind === 'returned' && B.outcome && B.outcome !== 'ok');
@@ -463,16 +492,54 @@ function renderRight() {
       h('span', { class: 'm' }, f.prov?.origin === 'User' ? '你' : (isGuess(f.prov) ? '猜' : '有据'))));
   }
 
+  // 待落定 / 已搁置：**逐条可删，也能一键挪到另一边**。
+  // 这两个清单是会一直长的东西，只给一个「编辑」按钮去改一整块文本，
+  // 意味着删一条要先读懂整块 —— 那就没人删了，于是它们只增不减。
   for (const [id, key] of [['#open-list', 'open'], ['#parked-list', 'parked']]) {
     const box = $(id); box.textContent = '';
     const items = ws?.[key] || [];
+    const other = key === 'open' ? 'parked' : 'open';
     if (!items.length) box.append(h('div', { class: 'empty' }, '（空）'));
-    for (const q of items) box.append(h('div', { class: 'qrow' }, '· ' + q));
+    items.forEach((q, i) => {
+      box.append(h('div', { class: 'qrow' },
+        h('span', { class: 't' }, q),
+        h('button', {
+          class: 'icon', title: key === 'open' ? '先搁置' : '挪回待落定',
+          onclick: () => moveItem(key, other, i),
+        }, key === 'open' ? '⇩' : '⇧'),
+        h('button', {
+          class: 'icon', title: '删掉这条',
+          onclick: () => dropItem(key, i),
+        }, '✕')));
+    });
     box.append(h('button', {
       style: 'margin-top:6px;font-size:12px',
       onclick: () => editList(key, items),
-    }, '编辑'));
+    }, '整块编辑'));
   }
+}
+
+/** 删掉待落定/已搁置里的一条。
+ *
+ * `Op::Set{open|parked}` 是**整份替换**，所以这里发的是删掉之后剩下的那一份。
+ * 走 `edit` 而不是别的口子：这是用户的改动，要占仲裁键，模型这一轮不能覆盖它。 */
+function dropItem(key, i) {
+  const items = [...(S.snap?.ws?.[key] || [])];
+  items.splice(i, 1);
+  send('edit', { ops: [{ op: 'set', path: key, [key]: items }] });
+}
+
+/** 待落定 ⇄ 已搁置。两边都是整份替换，所以一次发两条 op。 */
+function moveItem(from, to, i) {
+  const a = [...(S.snap?.ws?.[from] || [])];
+  const b = [...(S.snap?.ws?.[to] || [])];
+  const [moved] = a.splice(i, 1);
+  if (moved === undefined) return;
+  b.push(moved);
+  send('edit', { ops: [
+    { op: 'set', path: from, [from]: a },
+    { op: 'set', path: to, [to]: b },
+  ] });
 }
 
 /** 分层布局 + SVG。**故意不引 mermaid**：节点要能点选编辑，就得是我们自己画的。 */
@@ -651,18 +718,235 @@ function renderSessions() {
   const ul = $('#session-list'); ul.textContent = '';
   if (!S.sessions.length) ul.append(h('li', { class: 'hint' }, '还没有对话'));
   for (const s of S.sessions) {
+    const me = s.id === S.session;
+    const name = s.title || (s.parent ? '空分支' : '空对话');
     ul.append(h('li', {
-      class: (s.id === S.session ? 'on' : '') + (s.parent ? ' child' : ''),
+      class: (me ? 'on' : '') + (s.parent ? ' child' : ''),
       onclick: () => send('open', { session: s.id }),
     },
-      h('span', {}, s.title || (s.parent ? '空分支' : '空对话')),
-      h('span', { class: 'sub' }, s.parent ? '⑂ ' + s.id.slice(0, 6) : s.id.slice(0, 6))));
+      h('span', { class: 'nm' }, name),
+      h('span', { class: 'sub' }, s.parent ? '⑂ ' + s.id.slice(0, 6) : s.id.slice(0, 6)),
+      h('span', { class: 'ops' },
+        h('button', {
+          class: 'icon', title: '改名',
+          onclick: (e) => {
+            e.stopPropagation();
+            const t = prompt('这段对话叫什么？', name);
+            if (t !== null) send('session_rename', { session: s.id, title: t.trim() });
+          },
+        }, '✎'),
+        h('button', {
+          class: 'icon',
+          // 当前这条不给删：删了之后界面还挂在一个列表里已经没有的会话上。
+          title: me ? '当前对话不能删，先切到别的' : '从列表里删掉（对话内容留在库里，不会连累从它分出去的分支）',
+          disabled: me,
+          onclick: (e) => {
+            e.stopPropagation();
+            if (confirm(`把「${name}」从列表里删掉？内容仍在库里。`)) {
+              send('session_del', { session: s.id });
+            }
+          },
+        }, '✕'))));
   }
 }
 
 
 
-// ───────────────────────── 蒸馏审阅 ─────────────────────────
+function switchRight(which) {
+  document.body.classList.remove('no-right');
+  document.body.classList.add('want-right');
+  $$('#right-seg button').forEach(b => b.classList.toggle('on', b.dataset.rt === which));
+  $$('#right .pane').forEach(p => p.hidden = p.dataset.rp !== which);
+}
+
+// ───────────────────────── 编辑遮罩 ─────────────────────────
+//
+// 改文件、改场景、审阅蒸馏草稿，都开这一层。
+//
+// # 为什么是遮罩不是常驻的一栏
+//
+// 这三件事都是**编辑的时候才需要一下**的。给它们留一整栏，平时那栏是空的，
+// 真要用的时候又嫌窄（一篇 prompts.toml 在侧栏里根本读不下来）。
+// 遮罩铺得开、关掉就没了，而且三种编辑共用同一套外框 —— 标题、脏标记、
+// 关闭前拦一下未保存改动，只写一遍。
+//
+// `S.over` 是**唯一**的打开状态：{ kind, title, note, dirty(), save(), del(), body }。
+// 各种编辑只提供内容和动作，开关、脏检查、Esc、点空白关闭都在这里。
+
+function openOver(o) {
+  S.over = o;
+  $('#ov-title').textContent = o.title;
+  $('#ov-note').textContent = o.note || '';
+  $('#ov-note').hidden = !o.note;
+  const body = $('#ov-body'); body.textContent = '';
+  body.append(...o.body);
+  const acts = $('#ov-acts'); acts.textContent = '';
+  for (const a of o.acts || []) acts.append(a);
+  $('#over').hidden = false;
+  overDirty();
+  o.focus?.();
+}
+
+function overDirty() {
+  const o = S.over;
+  $('#ov-dirty').hidden = !o?.dirty?.();
+}
+
+function closeOver(force) {
+  const o = S.over;
+  if (!force && o?.dirty?.() && !confirm('有没保存的改动，确定关掉？')) return;
+  S.over = null;
+  $('#over').hidden = true;
+}
+
+/** 遮罩里的一个操作按钮。 */
+function act(label, fn, cls) {
+  return h('button', { class: cls || '', onclick: fn }, label);
+}
+
+// ── 文件编辑 ──
+
+/** 打开一个持久层文件或 config.json。`kind` 是 'memory' 或 'config'。 */
+function openEditor(kind, file) {
+  let text = '', note = '', deletable = false, title = file;
+  if (kind === 'config') {
+    // 用 boot 时存下的那份，不是 S.settings —— 后者会被左栏表单的草稿改动污染，
+    // 而这里明写着「盘上那份」，说了就得是真的。
+    text = JSON.stringify(S.saved ?? S.settings, null, 2);
+    note = '这是盘上那份 config.json。左栏表单里还没保存的改动不在里面。保存会重启当前会话（历史不丢）。';
+    title = 'config.json';
+  } else {
+    const f = S.memory.find(x => x.file === file);
+    if (!f) return;
+    text = f.text;
+    note = (MEM_NAME[file] ? MEM_NAME[file][1] : null) || (file.startsWith('draft-')
+      ? '蒸馏草稿，还没应用。审阅后把要留的内容并进对应的记忆文件。'
+      : '一条参考案例。命中对应场景时注入回答段。');
+    deletable = file.startsWith('cases/') || file.startsWith('draft-');
+    title = (MEM_NAME[file]?.[0] || file) + '　' + file;
+  }
+  const ta = h('textarea', { id: 'ov-text', spellcheck: 'false' });
+  ta.value = text;
+  ta.addEventListener('input', overDirty);
+  ta.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveEditor(); }
+  });
+  // 存元素本身，不是等会儿再按 id 去 DOM 里捞：这个 textarea 是我们刚建的，
+  // 再查一次只会多一处可能查不到的地方。
+  // orig 取**元素读回来的那份**，不是我们塞进去的那份：textarea 会把 CRLF
+  // 归一成 LF，直接拿原文比的话，一个 Windows 换行的文件刚打开就是「未保存」。
+  const st = { kind, file: file || 'config.json', orig: ta.value, el: ta };
+  S.editor = st;
+  openOver({
+    kind: 'file', title, note,
+    body: [ta],
+    dirty: () => ta.value !== st.orig,
+    acts: [
+      act('保存', saveEditor, 'primary'),
+      act('还原', () => { ta.value = st.orig; overDirty(); }),
+      deletable ? act('删除', () => {
+        if (!confirm(`删掉 ${st.file}？`)) return;
+        send('memory_del', { file: st.file });
+        closeOver(true);
+      }, 'danger') : null,
+    ].filter(Boolean),
+    // 光标放开头：focus 默认落到末尾，一打开就滚到文件底部，看到的是最没用的那段
+    focus: () => { ta.focus(); ta.setSelectionRange(0, 0); ta.scrollTop = 0; },
+  });
+  renderMemory();
+}
+
+function saveEditor() {
+  const st = S.editor; if (!st) return;
+  const text = st.el.value;
+  if (st.kind === 'config') {
+    let next;
+    try { next = JSON.parse(text); }
+    catch (err) { banner('bad', 'config.json 格式不对，没保存：' + err.message, 'ed'); return; }
+    send('settings_put', { settings: next });
+  } else {
+    send('memory_put', { file: st.file, text });
+  }
+  st.orig = text;
+  overDirty();
+  banner('info', `已保存 ${st.file}`, 'ed');
+}
+
+// ── 场景编辑 ──
+//
+// 场景是**独立的块**，不是 playbook.toml 里的一段文本。用户改一个场景的措辞时，
+// 该看到的是「这个场景什么时候触发、命中之后跟模型说什么」，不是一整份 TOML。
+
+function openScene(sc) {
+  const isNew = !sc;
+  const cur = sc || { id: '', label: '', when: '', guidance: '', tools: [] };
+  const orig = JSON.stringify(cur);
+  const f = (label, key, rows, hint) => {
+    const el = rows
+      ? h('textarea', { rows: String(rows), spellcheck: 'false' })
+      : h('input', { spellcheck: 'false' });
+    el.value = Array.isArray(cur[key]) ? cur[key].join(', ') : (cur[key] || '');
+    el.addEventListener('input', () => {
+      cur[key] = key === 'tools'
+        ? el.value.split(/[,，\s]+/).filter(Boolean)
+        : el.value;
+      overDirty();
+    });
+    return h('div', { class: 'field' },
+      h('label', {}, label), el, hint ? h('p', { class: 'hint' }, hint) : null);
+  };
+  openOver({
+    kind: 'scene',
+    title: isNew ? '新场景' : `场景 · ${cur.label || cur.id}`,
+    note: '判断段只看 id 和「什么时候」；命中之后注入回答段的是「跟模型说什么」。',
+    body: [
+      f('id', 'id', 0, isNew ? '英文小写，字母数字和 - _。定了就别改，历史事件里存的是它。' : null),
+      f('显示名', 'label'),
+      f('什么时候判成它', 'when', 2, '这一行会进判断段的场景目录。写得越具体，判得越准。'),
+      f('命中之后跟模型说什么', 'guidance', 8,
+        '措辞是给模型的建议与约束，不是给程序的指令。「建议先把这条链路讲通」是对的；「必须调用三次」不是。'),
+      f('额外暴露的工具', 'tools', 0, '逗号分隔。留空 = 只给默认工具集。名字必须是下面「工具」页里真有的。'),
+    ],
+    dirty: () => JSON.stringify(cur) !== orig,
+    acts: [
+      act('保存', () => {
+        if (!cur.id.trim()) return banner('bad', '场景要有 id', 'scene');
+        send('scene_put', { scene: cur });
+        closeOver(true);
+      }, 'primary'),
+      !isNew && cur.id !== 'none' ? act('删除', () => {
+        if (!confirm(`删掉场景 ${cur.label || cur.id}？`)) return;
+        send('scene_del', { scene: { id: cur.id } });
+        closeOver(true);
+      }, 'danger') : null,
+    ].filter(Boolean),
+  });
+}
+
+/** 下一轮的场景选择器。**多选** —— 判断段本来就可以一次判出好几个，
+ * 用户插手时没道理只准挑一个。勾中的每一个，它的 guidance 下一轮都会真的注入。 */
+function openScenePicker() {
+  if (!S.playbook.length) return;
+  const picked = new Set(S.scenes);
+  const list = h('div', { class: 'sc-pick' });
+  for (const sc of S.playbook) {
+    const cb = h('input', { type: 'checkbox' });
+    cb.checked = picked.has(sc.id);
+    cb.addEventListener('change', () => cb.checked ? picked.add(sc.id) : picked.delete(sc.id));
+    list.append(h('label', { class: 'sc-row' },
+      cb,
+      h('span', { class: 'n' }, sc.label || sc.id),
+      h('span', { class: 'w' }, sc.when)));
+  }
+  modal('下一轮的场景（可多选）', [
+    list,
+    h('p', { class: 'hint', style: 'margin-top:8px' },
+      '选中的场景，guidance 与参考案例下一轮会一起注入，工具取并集。'
+      + '一个都不选 = 交回给判断段自己判。最多注入 3 个。'),
+  ], () => send('scene', { to: [...picked] }), '用这些');
+}
+
+// ── 蒸馏审阅 ──
 //
 // 模型按目标文件名分节输出，这里逐节预览 / 修改 / 勾选，一次写回。
 // **不做成「给你个草稿路径，自己去改」** —— 判断哪一段属于哪个文件、
@@ -673,36 +957,36 @@ const DI_MODE = {
   append: ['追加', 'app', '接在文件末尾，原有内容不动'],
 };
 
-function renderDistill() {
-  const d = S.distill;
-  $$('#right-seg button').forEach(b => { if (b.dataset.rt === 'distill') b.hidden = !d; });
-  if (!d) return;
-  $('#di-path').textContent = d.path ? d.path.split(/[\\/]/).pop() : '';
-  $('#di-path').title = d.path || '';
-  $('#di-note').textContent = d.error
-    ? d.error
-    : '模型写的草稿，还没生效。改完把要留的勾上，一次写进对应文件。';
-  const box = $('#di-list'); box.textContent = '';
-  d.sections.forEach((s, i) => {
+function openDistill() {
+  const d = S.distill; if (!d) return;
+  const box = h('div', { id: 'di-list' });
+  for (const s of d.sections) {
     const [label, cls, why] = DI_MODE[s.mode] || DI_MODE.replace;
     const ta = h('textarea', { spellcheck: 'false' });
     ta.value = s.text;
     ta.addEventListener('input', () => { s.text = ta.value; });
-    const row = h('div', { class: 'dsec' + (s.on === false ? ' off' : '') });
     const cb = h('input', { type: 'checkbox' });
     cb.checked = s.on !== false;
+    const row = h('div', { class: 'dsec' + (s.on === false ? ' off' : '') });
     cb.addEventListener('change', () => {
       s.on = cb.checked;
       row.className = 'dsec' + (cb.checked ? '' : ' off');
     });
     row.append(
       h('label', { class: 'dsec-head' },
-        cb,
-        h('span', { class: 'f' }, s.file),
+        cb, h('span', { class: 'f' }, s.file),
         h('span', { class: 'tag ' + cls, title: why }, label)),
       ta);
     box.append(row);
-    void i;
+  }
+  openOver({
+    kind: 'distill',
+    title: '蒸馏草稿',
+    note: d.error || '模型写的草稿，还没生效。改完把要留的勾上，一次写进对应文件。'
+      + (d.path ? `　全文：${d.path}` : ''),
+    body: [box],
+    dirty: () => false,
+    acts: [act('写入选中的', applyDistill, 'primary')],
   });
 }
 
@@ -711,86 +995,6 @@ function applyDistill() {
   const picked = d.sections.filter(s => s.on !== false && s.text.trim());
   if (!picked.length) return banner('bad', '一节都没勾，没有可写的', 'distill');
   send('distill_apply', { sections: picked.map(s => ({ file: s.file, mode: s.mode, text: s.text })) });
-}
-
-// ───────────────────────── 右栏：编辑区 ─────────────────────────
-//
-// 配置和记忆文件都是**整篇文本**。原来塞在左栏一个三行小框里，读也读不下、
-// 改也改不动。移到右栏之后它占满整列高度，才是能真的动手的尺寸。
-
-function switchRight(which) {
-  document.body.classList.remove('no-right');
-  document.body.classList.add('want-right');
-  $$('#right-seg button').forEach(b => b.classList.toggle('on', b.dataset.rt === which));
-  $$('#right .pane').forEach(p => p.hidden = p.dataset.rp !== which);
-}
-
-/** 打开一个文件到右栏。`kind` 是 'memory' 或 'config'。 */
-function openEditor(kind, file) {
-  let text = '', note = '', deletable = false;
-  if (kind === 'config') {
-    // 用 boot 时存下的那份，不是 S.settings —— 后者会被左栏表单的草稿改动污染，
-    // 而这里明写着「盘上那份」，说了就得是真的。
-    text = JSON.stringify(S.saved ?? S.settings, null, 2);
-    note = '这是盘上那份 config.json。左栏表单里还没保存的改动不在里面。保存会重启当前会话（历史不丢）。';
-  } else {
-    const f = S.memory.find(x => x.file === file);
-    if (!f) return;
-    text = f.text;
-    note = MEM_DESC[file] || (file.startsWith('draft-')
-      ? '蒸馏草稿，还没应用。审阅后把要留的内容并进对应的记忆文件。'
-      : '一条参考案例。命中对应场景时注入回答段。');
-    deletable = file.startsWith('cases/') || file.startsWith('draft-');
-  }
-  S.editor = { kind, file: file || 'config.json', orig: text, note, deletable };
-  $('#ed-text').value = text;
-  renderEditor();
-  switchRight('edit');
-  $('#ed-text').focus();
-}
-
-function renderEditor() {
-  const e = S.editor;
-  $$('#right-seg button').forEach(b => { if (b.dataset.rt === 'edit') b.hidden = !e; });
-  // 关掉编辑区时别把用户正在看的蒸馏审阅一起顶掉
-  if (!e) {
-    if (!$('.pane[data-rp="distill"]').hidden) return;
-    switchRight('infer');
-    return;
-  }
-  $('#ed-name').textContent = e.file;
-  $('#ed-note').textContent = e.note;
-  $('#ed-del').hidden = !e.deletable;
-  edDirty();
-  renderMemory();
-}
-
-function edDirty() {
-  const e = S.editor;
-  $('#ed-dirty').hidden = !e || $('#ed-text').value === e.orig;
-}
-
-function saveEditor() {
-  const e = S.editor; if (!e) return;
-  const text = $('#ed-text').value;
-  if (e.kind === 'config') {
-    let next;
-    try { next = JSON.parse(text); }
-    catch (err) { banner('bad', 'config.json 格式不对，没保存：' + err.message, 'ed'); return; }
-    send('settings_put', { settings: next });
-  } else {
-    send('memory_put', { file: e.file, text });
-  }
-  e.orig = text;
-  edDirty();
-  banner('info', `已保存 ${e.file}`, 'ed');
-}
-
-function closeEditor() {
-  if (S.editor && $('#ed-text').value !== S.editor.orig
-      && !confirm('有没保存的改动，确定关掉？')) return;
-  S.editor = null;
-  renderEditor();
 }
 
 // ───────────────────────── 目录浏览器 ─────────────────────────
@@ -980,26 +1184,10 @@ function renderConfig() {
     ]));
   }
 
-  const w = draft.web;
-  const fireKey = h('input', { type: 'password', placeholder: S.keys.firecrawl?.has ? '已有密钥（留空保持）' : 'Firecrawl 密钥' });
-  box.append(block('联网后端', w.fetch, [
-    sel(w, 'fetch', '抓取', ['crawl4ai', 'crawl4ai_cli', 'firecrawl', 'http', 'none']),
-    txt(w, 'fetch_base', '抓取服务地址'),
-    sel(w, 'search', '搜索', ['searxng', 'firecrawl', 'none']),
-    txt(w, 'search_base', 'SearXNG 地址'),
-    fireKey,
-    h('div', { class: 'acts' },
-      h('button', { onclick: () => { if (fireKey.value.trim()) send('secret_put', { provider: 'firecrawl', key: fireKey.value }); fireKey.value = ''; } }, '存入 Firecrawl 密钥'),
-      h('button', { onclick: () => send('secret_put', { provider: 'firecrawl', key: '' }) }, '清除')),
-    h('p', { class: 'hint' }, 'crawl4ai 与 SearXNG 都是本地自建、不要密钥。firecrawl 要。'),
-    h('div', { class: 'acts' }, h('button', { onclick: () => send('probe_web') }, '探活')),
-    h('pre', { class: 'probe-out hint', style: 'white-space:pre-wrap;margin:6px 0 0' }),
-  ]));
-
   const t = draft.tools;
-  box.append(block('工具权限与上限', t.net ? '联网开' : '联网关', [
+  box.append(block('工具权限与上限', t.net ? '抓取开' : '抓取关', [
     h('div', { class: 'kv' },
-      h('b', {}, '联网'),
+      h('b', {}, '网页抓取'),
       h('input', { type: 'checkbox', checked: t.net, style: 'width:auto', onchange: e => t.net = e.target.checked })),
     pathList(t, 'roots', '可读目录 / 文件'),
     lines(t, 'allow_hosts', '可抓域名（后缀匹配，* 表示不限）'),
@@ -1031,34 +1219,72 @@ function renderConfigFrom(draft) {
   renderConfig();
 }
 
-const MEM_DESC = {
-  'project.md': '项目概述与进展。新对话靠它快速入手。',
-  'preferences.md': '你的合作偏好。',
-  'knowledge.md': '你在各知识域的掌握程度，决定模型是提问还是讲解。',
-  'playbook.toml': '易犯错场景与对应指令 —— 也就是蒸馏出来的东西最终落到的地方。',
-  'prompts.toml': '所有注入的提示词模板：角色、用户字段约束、折叠指令、两个 mode 的一句话、图的形状词表。',
+/** 文件名 → [给人看的名字, 一句话说明]。
+ *
+ * 直接列 `prompts.toml` 这种文件名，等于要求用户先知道每个文件装什么。
+ * 列「系统提示词」他一眼就知道该点哪个。文件名仍然显示在旁边 ——
+ * 它是真实存在的东西，藏起来只会让「我自己去改这个文件」变难。 */
+const MEM_NAME = {
+  'prompts.toml': ['系统提示词', '注入模型的全部提示词：角色定位、用户字段约束、折叠指令、两个 mode 各自的说明与工具、推断图的形状词表。'],
+  'project.md': ['项目记忆', '项目概述、阶段目标、进展（成了的和没成的）。新对话靠它快速入手。'],
+  'preferences.md': ['合作偏好', '你希望它怎么跟你配合：讲多细、怎么提问、什么时候该打断你。'],
+  'knowledge.md': ['知识评估', '你在各知识域的掌握程度。它决定模型是直接问你，还是先把机制讲通。'],
+  'playbook.toml': ['场景库（原文）', '下面那些场景块的底稿。一般改上面的块就够了，除非你要整份重排。'],
 };
 
 function renderMemory() {
   const box = $('#memory-list'); box.textContent = '';
-  const openFile = S.editor?.kind === 'memory' ? S.editor.file : null;
-  for (const f of S.memory) {
+  const openFile = S.over?.kind === 'file' ? S.editor?.file : null;
+  const named = [];
+  const rest = [];
+  for (const f of S.memory) (MEM_NAME[f.file] ? named : rest).push(f);
+  // 有名字的按 MEM_NAME 的顺序排：系统提示词在最前，它最常被改。
+  named.sort((a, b) => Object.keys(MEM_NAME).indexOf(a.file) - Object.keys(MEM_NAME).indexOf(b.file));
+
+  for (const f of named.concat(rest)) {
     const isDraft = f.file.startsWith('draft-');
-    // 一行一个入口，正文去右栏改。侧栏里塞不下一篇 prompts.toml。
+    const isCase = f.file.startsWith('cases/');
+    const name = MEM_NAME[f.file]?.[0]
+      || (isDraft ? '蒸馏草稿' : isCase ? '参考案例' : f.file);
+    // 一行一个入口，正文开遮罩改。侧栏里塞不下一篇 prompts.toml。
     box.append(h('div', {
       class: 'frow file' + (f.file === openFile ? ' on' : ''),
       onclick: () => openEditor('memory', f.file),
-      title: MEM_DESC[f.file] || f.file,
+      title: (MEM_NAME[f.file]?.[1] || '') + '　' + f.file,
     },
-      h('span', { class: 'p' }, f.file),
-      isDraft ? h('span', { class: 'm' }, '待审阅') : null,
+      h('span', { class: 'p' }, name),
+      h('span', { class: 'm mono' }, f.file),
+      isDraft ? h('span', { class: 'm warn' }, '待审阅') : null,
       h('span', { class: 'm' }, `${f.text.split('\n').length} 行`)));
   }
+  renderScenes();
+}
+
+/** 场景库：**一个场景一个块**，点开就改它自己的触发条件和 guidance。
+ *
+ * 用户要调的是「什么时候该提醒我固定种子」，不是「playbook.toml 第 47 行」。
+ * 整份 TOML 仍然在上面那个「场景库（原文）」里，要整份重排还是走那条。 */
+function renderScenes() {
+  const box = $('#scene-list'); if (!box) return;
+  box.textContent = '';
+  const live = new Set(S.scenes);
+  for (const sc of S.playbook) {
+    box.append(h('div', {
+      class: 'frow file' + (live.has(sc.id) ? ' on' : ''),
+      title: sc.when,
+      onclick: () => openScene(sc),
+    },
+      h('span', { class: 'p' }, sc.label || sc.id),
+      h('span', { class: 'm mono' }, sc.id),
+      live.has(sc.id) ? h('span', { class: 'm' }, '本轮命中') : null));
+  }
   box.append(h('button', {
-    class: 'wide', style: 'margin-top:8px',
-    onclick: () => send('distill'),
-    title: '把这次会话的结论蒸馏成草稿，在右栏逐节预览、改完再一键写入。只有你点了写入才会动持久层。',
-  }, '⚗ 一键蒸馏'));
+    class: 'wide', style: 'margin-top:6px',
+    onclick: () => openScene(null),
+  }, '＋ 新场景'));
+  $('#scene-note').textContent =
+    '以上提示词与场景多数是模型蒸馏出来的，随时可以点开查看和修改，改完下一轮就生效。'
+    + (S.defaultTools.length ? `　每个场景都能用的工具：${S.defaultTools.join('、')}。` : '');
 }
 
 function renderTools() {
@@ -1067,18 +1293,14 @@ function renderTools() {
   for (const t of S.tools) {
     box.append(h('div', { class: 'kv' }, h('b', { class: 'mono' }, t)));
   }
-  box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '联网后端'));
-  box.append(h('div', { class: 'kv' }, h('b', {}, '当前'), S.web));
-  box.append(h('button', { style: 'margin-top:6px', onclick: () => send('probe_web') }, '探活'));
-  box.append(h('pre', { class: 'probe-out hint', style: 'white-space:pre-wrap;margin:6px 0 0' }));
   box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '本会话用量'));
   box.append(h('div', { class: 'hint', style: 'font-family:var(--mono);font-size:11px' }, S.metrics || '（还没调用过）'));
   box.append(h('p', { class: 'hint', style: 'margin-top:12px' },
-    'subagent 目前只用在上下文折叠上。检索型 subagent 还没接（判断段的 retrieve 恒为空）。'));
+    'subagent 目前用在上下文折叠和一键蒸馏上。检索型 subagent 还没接 —— 要查资料，回答段自己调 fs_* / web_*。'));
 }
 
 function renderAll() {
-  renderTop(); renderBanner(); renderStream(); renderRight(); renderEditor(); renderDistill();
+  renderTop(); renderBanner(); renderStream(); renderRight();
   renderSessions(); renderConfig(); renderMemory(); renderTools(); renderAsk();
   const roots = S.settings?.tools?.roots || [];
   $('#root-path').value = roots[0] || '.';
@@ -1162,37 +1384,20 @@ function boot() {
   $$('#left-tabs button').forEach(b => b.onclick = () => openTab(b.dataset.tab));
 
   $$('#mode-seg button').forEach(b => b.onclick = () => send('mode', { to: b.dataset.mode }));
-  $('#phase-chip').onclick = () =>
-    send('phase', { to: S.phase === 'handoff' ? 'designing' : 'handoff' });
-  $('#scene-chip').onclick = () => {
-    const select = h('select');
-    for (const scene of S.scenes || []) select.append(h('option', { value: scene.id, selected: scene.id === S.scene }, scene.label || scene.id));
-    if (!select.children.length) return;
-    modal('下一轮场景', [select], () => send('scene', { to: select.value }));
+  $('#scene-chip').onclick = openScenePicker;
+  $('#distill-btn').onclick = () => {
+    banner('info', '正在蒸馏这段会话…完成后会弹出草稿供你逐节审阅', 'distill-run');
+    send('distill');
   };
   $('#new-chat').onclick = () => send('open', { session: '' });
   $('#graph-refresh').onclick = () => send('snap');
   $('#stop').onclick = () => { if (S.turn !== null) send('interrupt', { turn: S.turn }); };
 
   $$('#right-seg button').forEach(b => b.onclick = () => switchRight(b.dataset.rt));
-  $('#ed-save').onclick = saveEditor;
-  $('#di-apply').onclick = applyDistill;
-  $('#di-close').onclick = () => { S.distill = null; renderDistill(); switchRight('infer'); };
-  $('#ed-close').onclick = closeEditor;
-  $('#ed-revert').onclick = () => {
-    if (!S.editor) return;
-    $('#ed-text').value = S.editor.orig; edDirty();
-  };
-  $('#ed-del').onclick = () => {
-    const e = S.editor; if (!e || e.kind !== 'memory') return;
-    if (!confirm(`删掉 ${e.file}？`)) return;
-    send('memory_del', { file: e.file });
-    S.editor = null; renderEditor();
-  };
-  $('#ed-text').addEventListener('input', edDirty);
-  $('#ed-text').addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveEditor(); }
-  });
+  $('#ov-close').onclick = () => closeOver();
+  // 点遮罩的空白处关掉。判定用 e.target 是不是遮罩本身 —— 面板里的点击会冒泡上来，
+  // 不这么判的话在里面选个字都会把面板关掉。
+  $('#over').addEventListener('click', (e) => { if (e.target.id === 'over') closeOver(); });
   $('#root-browse').onclick = () => openBrowser($('#root-path').value, (p) => {
     $('#root-path').value = p;
   });
@@ -1239,7 +1444,8 @@ function boot() {
   addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFind(); }
     if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); $('#left-hide').click(); }
-    if (e.key === 'Escape' && !$('#modal').hidden) $('#modal').hidden = true;
+    if (e.key === 'Escape' && !$('#modal').hidden) { $('#modal').hidden = true; return; }
+    if (e.key === 'Escape' && !$('#over').hidden) closeOver();
   });
 
   connect();

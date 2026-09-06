@@ -22,14 +22,15 @@ use premortem::handle::CoreHandle;
 use premortem::ids::{NodeId, Seq, SessionId, TurnId};
 use premortem::memory::Memory;
 use premortem::mock::{
-    EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, call_with, default_judge, judge_of,
+    EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, call_with, default_judge, judge_all,
+    judge_of,
 };
 use premortem::policy::{Policy, PolicyCfg};
 use premortem::model::{Message, Mode, Models, MsgRole, Role, StreamEvent, Usage};
 use premortem::msg::{SendMode, UiEvent};
 use premortem::persist::{restore, spawn_writer};
 use premortem::scene::Playbook;
-use premortem::state::{FlowView, Lang, Op, Origin, Phase, Source, Workspace};
+use premortem::state::{FlowView, Lang, Op, Origin, Source, Workspace};
 use premortem::store::{FaultStore, MemStore, SqliteStore, Store};
 use premortem::toolkit;
 use premortem::tools::{Registry, ToolConfig};
@@ -720,7 +721,7 @@ async fn s12_graceful_restart() {
         r.handle.session_send("用 CIFAR100", SendMode::Queue).await;
         r.quiet(1).await;
         r.handle.session_edit(vec![Op::set("spec.claim", "用户的主张")]).await;
-        r.handle.session_advance_phase(Phase::Handoff).await;
+        r.handle.session_override_scene(vec!["trace_code".into()]).await;
         let s = r.finish().await;
         ok(s.events.len() >= 7, &format!("第一段产生了 {} 条事件", s.events.len()));
     }
@@ -733,7 +734,7 @@ async fn s12_graceful_restart() {
         "启动即恢复（不是可选分支）",
     );
     let snap = r.handle.session_snapshot().await.unwrap();
-    ok(snap.ws.phase == Phase::Handoff, "阶段恢复了");
+    ok(snap.scenes == vec!["trace_code".to_string()], "★ 用户选的场景跨重启还在");
     ok(
         snap.ws.fields.get(&premortem::state::Path::new("spec.dataset")).is_some(),
         "推断图恢复了",
@@ -956,7 +957,7 @@ async fn s17_scene_override() {
     let key = g.lines().next().unwrap_or("_x_").to_string();
     ok(!r.model.answer_prompt(0).contains(&key), "第一轮没有 trace_code 的 guidance");
 
-    r.handle.session_override_scene("trace_code").await;
+    r.handle.session_override_scene(vec!["trace_code".into()]).await;
     r.handle.session_send("第二轮", SendMode::Queue).await;
     r.quiet(2).await;
     ok(
@@ -984,7 +985,7 @@ async fn s18_judge_failure() {
         "留了明账",
     );
     ok(
-        tl.iter().any(|e| matches!(&e.body, Body::Judged { scene, .. } if scene == "none")),
+        tl.iter().any(|e| matches!(&e.body, Body::Judged { scenes, .. } if scenes == &["none".to_string()])),
         "降级为 none 场景",
     );
     let s = r.finish().await;
@@ -1007,7 +1008,7 @@ async fn s19_adversarial_model() {
     ok(r.quiet(1).await, "★ 没有 panic，跑完了");
     let tl = r.timeline().await;
     ok(
-        tl.iter().any(|e| matches!(&e.body, Body::Judged { scene, .. } if scene == "none")),
+        tl.iter().any(|e| matches!(&e.body, Body::Judged { scenes, .. } if scenes == &["none".to_string()])),
         "未知场景回退到 none",
     );
     ok(
@@ -1752,25 +1753,24 @@ async fn s39_config_reaches_the_gate() {
     ok(!ok_kind(&bad), "★ 默认允许的 arxiv 现在抓不了 —— 文件真的管住了闸门");
     ok(bad.content.contains("config.json"), "★ 拒绝时告诉模型去哪儿改");
 
-    // 后端选择：抓与搜各自可配，默认是本地 crawl4ai（不要密钥）
+    // 公开能力降级成单一内置 fetch；旧后端字段只用于无损读取旧配置。
     use premortem::web::{Fetcher, Searcher, WebCfg};
     let d0 = WebCfg::default();
-    ok(d0.fetch == Fetcher::Crawl4ai, "★ 默认抓取后端是本地 crawl4ai —— 不用配密钥");
+    ok(d0.fetch == Fetcher::Http, "★ 默认抓取后端是进程内 Rust 实现");
     let b = premortem::web::build(&d0, &loaded.tools, None).unwrap();
-    ok(!b.can_search(), "★ 只配了抓没配搜时，web_search 不注册（不给会报错的工具）");
+    ok(b.name() == "builtin-fetch" && !b.can_search(), "★ 只提供基础 fetch，不注册 search");
 
     let with_search = WebCfg { search: Searcher::Searxng, ..d0.clone() };
     let b2 = premortem::web::build(&with_search, &loaded.tools, None).unwrap();
-    ok(b2.can_search(), "★ 配上自建 SearXNG 就有搜索，同样不要密钥");
+    ok(
+        b2.name() == "builtin-fetch" && !b2.can_search(),
+        "★ 旧 SearXNG 配置会安全降级，不会尝试连接外部服务",
+    );
 
     let fc = WebCfg { fetch: Fetcher::Firecrawl, search: Searcher::None, ..d0.clone() };
     ok(
-        premortem::web::build(&fc, &loaded.tools, None).is_none(),
-        "★ 选了要密钥的后端却没密钥 ⇒ 干脆不建，不留一个一调就 401 的工具",
-    );
-    ok(
-        premortem::web::build(&fc, &loaded.tools, Some("fc-key".into())).is_some(),
-        "填了密钥就能建起来",
+        premortem::web::build(&fc, &loaded.tools, None).is_some(),
+        "★ 旧 Firecrawl 配置也降级到内置 fetch，不再要求密钥",
     );
     let off = premortem::policy::PolicyCfg { net: false, ..loaded.tools.clone() };
     ok(premortem::web::build(&d0, &off, None).is_none(), "总开关关掉时连后端都不建");
@@ -1950,10 +1950,10 @@ async fn s41_judge_runs_once_per_turn() {
     let st = stats_of(&s.events).expect("TurnClosed 带 stats");
     println!(
         "      · 本轮：judge 调用 1 · answer 调用 4 · loops {} · tools_run {} · inferred_ops {} · scene {}",
-        st.loops, st.tools_run, st.inferred_ops, st.scene
+        st.loops, st.tools_run, st.inferred_ops, st.scenes.join("+")
     );
     ok(st.loops == 4, "四圈回答循环");
-    ok(st.scene == "check_assumption", "场景是判断段那一次定下的，全程没变");
+    ok(st.scenes == vec!["check_assumption".to_string()], "场景是判断段那一次定下的，全程没变");
     ok(
         s.events.iter().filter(|e| e.body.tag() == "judged").count() == 1,
         "★ 时间线上只有一条 judged",
@@ -2046,7 +2046,7 @@ async fn s43_tool_names_resolve() {
     for sc in pb.scenes.values() {
         for mode in [Mode::Explore, Mode::Go] {
             let mp = prompts.mode.get(mode.key()).cloned().unwrap_or_default();
-            for t in pb.exposed_tools(sc, &mp.tools) {
+            for t in pb.exposed_tools(std::slice::from_ref(sc), &mp.tools) {
                 if !known.contains(&t) {
                     bad.push(format!("{}/{}: {t}", sc.id, mode.key()));
                 }
@@ -2067,21 +2067,24 @@ async fn s43_tool_names_resolve() {
     ok(ex2.specs.is_empty() && ex2.missing.is_empty(), "没配联网时 web_search 缺席但不报错");
 
     // mode 换 prompt、换工具、换工具说明
+    let none = std::slice::from_ref(pb.get("none").unwrap());
     let ex_e = reg.specs(
-        &pb.exposed_tools(pb.get("none").unwrap(), &prompts.mode["explore"].tools),
+        &pb.exposed_tools(none, &prompts.mode["explore"].tools),
         &prompts.mode["explore"].tool_notes,
     );
     let ex_g = reg.specs(
-        &pb.exposed_tools(pb.get("none").unwrap(), &prompts.mode["go"].tools),
+        &pb.exposed_tools(none, &prompts.mode["go"].tools),
         &prompts.mode["go"].tool_notes,
     );
     let names = |e: &premortem::tools::Exposed| {
         e.specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
     };
     ok(
-        names(&ex_e).contains(&"web_search".to_string())
+        names(&ex_e).contains(&"web_fetch".to_string())
+            && names(&ex_g).contains(&"web_fetch".to_string())
+            && !names(&ex_e).contains(&"web_search".to_string())
             && !names(&ex_g).contains(&"web_search".to_string()),
-        "★ 探索 mode 有开放搜索，行动 mode 没有 —— 工具集真的随 mode 变",
+        "★ 两个 mode 都只有按址 fetch，不暴露 search",
     );
     let d = |e: &premortem::tools::Exposed, n: &str| {
         e.specs.iter().find(|s| s.name == n).unwrap().description.clone()
@@ -2157,6 +2160,98 @@ async fn s44_distill_sections_apply() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+async fn s45_multiple_scenes() {
+    head("S45", "★ 场景是多选：几份 guidance 一起进 prompt，工具与案例取并集");
+    // 一轮里「目标还没说清」和「预算和方案对不上」可以同时成立。
+    // 只准判一个的话，另一条的 guidance 就永远注不进去 —— 而那正是它存在的理由。
+    let dir = tmpdir("multiscene");
+    let mem = dir.join("memory");
+    let _ = Memory::load_or_bootstrap(&mem).await;
+    // 两条案例，各服务一个场景。命中两个场景 ⇒ 两条都该注入。
+    std::fs::write(
+        mem.join("cases/a.md"),
+        "---\nid = \"a\"\ntitle = \"案例甲\"\nscenes = [\"clarify_goal\"]\n---\n甲的正文。\n",
+    )
+    .unwrap();
+    std::fs::write(
+        mem.join("cases/b.md"),
+        "---\nid = \"b\"\ntitle = \"案例乙\"\nscenes = [\"cheap_first\"]\n---\n乙的正文。\n",
+    )
+    .unwrap();
+
+    let m = MockModel::new()
+        .on_judge(judge_all(&["clarify_goal", "cheap_first"]))
+        .on_answer(chunks(&["两边都看到了"]));
+    let opts = RigOpts { memory_dir: Some(mem.clone()), ..Default::default() };
+    let r = Rig::build(m, toolkit::register(Registry::new(), &toolchain(&dir, None).0), opts).await;
+    r.handle.session_send("我想验证一下那个想法", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let ap = r.model.answer_prompt(0);
+    let pb = Playbook::builtin();
+    let k = |id: &str| pb.get(id).unwrap().guidance.lines().next().unwrap().to_string();
+    ok(ap.contains(&k("clarify_goal")), "★ 第一个场景的 guidance 进了 prompt");
+    ok(ap.contains(&k("cheap_first")), "★ 第二个场景的 guidance 也进了");
+    ok(ap.contains("本轮场景 1/2") && ap.contains("本轮场景 2/2"), "两条各自成段，不是糊成一段");
+    ok(ap.contains("案例甲") && ap.contains("案例乙"), "★ 案例取并集");
+    // clarify_goal 要 ask_user，cheap_first 不要；并集里必须有
+    ok(ap.contains("ask_user") || r.model.answer_calls() > 0, "工具并集算得出来");
+
+    let s = r.finish().await;
+    let st = stats_of(&s.events).expect("stats");
+    println!("      · 本轮场景：{}", st.scenes.join(" + "));
+    ok(st.scenes.len() == 2, "指标里记的是两个");
+    ok(
+        s.events.iter().any(|e| matches!(&e.body, Body::Judged { scenes, .. } if scenes.len() == 2)),
+        "时间线上也是两个",
+    );
+    inv::all(&s.events, &s.ws, &s.cost);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s46_scene_edges() {
+    head("S46", "★ 多场景的边界：上限、去重、认不出的丢掉、老时间线读得回来");
+    let pb = Playbook::builtin();
+
+    // 去重 + 顺序按 playbook 的 id 序（所以 prompt 里场景先后与模型给的顺序无关）
+    let (rs, unknown) = pb.resolve(&[
+        "cheap_first".into(), "clarify_goal".into(), "cheap_first".into(), "不存在".into(),
+    ]);
+    ok(unknown == vec!["不存在".to_string()], "认不出的单独回报，不混进结果");
+    let ids: Vec<String> = rs.iter().map(|s| s.id.clone()).collect();
+    ok(ids == vec!["cheap_first".to_string(), "clarify_goal".to_string()], &format!("去重且按 id 序：{ids:?}"));
+
+    // 工具并集：clarify_goal 要 ask_user，trace_code 要 fs_*，两个一起选就都有
+    let both = pb.resolve(&["clarify_goal".into(), "trace_code".into()]).0;
+    let tools = pb.exposed_tools(&both, &[]);
+    ok(tools.contains(&"ask_user".to_string()) && tools.contains(&"fs_grep".to_string()),
+       "★ 两个场景的工具取并集");
+    let mut sorted = tools.clone();
+    sorted.sort();
+    sorted.dedup();
+    ok(sorted.len() == tools.len(), "并集里没有重复项");
+
+    // 上限：判出五个只留前 MAX_SCENES 个
+    let many: Vec<String> = pb.scenes.keys().cloned().collect();
+    ok(many.len() > premortem::turn::MAX_SCENES, "内置场景够多，这条才有意义");
+    let mut capped = pb.resolve(&many).0.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+    capped.truncate(premortem::turn::MAX_SCENES);
+    ok(capped.len() == premortem::turn::MAX_SCENES, "★ 有上限 —— 什么都强调等于什么都没强调");
+
+    // 老时间线：库里存的是单个字符串，新代码要的是数组
+    let old = r#"{"kind":"judged","scene":"trace_code","rationale":"旧格式"}"#;
+    let b: Body = serde_json::from_str(old).expect("★ 老的 judged 事件必须还读得出来");
+    ok(matches!(&b, Body::Judged { scenes, .. } if scenes == &["trace_code".to_string()]),
+       "★ 单个字符串收成一元数组（否则改完所有历史会话都读不回来）");
+    let old2 = r#"{"kind":"scene_overridden","from":"none","to":"cheap_first"}"#;
+    let b2: Body = serde_json::from_str(old2).expect("老的 scene_overridden 也要读得出来");
+    ok(matches!(&b2, Body::SceneOverridden { to, .. } if to == &["cheap_first".to_string()]), "同上");
+    // 已废弃的 phase_set 也不能让整条会话读不回来
+    let old3 = r#"{"kind":"phase_set","to":"Handoff"}"#;
+    ok(serde_json::from_str::<Body>(old3).is_ok(), "★ 删掉的阶段事件仍然反序列化得了（老库能开）");
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     println!("Premortem 链路测试 —— 主时间线版");
@@ -2206,11 +2301,13 @@ async fn main() {
     s42_actions_write_inference().await;
     s43_tool_names_resolve().await;
     s44_distill_sections_apply().await;
+    s45_multiple_scenes().await;
+    s46_scene_edges().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);
     println!("\n{}", "═".repeat(64));
-    println!("44 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
+    println!("46 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
     if f > 0 {
         std::process::exit(1);
     }

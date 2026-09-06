@@ -234,10 +234,14 @@ fn judge_tool_spec() -> ToolSpec {
         schema: json!({
             "type": "object",
             "properties": {
-                "scene": { "type": "string", "description": "场景目录里的 id；都不匹配就填 none" },
-                "rationale": { "type": "string", "description": "为什么判成这个场景，一两句" }
+                "scenes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "命中的场景 id，来自场景目录。可以多个 ——                                     「目标还没说清」和「预算和方案对不上」经常同时成立。                                    最多 3 个，按重要性排序。一个都不匹配就填 [\"none\"]"
+                },
+                "rationale": { "type": "string", "description": "为什么判成这些场景，一两句" }
             },
-            "required": ["scene", "rationale"]
+            "required": ["scenes", "rationale"]
         }),
     }
 }
@@ -407,9 +411,18 @@ fn parse_judge(api: Api, v: &Value) -> Result<JudgeOut, ModelError> {
         }
     };
 
-    let scene = input["scene"].as_str().unwrap_or("none").to_string();
+    // 收数组，也收单个字符串 —— 模型偶尔会不看 schema 直接给一个 id，
+    // 为此判整轮失败不划算。
+    let scenes: Vec<String> = match &input["scenes"] {
+        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Value::String(s) => vec![s.clone()],
+        _ => match input["scene"].as_str() {
+            Some(s) => vec![s.to_string()],
+            None => vec!["none".to_string()],
+        },
+    };
     let rationale = input["rationale"].as_str().unwrap_or("").to_string();
-    Ok(JudgeOut { scene, rationale, usage })
+    Ok(JudgeOut { scenes, rationale, usage })
 }
 
 // ───────────────────────── SSE ─────────────────────────

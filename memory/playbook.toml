@@ -10,7 +10,6 @@ default_tools = [
     "fs_grep",
     "fs_find",
     "repo_tree",
-    "web_search",
     "web_fetch",
 ]
 
@@ -63,9 +62,8 @@ tools = []
 id = "teach_background"
 label = "补充领域背景"
 when = "用户储备记录显示这个知识域他明确没有储备，或者他自陈不熟"
-guidance = "先把机制讲通，再把判断交回给用户。讲解要落到他这个仓库/这个实验上，不要泛泛介绍概念。可以调用工具查询领域相关论文。"
-tools = ["web_search",
-    "web_fetch",
+guidance = "先把机制讲通，再把判断交回给用户。讲解要落到他这个仓库/这个实验上，不要泛泛介绍概念。如果已有论文网址，可以调用 web_fetch 读取正文。"
+tools = ["web_fetch",
     "record_graph",
     "record_note",]
 
@@ -81,6 +79,5 @@ tools = [
     "repo_tree",
     "record_graph",
     "record_note",
-    "web_search",
     "web_fetch",
 ]

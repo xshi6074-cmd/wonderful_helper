@@ -27,7 +27,7 @@ use crate::event::{Body, Event};
 use crate::ids::{Seq, SessionId, TaskId, TurnId};
 use crate::model::{Call, Message, Mode, Role, Usage};
 use crate::scene::SceneId;
-use crate::state::{Op, Path, Phase, Workspace};
+use crate::state::{Op, Path, Workspace};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -62,8 +62,9 @@ pub struct Snap {
     pub session: SessionId,
     pub seq: Seq,
     pub ws: Workspace,
-    /// 当前场景。**派生自时间线最近一条 `Judged` / `SceneOverridden`**，不存在 Workspace 里。
-    pub scene: Option<SceneId>,
+    /// 当前这一组场景。**派生自时间线最近一条 `Judged` / `SceneOverridden`**，
+    /// 不存在 Workspace 里。空 = 这条会话还没判过。
+    pub scenes: Vec<SceneId>,
     /// 还没被回答的提问。恢复后 UI 要把它们重新画出来。
     pub open_questions: Vec<OpenQuestion>,
     pub turn: Option<TurnId>,
@@ -117,7 +118,8 @@ pub struct TurnView {
     /// 用户点过「换成这个场景」⇒ 本轮以它为准。Core 只在本轮第一次取视图时给出。
     ///
     /// 换场景不只是改一个标签：新场景的 guidance 与案例要真的注入进去。
-    pub scene_override: Option<SceneId>,
+    /// 用户手动指定的一组场景。`None` = 没指定过（不是「指定成空」）。
+    pub scene_override: Option<Vec<SceneId>>,
 }
 
 /// 检查点上取回的插话情况。
@@ -152,7 +154,7 @@ impl Injected {
 #[derive(Debug, Clone)]
 pub enum Emit {
     /// 判断段的结论。它不进 prompt：它**决定了拼什么**。
-    Judged { scene: SceneId, rationale: String },
+    Judged { scenes: Vec<SceneId>, rationale: String },
     /// 助手正文。
     Wrote { text: String, interrupted: bool },
     /// 助手发起工具调用。Core 记下 `call_id → seq` 以便后面的返回能连上。
@@ -225,7 +227,9 @@ pub struct TurnStats {
     pub answers: u32,
     pub asked_user: u32,
     pub compacted: u32,
-    pub scene: String,
+    /// 本轮判成的场景，可能不止一个。
+    pub scenes: Vec<String>,
+    /// 判断段给了认不出的 id（已忽略）。
     pub scene_unknown: bool,
     pub scene_overridden: bool,
     pub tools_run: u32,
@@ -259,9 +263,9 @@ pub enum CoreMsg {
         reply: tokio::sync::oneshot::Sender<Option<Ack>>,
     },
     /// 阶段闸门。**只从 UI 来。**
-    AdvancePhase { to: Phase },
+
     /// 用户一键更换本轮场景。下一轮以它为准并注入对应的 guidance 与案例。
-    OverrideScene { to: SceneId },
+    OverrideScene { to: Vec<SceneId> },
     /// 一键蒸馏：把这段会话沉淀进持久层。**用户操作，不是自动行为。**
     Distill,
     /// R5：从某一轮分叉出一个新会话。**回滚不是截断。**
@@ -354,7 +358,7 @@ pub enum UiEvent {
     },
     /// 上下文占用，供状态栏显示。
     ContextFootprint { total: u32, cacheable: u32, events: usize },
-    PhaseChanged { to: Phase },
+
     CostTick { role: Role, usage: Usage, session_total: u32 },
     /// 落盘连续失败。**不回滚内存状态** —— 让用户刚打的字消失比暂时没落盘更糟。
     /// 状态栏应常亮直到 `PersistOk`。

@@ -1,29 +1,15 @@
-//! 联网后端：**抓**与**搜**分开配，各自可换。
+//! 网页读取。当前公开能力只有进程内的基础 fetch。
 //!
-//! # 为什么拆成两半
+//! # 当前路径
 //!
-//! 上一版按厂商切（一个 `Firecrawl` 同时管搜和抓），换成 crawl4ai 时立刻暴露问题：
-//! **crawl4ai 只做抓取，不做搜索**。按厂商切就只能要么丢掉搜索，要么为了搜索
-//! 继续绑着一个要密钥的服务。拆成 `fetch` / `search` 两个位置之后，
-//! 「本地 crawl4ai 抓 + 自建 SearXNG 搜」这种全本地、全免密钥的组合才配得出来。
+//! `web_fetch` 先用 reqwest 获取服务端返回的页面，再由 Readability 风格的 DOM
+//! 评分选出正文，最后转成 Markdown。相对链接按最终页面 URL 绝对化，响应体、
+//! 重定向和目标域名都受策略限制；不执行 JavaScript，也不注册网页搜索。
 //!
-//! # 本地优先，不要密钥
+//! # 旧配置兼容
 //!
-//! | 位置 | 默认 | 要密钥 | 怎么起 |
-//! |---|---|---|---|
-//! | 抓 | crawl4ai 服务 | 否 | `docker run -p 11235:8080 unclecode/crawl4ai` |
-//! | 抓 | crawl4ai CLI | 否 | `pip install crawl4ai && crawl4ai-setup` |
-//! | 抓 | firecrawl | 是 | 云服务 |
-//! | 抓 | http | 否 | 裸 GET + 剥标签，兜底 |
-//! | 搜 | searxng | 否 | 自建，`GET /search?format=json` |
-//! | 搜 | firecrawl | 是 | 云服务 |
-//!
-//! # 后端自己的地址不过闸门
-//!
-//! [`crate::policy::Policy::check_url`] 挡的是**模型请求的目标网址**。
-//! 后端自身的 base_url（`http://localhost:11235`）是运维配置，不是模型输入，
-//! 所以它不该被内网检查挡住 —— 否则本地部署一个都用不了。
-//! 模型给的目标网址仍然照常过闸门，SSRF 防线没有松。
+//! 早期版本的多后端类型和实现暂时留在本模块，保证旧 `config.json` 与外部调用
+//! 能继续反序列化、编译；[`build`] 不再选择它们。等配置迁移窗口过去后可整体删除。
 
 use crate::model::BoxFuture;
 use crate::shell::Shell;
@@ -80,13 +66,13 @@ pub trait WebBackend: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Fetcher {
-    /// crawl4ai 的本地服务。**默认，不要密钥。**
+    /// 旧配置兼容项，不再由 [`build`] 启用。
     Crawl4ai,
-    /// crawl4ai 的命令行。同样不要密钥，适合不想跑 Docker 的情况。
+    /// 旧配置兼容项，不再由 [`build`] 启用。
     Crawl4aiCli,
-    /// firecrawl 云服务，要密钥。
+    /// 旧配置兼容项，不再由 [`build`] 启用。
     Firecrawl,
-    /// 裸 GET + 剥标签。永远可用，但正文抽取很粗。
+    /// 当前内置抓取。
     Http,
     None,
 }
@@ -94,74 +80,67 @@ pub enum Fetcher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Searcher {
-    /// 自建 SearXNG，不要密钥。
+    /// 旧配置兼容项，不再由 [`build`] 启用。
     Searxng,
+    /// 旧配置兼容项，不再由 [`build`] 启用。
     Firecrawl,
     None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebCfg {
+    /// 旧字段；所有旧值均由联网总开关接管并降级为内置 fetch。
     pub fetch: Fetcher,
-    /// crawl4ai 服务 / firecrawl 的地址。
+    /// 旧字段；当前忽略。
     pub fetch_base: String,
+    /// 旧字段；当前忽略且不注册 search。
     pub search: Searcher,
-    /// SearXNG 的地址。
+    /// 旧字段；当前忽略。
     pub search_base: String,
 }
 
 impl Default for WebCfg {
     fn default() -> Self {
         WebCfg {
-            // 默认走本地 crawl4ai：不用密钥，起一条 docker 就能用
-            fetch: Fetcher::Crawl4ai,
-            fetch_base: "http://localhost:11235".into(),
-            // 搜索没有免密钥的默认可用项，所以默认关掉而不是配一个起不来的
+            // 默认只用进程内的 Rust 抓取器，没有外部服务和安装步骤。
+            fetch: Fetcher::Http,
+            fetch_base: String::new(),
             search: Searcher::None,
-            search_base: "http://localhost:8080".into(),
+            search_base: String::new(),
         }
     }
 }
 
-/// 按配置搭后端。`key` 只有 firecrawl 用得上。
+/// 搭建当前公开的基础抓取能力。
 ///
-/// 返回 `None` 表示这一轮不注册任何联网工具。
-pub fn build(cfg: &WebCfg, policy: &crate::policy::PolicyCfg, key: Option<String>) -> Option<Arc<dyn WebBackend>> {
+/// `WebCfg` 与 `key` 暂时保留，只为让旧 `config.json` 可以无损升级；其中曾经
+/// 暴露的 crawl4ai / SearXNG / Firecrawl 选择不再参与运行。否则 UI 虽然删掉了
+/// 选项，旧文件里的一行 `crawl4ai` 仍会让新版本去连一个不存在的本地服务。
+/// 返回 `None` 只表示联网总开关关闭。
+pub fn build(_cfg: &WebCfg, policy: &crate::policy::PolicyCfg, _key: Option<String>) -> Option<Arc<dyn WebBackend>> {
     if !policy.net {
         return None;
     }
-    let http = client();
-    let key = key.filter(|k| !k.trim().is_empty());
-
-    let fetcher: Option<Arc<dyn WebBackend>> = match cfg.fetch {
-        Fetcher::Crawl4ai => Some(Arc::new(Crawl4ai::new(http.clone(), &cfg.fetch_base))),
-        Fetcher::Crawl4aiCli => {
-            let sh = Shell::new(policy.exec_allow.clone()).timeout(Duration::from_secs(90));
-            sh.have("crwl").then(|| Arc::new(Crawl4aiCli::new(sh)) as Arc<dyn WebBackend>)
-        }
-        Fetcher::Firecrawl => key
-            .clone()
-            .map(|k| Arc::new(Firecrawl::new(http.clone(), k, &cfg.fetch_base)) as Arc<dyn WebBackend>),
-        Fetcher::Http => Some(Arc::new(PlainHttp::new(http.clone()))),
-        Fetcher::None => None,
-    };
-    let searcher: Option<Arc<dyn WebBackend>> = match cfg.search {
-        Searcher::Searxng => Some(Arc::new(Searxng::new(http.clone(), &cfg.search_base))),
-        Searcher::Firecrawl => key
-            .map(|k| Arc::new(Firecrawl::new(http, k, "https://api.firecrawl.dev")) as Arc<dyn WebBackend>),
-        Searcher::None => None,
-    };
-    match (fetcher, searcher) {
-        (None, None) => None,
-        (f, s) => Some(Arc::new(Combo { fetch: f, search: s })),
-    }
+    Some(Arc::new(PlainHttp::new(client(policy), policy.max_file_bytes)))
 }
 
-fn client() -> reqwest::Client {
+fn client(policy: &crate::policy::PolicyCfg) -> reqwest::Client {
+    let redirect_policy = policy.clone();
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(90))
         .user_agent("premortem/0.1 (research assistant)")
+        // 初始 URL 会在工具入口过闸；重定向也必须逐跳复查，否则公网网址可以
+        // 302 到 localhost，绕过 SSRF 和域名白名单。
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error(std::io::Error::other("重定向超过 10 次"));
+            }
+            match crate::policy::validate_web_url(&redirect_policy, attempt.url().as_str()) {
+                Ok(_) => attempt.follow(),
+                Err(e) => attempt.error(std::io::Error::other(format!("拒绝重定向：{e}"))),
+            }
+        }))
         .build()
         .unwrap_or_default()
 }
@@ -533,22 +512,26 @@ impl WebBackend for Firecrawl {
     }
 }
 
-// ───────────────────────── 裸 HTTP ─────────────────────────
+// ───────────────────────── 内置网页抓取 ─────────────────────────
 
-/// 兜底：GET 一下，剥掉标签。**正文抽取很粗**，能用但别指望质量。
+/// 单二进制抓取器：HTTP 获取后按 DOM 结构抽正文，再保留格式转成 Markdown。
+///
+/// 它不执行 JavaScript；动态页面会得到服务端实际返回的内容，而不是浏览器渲染结果。
+/// 这个边界换来了 Windows / WSL / macOS 都不需要额外服务或浏览器。
 pub struct PlainHttp {
     http: reqwest::Client,
+    max_body_bytes: u64,
 }
 
 impl PlainHttp {
-    pub fn new(http: reqwest::Client) -> PlainHttp {
-        PlainHttp { http }
+    pub fn new(http: reqwest::Client, max_body_bytes: u64) -> PlainHttp {
+        PlainHttp { http, max_body_bytes }
     }
 }
 
 impl WebBackend for PlainHttp {
     fn name(&self) -> &str {
-        "http"
+        "builtin-fetch"
     }
 
     fn can_search(&self) -> bool {
@@ -568,20 +551,124 @@ impl WebBackend for PlainHttp {
         Box::pin(async move {
             let r = guard(t, self.http.get(url).send()).await?;
             let st = r.status();
-            let html = r.text().await.map_err(|e| format!("读响应失败（{st}）：{e}"))?;
+            let final_url = r.url().to_string();
+            let content_type = r
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let bytes = read_limited(r, self.max_body_bytes, t).await?;
+            let body = decode_body(&bytes, &content_type);
             if !st.is_success() {
-                return Err(format!("{st}：{}", clip(&html, 200)));
+                return Err(format!("{st}：{}", clip(&body, 200)));
             }
-            let title = between(&html, "<title", "</title>")
-                .and_then(|t| t.split_once('>').map(|(_, v)| v.trim().to_string()))
-                .unwrap_or_else(|| url.to_string());
-            Ok(Page { url: url.into(), title, text: html_to_text(&html) })
+
+            if is_html(&content_type, &body) {
+                let (title, text) = smart_html_to_markdown(&body, &final_url)?;
+                if text.trim().is_empty() {
+                    return Err("页面存在，但没有抽取到可读正文（可能依赖 JavaScript 渲染）".into());
+                }
+                Ok(Page { url: final_url, title, text })
+            } else {
+                let text = body.trim().to_string();
+                if text.is_empty() {
+                    return Err("响应正文为空".into());
+                }
+                Ok(Page { url: final_url.clone(), title: final_url, text })
+            }
         })
+    }
+
+    fn probe<'a>(&'a self, _t: &'a CancellationToken) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Ok("内置抓取可用（HTTP + Readability + Markdown）".into()) })
     }
 }
 
-/// 剥标签。**明确是个近似**：`script` / `style` 整块丢掉，其余标签去掉，
-/// 常见实体还原。要真正的正文抽取就该用 crawl4ai。
+/// 从 HTML 得到主内容 Markdown。
+///
+/// 这里的 “smart” 不是多写几条 class 名匹配：Readability 会综合段落长度、标点、
+/// 链接密度、语义元素和兄弟节点关系给 DOM 子树打分，再清理导航、广告和侧栏。
+/// `document_url` 还会把正文中的相对链接和图片地址补成绝对 URL；因此抓到二级页面
+/// 入口后，保存下来的 Markdown 可以直接继续 fetch。
+pub fn smart_html_to_markdown(html: &str, document_url: &str) -> Result<(String, String), String> {
+    let mut cfg = dom_smoothie::Config::default();
+    // 字节上限挡不住 `<i></i>` 重复几十万次这种小标签炸弹；DOM 元素数也要封顶。
+    cfg.max_elements_to_parse = 150_000;
+    let mut readability = dom_smoothie::Readability::new(html, Some(document_url), Some(cfg))
+        .map_err(|e| format!("HTML 解析失败：{e}"))?;
+    let article = readability.parse().map_err(|e| format!("正文识别失败：{e}"))?;
+    let title = article.title.trim().to_string();
+    let content = article.content.as_ref();
+    let markdown = htmd::convert(content).map_err(|e| format!("Markdown 转换失败：{e}"))?;
+    let markdown = tidy_markdown(&markdown);
+    let text = if markdown.is_empty() {
+        tidy_markdown(article.text_content.as_ref())
+    } else {
+        markdown
+    };
+    let title = if title.is_empty() { document_url.to_string() } else { title };
+    Ok((title, text))
+}
+
+fn tidy_markdown(text: &str) -> String {
+    text.trim().trim_start_matches('\u{feff}').trim().to_string()
+}
+
+fn is_html(content_type: &str, body: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("text/html") || ct.contains("application/xhtml+xml") {
+        return true;
+    }
+    let start = body.trim_start().to_ascii_lowercase();
+    start.starts_with("<!doctype html")
+        || start.starts_with("<html")
+        || start.starts_with("<head")
+        || start.starts_with("<body")
+}
+
+fn decode_body(bytes: &[u8], content_type: &str) -> String {
+    let charset = content_type.split(';').skip(1).find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        name.trim().eq_ignore_ascii_case("charset").then(|| value.trim().trim_matches(['\'', '"']))
+    });
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    let (text, _, _) = encoding.decode(bytes);
+    text.into_owned()
+}
+
+async fn read_limited(
+    response: reqwest::Response,
+    max_bytes: u64,
+    token: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+
+    let max_bytes = max_bytes.max(1);
+    if response.content_length().is_some_and(|n| n > max_bytes) {
+        return Err(format!("响应体超过上限：大于 {max_bytes} 字节"));
+    }
+    let mut stream = response.bytes_stream();
+    let mut out = Vec::new();
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err("已取消".into()),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else { break };
+        let chunk = chunk.map_err(|e| format!("读取响应失败：{e}"))?;
+        if out.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(format!("响应体超过上限：{max_bytes} 字节"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// 旧版的无 DOM 纯文本转换仍保留为兼容 API；生产 fetch 已不再使用它。
 pub fn html_to_text(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let b = html.as_bytes();
@@ -635,6 +722,57 @@ pub fn html_to_text(html: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
+#[cfg(test)]
+mod extraction_tests {
+    use super::{decode_body, smart_html_to_markdown};
+
+    #[test]
+    fn extracts_main_dom_preserves_markdown_and_absolutizes_links() {
+        let filler =
+            "这一段提供足够的正文密度。它讨论实验动机、约束、方法和可以复核的结果，不是菜单或站点导航。"
+                .repeat(12);
+        let html = format!(r#"
+            <!doctype html><html><head><title>站点名 | 真正的文章标题</title></head><body>
+              <nav><a href="/pricing">全站导航与价格</a></nav>
+              <main><article>
+                <h1>真正的文章标题</h1>
+                <p>{filler}</p>
+                <h2>方法</h2>
+                <ul><li><strong>保留粗体</strong></li><li>保留列表</li></ul>
+                <blockquote>一段引用</blockquote>
+                <pre><code>cargo test --all-targets</code></pre>
+                <table><thead><tr><th>字段</th><th>值</th></tr></thead>
+                  <tbody><tr><td>seed</td><td>3</td></tr></tbody></table>
+                <p><a href="../next?seed=3#result">下一页</a>；
+                   <a href="/appendix/a">附录</a></p>
+              </article></main>
+              <footer><a href="/legal">冗长页脚</a></footer>
+            </body></html>
+        "#);
+
+        let (title, md) = smart_html_to_markdown(
+            &html,
+            "https://example.com/docs/chapter/intro.html",
+        )
+        .expect("extract");
+        assert!(title.contains("真正的文章标题"));
+        assert!(md.contains("## 方法"));
+        assert!(md.contains("**保留粗体**"));
+        assert!(md.contains("cargo test --all-targets"));
+        assert!(md.contains("seed"));
+        assert!(md.contains("[下一页](https://example.com/docs/next?seed=3#result)"));
+        assert!(md.contains("[附录](https://example.com/appendix/a)"));
+        assert!(!md.contains("全站导航与价格"));
+        assert!(!md.contains("冗长页脚"));
+    }
+
+    #[test]
+    fn respects_declared_non_utf8_charset() {
+        let (encoded, _, _) = encoding_rs::GBK.encode("中文正文");
+        assert_eq!(decode_body(&encoded, "text/plain; charset=gbk"), "中文正文");
+    }
+}
+
 // ───────────────────────── 小工具 ─────────────────────────
 
 /// 把一次请求套上取消。用户打断时立刻放弃，不等它跑完。
@@ -664,13 +802,6 @@ fn title_of(text: &str, url: &str) -> String {
         .map(|l| l.trim_start_matches('#').trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| url.to_string())
-}
-
-fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
-    let lower = s.to_ascii_lowercase();
-    let a = lower.find(open)?;
-    let b = lower[a..].find(close)? + a;
-    Some(&s[a..b])
 }
 
 fn clip(s: &str, n: usize) -> String {

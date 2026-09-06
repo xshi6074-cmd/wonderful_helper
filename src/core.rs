@@ -88,7 +88,6 @@ pub struct CoreMetrics {
     pub inbox_taken: u64,
     pub ops_user: u64,
     pub ops_model: u64,
-    pub phase_advances: u64,
     /// 用户一键更换场景的次数。**这是场景描述写得准不准的直接反馈。**
     pub scene_overrides: u64,
     pub compactions: u64,
@@ -232,7 +231,8 @@ pub struct Core {
     open_calls: HashMap<String, Seq>,
     open_questions: Vec<OpenQuestion>,
     /// 当前场景，派生自最近一条 `Judged` / `SceneOverridden`。不进 Workspace。
-    scene: Option<SceneId>,
+    /// 当前这一组场景。空 = 还没判过。
+    scenes: Vec<SceneId>,
     /// 本轮的视图有没有被取过。`scene_override` 只在第一次给出，之后就消费掉了。
     view_taken: bool,
     /// 收到了退出请求、正在等当前 turn 收尾。
@@ -246,7 +246,7 @@ pub struct Core {
     ///
     /// **不在轮中生效**：轮中改会重新引入「同一份输入在轮中变了」那类 bug，
     /// 而那正是这一版要消灭的。用户想立刻换就打断。
-    pending_scene: Option<SceneId>,
+    pending_scene: Option<Vec<SceneId>>,
 
     /// 待处理的用户输入。**存的就是时间线上那几条事件本身**，不是一份副本。
     inbox: VecDeque<Event>,
@@ -346,7 +346,7 @@ pub fn start(deps: CoreDeps) -> Started {
         turn_edits: HashSet::new(),
         open_calls: HashMap::new(),
         open_questions: Vec::new(),
-        scene: None,
+        scenes: Vec::new(),
         view_taken: false,
         shutdown: None,
         pending_scene: None,
@@ -388,11 +388,16 @@ impl Core {
         self.seq = r.seq;
         self.open_questions = r.open_questions;
         self.cost = CostLedger::from_events(&r.events);
-        self.scene = r.events.iter().rev().find_map(|e| match &e.body {
-            Body::SceneOverridden { to, .. } => Some(to.clone()),
-            Body::Judged { scene, .. } => Some(scene.clone()),
-            _ => None,
-        });
+        self.scenes = r
+            .events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                Body::SceneOverridden { to, .. } => Some(to.clone()),
+                Body::Judged { scenes, .. } => Some(scenes.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
         // 用户点了换场景、还没有哪一轮把它消费掉，进程就没了 ⇒ 重开之后它仍然有效。
         // 判据是「这条 SceneOverridden 之后再没开过轮」—— 开过轮就说明被读走了。
         // 和未回答的提问同一个道理：那是一份还没兑现的用户意图，不该随进程消失。
@@ -557,14 +562,8 @@ impl Core {
                 self.mode = to;
             }
 
-            CoreMsg::AdvancePhase { to } => {
-                // 阶段闸门在用户手里。模型没有推进权，也没有阻断权。
-                self.metrics.phase_advances += 1;
-                self.commit(vec![Draft::new(None, Body::PhaseSet { to })], None);
-            }
-
             CoreMsg::OverrideScene { to } => {
-                let from = self.scene.clone().unwrap_or_else(|| "none".into());
+                let from = self.scenes.clone();
                 self.metrics.scene_overrides += 1;
                 // 下一轮生效。UI 的标签立刻变（Appended 事件），但注入要等下一轮 ——
                 // 轮中换会重新引入「同一份输入在轮中变了」那类 bug。
@@ -816,11 +815,10 @@ impl Core {
                     self.open_questions.retain(|x| x.id != q);
                 }
             }
-            Body::Judged { scene, .. } => self.scene = Some(scene.clone()),
-            Body::SceneOverridden { to, .. } => self.scene = Some(to.clone()),
-            Body::PhaseSet { to } => {
-                let _ = self.ui.send(UiEvent::PhaseChanged { to: *to });
-            }
+            Body::Judged { scenes, .. } => self.scenes = scenes.clone(),
+            Body::SceneOverridden { to, .. } => self.scenes = to.clone(),
+            // 已废弃，只为老时间线能重放。不改任何状态。
+            Body::PhaseSet { .. } => {}
             Body::Edited { ops } => {
                 let _ = self.ui.send(UiEvent::StateChanged {
                     seq: e.seq,
@@ -864,8 +862,8 @@ impl Core {
     fn absorb(&mut self, turn: TurnId, emit: Emit) -> Applied {
         let t = Some(turn);
         let (drafts, dropped) = match emit {
-            Emit::Judged { scene, rationale } => {
-                (vec![Draft::new(t, Body::Judged { scene, rationale })], vec![])
+            Emit::Judged { scenes, rationale } => {
+                (vec![Draft::new(t, Body::Judged { scenes, rationale })], vec![])
             }
             Emit::Wrote { text, interrupted } => {
                 (vec![Draft::new(t, Body::Wrote { text, interrupted })], vec![])
@@ -992,7 +990,7 @@ impl Core {
             session: self.session.clone(),
             seq: self.seq,
             ws: self.ws.clone(),
-            scene: self.scene.clone(),
+            scenes: self.scenes.clone(),
             open_questions: self.open_questions.clone(),
             turn: match &self.turn {
                 TurnPhase::Running { id, .. } | TurnPhase::Closing { id } => Some(*id),

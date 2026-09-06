@@ -65,6 +65,14 @@ pub trait Store: Send + Sync {
 
     fn create_session(&self, s: &Session) -> Result<(), StoreError>;
     fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StoreError>;
+    /// 把一条会话从**列表里**去掉。
+    ///
+    /// 叫 forget 不叫 delete，是因为它**不删事件**：只去掉 session 这一行，
+    /// 于是 UI 的会话列表里没有它了。事件还在库里，拿着 id 仍然读得回来。
+    ///
+    /// 这样选是因为「删掉一段对话」在用户那边的意思是「别再让我看见它」，
+    /// 而真删事件会连带把从它分叉出去的会话一起打断 —— 那些是他还想要的。
+    fn forget_session(&self, id: &SessionId) -> Result<(), StoreError>;
     fn list_sessions(&self) -> Result<Vec<Session>, StoreError>;
 
     /// 读一条会话链的全部事件，按 seq 升序。
@@ -246,6 +254,12 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn forget_session(&self, id: &SessionId) -> Result<(), StoreError> {
+        let c = self.lock()?;
+        c.execute("DELETE FROM session WHERE id = ?1", params![id.0])?;
+        Ok(())
+    }
+
     fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let c = self.lock()?;
         let row = c
@@ -355,6 +369,10 @@ impl Store for MemStore {
         g.push(s.clone());
         Ok(())
     }
+    fn forget_session(&self, id: &SessionId) -> Result<(), StoreError> {
+        self.sessions.lock().unwrap().retain(|s| &s.id != id);
+        Ok(())
+    }
     fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         Ok(self.sessions.lock().unwrap().iter().find(|s| &s.id == id).cloned())
     }
@@ -438,6 +456,9 @@ impl Store for FaultStore {
     }
     fn create_session(&self, s: &Session) -> Result<(), StoreError> {
         self.inner.create_session(s)
+    }
+    fn forget_session(&self, id: &SessionId) -> Result<(), StoreError> {
+        self.inner.forget_session(id)
     }
     fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         self.inner.get_session(id)

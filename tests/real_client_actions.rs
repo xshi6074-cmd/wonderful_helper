@@ -43,7 +43,7 @@ async fn chat(State(seen): State<Seen>, body: String) -> impl IntoResponse {
                     "id": "j1", "type": "function",
                     "function": {
                         "name": "record_judgement",
-                        "arguments": "{\"scene\":\"trace_code\",\"rationale\":\"他要改模块\"}"
+                        "arguments": "{\"scenes\":[\"trace_code\",\"cheap_first\"],\"rationale\":\"他要改模块，而且预算对不上\"}"
                     }
                 }]}}],
                 "usage": { "prompt_tokens": 100, "completion_tokens": 20 }
@@ -102,14 +102,13 @@ async fn judge_asks_for_a_scene_without_naming_the_tool() {
     let out = client(&base)
         .judge(JudgeReq {
             turn: premortem::ids::TurnId(1),
-            phase: premortem::state::Phase::Designing,
             mode: premortem::model::Mode::Go,
             msgs: vec![Message::system("规则"), Message::user("改一下解码器")],
             token: CancellationToken::new(),
         })
         .await
         .expect("判断段应当成功");
-    assert_eq!(out.scene, "trace_code");
+    assert_eq!(out.scenes, vec!["trace_code".to_string(), "cheap_first".to_string()]);
     assert_eq!(out.usage.prompt, 100);
 
     let body = seen.lock().unwrap()[0].clone();
@@ -119,7 +118,8 @@ async fn judge_asks_for_a_scene_without_naming_the_tool() {
     assert_eq!(tools.len(), 1, "只给一个工具，required 才等价于点名");
     // 判断段只判场景 —— 不该再有 ops 那个字段
     let props = &tools[0]["function"]["parameters"]["properties"];
-    assert!(props.get("scene").is_some() && props.get("ops").is_none(), "{props}");
+    assert_eq!(props["scenes"]["type"], "array", "场景是一组，不是一个：{props}");
+    assert!(props.get("ops").is_none(), "判断段不写推断：{props}");
 }
 
 #[tokio::test]

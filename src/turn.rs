@@ -126,6 +126,13 @@ pub async fn guarded<T>(token: &CancellationToken, fut: impl Future<Output = T>)
     }
 }
 
+/// 一轮最多注入几个场景的 guidance。
+///
+/// 判断段一次判出五个场景时，回答段的 prompt 会被 guidance 淹掉 ——
+/// 而「什么都强调」等于「什么都没强调」。三个是让「目标没说清 + 预算对不上 +
+/// 该收尾了」这类真实组合装得下，同时挡住摊大饼。
+pub const MAX_SCENES: usize = 3;
+
 /// 拼 prompt 用的上下文。**每次都从当前视图现拼。**
 fn ctx_of(v: &TurnView, memory: &Memory, mode_note: &str) -> Context {
     Context::build(&v.ws, v.turn_start, memory, assemble(&v.events), mode_note)
@@ -157,7 +164,7 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     };
     let mode = v0.mode;
     // scene_override 是一次性的：Core 在第一次取视图时就 take 掉了。
-    let scene_override: Option<SceneId> = v0.scene_override.clone();
+    let scene_override: Option<Vec<SceneId>> = v0.scene_override.clone();
     // 这个 mode 的全套提示词：system 段那一句、额外暴露的工具、
     // 以及每个工具在这个 mode 下要追加的说明。全部来自 prompts.toml。
     let mp: ModePrompt = memory.mode(mode);
@@ -194,13 +201,12 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     //
     // 判断段和回答段吃同一份对话 —— 判断「这一轮该进哪个场景」本来就要看
     // 用户刚说了什么。两段式省下的是场景 guidance 与案例。
-    let scene_id: SceneId;
+    let scene_ids: Vec<SceneId>;
     {
         let Some(v) = ctx.core.view(ctx.id).await else {
             return TurnOutcome { aborted: true, stats };
         };
         let context = ctx_of(&v, &memory, &mp.note);
-        let phase = v.ws.phase;
         drop(v);
 
         let t_judge = Instant::now();
@@ -208,7 +214,6 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
         last_prompt_tokens = ctx.models.judge.estimate_prompt_tokens(&judge_msgs);
         let req = JudgeReq {
             turn: ctx.id,
-            phase,
             mode,
             msgs: judge_msgs,
             token: ctx.token.child_token(),
@@ -230,59 +235,63 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                     )
                     .await;
                 crate::model::JudgeOut {
-                    scene: "none".into(),
+                    scenes: vec!["none".into()],
                     rationale: format!("判断段失败：{e}"),
                     usage: Usage::default(),
                 }
             }
         };
 
-        // 场景：用户点过换场景 ⇒ 以他的为准。**并且真的注入新场景的材料** ——
-        // 只换标签不换 prompt，等于用户点了半天模型什么都没感觉到。
-        let mut id: SceneId = match &scene_override {
+        // 场景：用户手动选过 ⇒ 以他的为准。**并且真的注入这些场景的材料** ——
+        // 只换标签不换 prompt，等于用户选了半天模型什么都没感觉到。
+        let mut ids: Vec<SceneId> = match &scene_override {
             Some(s) => {
                 stats.scene_overridden = true;
                 s.clone()
             }
-            None => judge.scene.clone(),
+            None => judge.scenes.clone(),
         };
-        if mode.disabled_scenes().contains(&id.as_str()) {
-            id = "none".into();
-        }
-        if memory.playbook.get(&id).is_none() {
-            // 模型给了不认识的 id ⇒ 回退到 none，不报错、不打扰用户
+        ids.retain(|id| !mode.disabled_scenes().contains(&id.as_str()));
+        let (resolved, unknown) = memory.playbook.resolve(&ids);
+        if !unknown.is_empty() {
+            // 模型给了不认识的 id ⇒ 丢掉，不报错、不打扰用户，但记进指标
             stats.scene_unknown = true;
-            id = "none".into();
         }
-        stats.scene = id.clone();
-        scene_id = id;
+        // 一组场景 = 一组 guidance 全都进 prompt，所以要有上限：
+        // 判断段判出五个场景时，回答段的 prompt 会被 guidance 淹掉，
+        // 而那时候「什么都强调」等于「什么都没强调」。
+        let mut ids: Vec<SceneId> = resolved.iter().map(|s| s.id.clone()).collect();
+        ids.truncate(MAX_SCENES);
+        // 一个都不剩 ⇒ 回退到 none。playbook 保证它存在。
+        if ids.is_empty() {
+            ids.push("none".into());
+        }
+        stats.scenes = ids.clone();
+        scene_ids = ids;
         ctx.core
             .emit(
                 ctx.id,
-                Emit::Judged { scene: scene_id.clone(), rationale: judge.rationale.clone() },
+                Emit::Judged { scenes: scene_ids.clone(), rationale: judge.rationale.clone() },
             )
             .await;
         // 账记在判定之后：时间线读起来是「判成了 X，为此花了 Y」。
         ctx.core.cost(ctx.id, Role::Judge, judge.usage).await;
     }
 
-    let scene = memory
-        .playbook
-        .get(&scene_id)
-        .cloned()
-        .expect("playbook 必须有 none 场景，且 scene_id 已经回退过");
-    let cases = memory.cases_for(&scene_id);
+    let (scenes, _) = memory.playbook.resolve(&scene_ids);
+    let cases = memory.cases_for(&scene_ids);
 
     // 本轮暴露的工具：场景的 + 这个 mode 额外给的。
     // 认不出的名字**要报出来** —— 上一版这里静默丢弃，结果整套 fs_* / web_*
     // 从来没被暴露过，而症状只是「模型好像从来不调工具」。
-    let exposed_names = memory.playbook.exposed_tools(&scene, &mp.tools);
+    let exposed_names = memory.playbook.exposed_tools(&scenes, &mp.tools);
     let exposed = ctx.registry.specs(&exposed_names, &mp.tool_notes);
     if !exposed.missing.is_empty() {
         let _ = ctx.ui.send(UiEvent::MemoryDegraded {
             file: "playbook.toml".into(),
             err: format!(
-                "场景 {scene_id} / mode {} 里这些工具名注册表里没有，已跳过：{}。现有的是：{}",
+                "场景 {} / mode {} 里这些工具名注册表里没有，已跳过：{}。现有的是：{}",
+                scene_ids.join("+"),
                 mode.key(),
                 exposed.missing.join("、"),
                 ctx.registry.names().join("、")
@@ -316,7 +325,7 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
 
         // ── 回答段 ─────────────────────────────────────────────
         let t_answer = Instant::now();
-        let answer_msgs = context.for_answer(&scene, &cases, &[]);
+        let answer_msgs = context.for_answer(&scenes, &cases, &[]);
         last_prompt_tokens = ctx.models.answer.estimate_prompt_tokens(&answer_msgs);
         let req = AnswerReq {
             turn: ctx.id,

@@ -128,9 +128,14 @@ pub fn default_judge() -> JudgeOut {
 /// 判成某个场景。**判断段只判场景** —— 推断改动走回答段的动作工具，
 /// 见 [`op_events`]。
 pub fn judge_of(scene: &str) -> JudgeOut {
+    judge_all(&[scene])
+}
+
+/// 一次判出多个场景。
+pub fn judge_all(scenes: &[&str]) -> JudgeOut {
     JudgeOut {
-        scene: scene.into(),
-        rationale: format!("判成 {scene}"),
+        scenes: scenes.iter().map(|s| s.to_string()).collect(),
+        rationale: format!("判成 {}", scenes.join("+")),
         usage: Usage { prompt: 120, completion: 30, estimated: false },
     }
 }

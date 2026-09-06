@@ -16,7 +16,6 @@
 
 use crate::ids::TurnId;
 use crate::scene::SceneId;
-use crate::state::Phase;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -181,7 +180,6 @@ impl Message {
 /// 判断段的输入。
 pub struct JudgeReq {
     pub turn: TurnId,
-    pub phase: Phase,
     pub mode: Mode,
     /// 由 [`crate::context::Context::for_judge`] 组装：共享层 + 完整对话，
     /// **不含任何场景的 guidance 与案例** —— 那些只给回答段。
@@ -210,8 +208,10 @@ pub struct JudgeReq {
 /// 只做三件准备工作：注入 guidance、注入案例、暴露工具。
 #[derive(Debug, Clone)]
 pub struct JudgeOut {
-    /// 判成了哪个场景。未知 id 由 turn 侧回退到 `none`。
-    pub scene: SceneId,
+    /// 判成了哪几个场景。**一组，不是一个** —— 一轮里「目标还没说清」和
+    /// 「预算和方案对不上」可以同时成立，只准判一个的话另一条就永远注不进去。
+    /// 认不出的 id 由 turn 侧丢掉；一个都不剩就回退到 `none`。
+    pub scenes: Vec<SceneId>,
     /// 为什么判成这个场景。UI 侧栏要显示它，用户才能判断要不要一键更换场景。
     pub rationale: String,
     pub usage: Usage,

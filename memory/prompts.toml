@@ -8,7 +8,6 @@ fold = """
 [mode.explore]
 note = "当前是探索 mode。你需要在最终给出一份/多份细节真实且详实的实验设计，但是此前用户可能需要广泛探索、补充领域知识、找到idea在特定约束下的变体。"
 tools = [
-    "web_search",
     "web_fetch",
     "ask_user",
 ]

@@ -315,11 +315,13 @@ impl Memory {
         s
     }
 
-    /// 命中某个场景的案例正文。
-    pub fn cases_for(&self, scene: &str) -> String {
+    /// 命中**这一组**场景里任意一个的案例正文。
+    ///
+    /// 并集去重：一条案例同时服务两个命中的场景时，只注入一次。
+    pub fn cases_for(&self, scenes: &[String]) -> String {
         self.cases
             .iter()
-            .filter(|c| c.scenes.iter().any(|s| s == scene))
+            .filter(|c| c.scenes.iter().any(|s| scenes.iter().any(|w| w == s)))
             .map(|c| format!("### {}\n{}", c.title, c.body.trim()))
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -413,8 +415,8 @@ pub fn builtin_modes() -> BTreeMap<String, ModePrompt> {
             note: "当前是探索 mode。用户还在摸方向：可以展开讲、可以开放式追问、\
                    可以把不确定的地方直接摆出来。抽取资料时关注动机、领域背景、术语定义。"
                 .into(),
-            // 探索期要查外部资料，所以给开放搜索；行动期只给按址抓取。
-            tools: ["web_search", "web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
+            // 两个 mode 都只暴露按址抓取；搜索能力暂不注册。
+            tools: ["web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
             tool_notes: [
                 ("record_graph",
                  "探索期：先把大结构摆出来就行，节点可以只有 label。拿不准就 source=\"guess\"，\
