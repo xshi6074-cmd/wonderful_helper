@@ -1100,8 +1100,11 @@ impl Core {
                 Ok((text, usage)) => {
                     back.cost_out(Role::Subagent, usage).await;
                     let p = crate::memory::draft_path(&dir, stamp);
-                    let _ = tokio::fs::write(&p, text).await;
-                    let _ = ui.send(UiEvent::Distilled { draft: p.display().to_string() });
+                    let draft = match tokio::fs::write(&p, text).await {
+                        Ok(()) => p.display().to_string(),
+                        Err(e) => format!("(蒸馏草稿写入失败: {e})"),
+                    };
+                    let _ = ui.send(UiEvent::Distilled { draft });
                 }
                 Err(e) => {
                     let _ = ui.send(UiEvent::Distilled { draft: format!("(蒸馏失败: {e})") });

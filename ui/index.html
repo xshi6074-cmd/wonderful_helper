@@ -76,6 +76,7 @@
             <span>目录</span>
             <input id="root-path" type="text" spellcheck="false">
           </label>
+          <button id="root-browse" class="ghost" title="浏览选择">浏览…</button>
           <button id="root-save" class="ghost">应用</button>
           <span class="chip ghost" id="queue-chip" hidden></span>
           <button id="stop" class="danger" hidden>停止</button>
@@ -89,11 +90,14 @@
   <div class="grip" id="rgrip" title="拖动调宽"></div>
   <aside id="right">
     <div class="side-head">
-      <strong>当前推断</strong>
+      <div class="seg" id="right-seg">
+        <button data-rt="infer" class="on">推断</button>
+        <button data-rt="edit" hidden>编辑</button>
+      </div>
       <span class="spacer"></span>
       <button class="icon" id="graph-refresh" title="刷新">⟳</button>
     </div>
-    <div class="pane">
+    <div class="pane" data-rp="infer">
       <h4>实验流程图 <span class="hint" id="graph-hint"></span></h4>
       <div id="graph"></div>
       <div class="legend">
@@ -107,6 +111,22 @@
       <h4>已搁置</h4>
       <div id="parked-list"></div>
     </div>
+    <section class="pane editor" data-rp="edit" hidden>
+      <div class="ed-head">
+        <b id="ed-name" class="mono"></b>
+        <span class="spacer"></span>
+        <span class="chip ghost" id="ed-dirty" hidden>未保存</span>
+      </div>
+      <p class="hint" id="ed-note"></p>
+      <textarea id="ed-text" spellcheck="false"></textarea>
+      <div class="ed-acts">
+        <button class="primary" id="ed-save">保存</button>
+        <button id="ed-revert">还原</button>
+        <button class="danger" id="ed-del" hidden>删除</button>
+        <span class="spacer"></span>
+        <button class="ghost" id="ed-close">关闭</button>
+      </div>
+    </section>
   </aside>
 </div>
 

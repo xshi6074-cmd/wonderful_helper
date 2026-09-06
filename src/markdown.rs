@@ -11,10 +11,10 @@
 //!
 //! 这里的做法是**丢掉 raw HTML 事件**：pulldown-cmark 把 `<script>` 这类原样
 //! 透传的片段单独报成 `Event::Html` / `Event::InlineHtml`，我们不转发它们，
-//! 于是它们连生成都没生成过。剩下的正文一律走转义。
-//! 这不是「过滤干净了」，是**那条路根本没接通** —— 和 `shell` 只走 argv 同一个道理。
+//! 于是它们连生成都没生成过。正文走转义；Markdown 链接与图片再过滤协议，
+//! 因为 `javascript:` 链接本身并不属于 raw HTML。
 
-use pulldown_cmark::{Event, Options, Parser, html};
+use pulldown_cmark::{Event, Options, Parser, Tag, html};
 
 /// 渲染成安全的 HTML 片段。
 pub fn to_html(md: &str) -> String {
@@ -24,13 +24,26 @@ pub fn to_html(md: &str) -> String {
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_FOOTNOTES);
 
-    let parser = Parser::new_ext(md, opts).filter(|e| {
-        // ★ 唯一的安全措施，也是唯一需要的：原样透传的 HTML 一律不要。
-        !matches!(e, Event::Html(_) | Event::InlineHtml(_))
+    let parser = Parser::new_ext(md, opts).filter_map(|mut e| {
+        if matches!(e, Event::Html(_) | Event::InlineHtml(_)) { return None; }
+        // Markdown 链接不属于 raw HTML，也必须限制可执行协议。
+        if let Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) = &mut e {
+            if !safe_url(dest_url) { *dest_url = "".into(); }
+        }
+        Some(e)
     });
     let mut out = String::with_capacity(md.len() * 3 / 2);
     html::push_html(&mut out, parser);
     out
+}
+
+fn safe_url(url: &str) -> bool {
+    let normalized: String = url.chars().filter(|c| !c.is_ascii_control()).collect();
+    let head = normalized.trim().split(['/', '?', '#']).next().unwrap_or("");
+    match head.split_once(':') {
+        Some((scheme, _)) => matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "mailto"),
+        None => true,
+    }
 }
 
 /// 流式过程中用的轻量版：**不解析 markdown**，只转义。
@@ -51,4 +64,16 @@ pub fn escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn markdown_cannot_create_executable_links() {
+        for md in ["[click](javascript:alert%281%29)", "[click](JAVASCRIPT:alert%281%29)", "[click](data:text/html;base64,PHNjcmlwdD4=)"] {
+            let html = super::to_html(md).to_lowercase();
+            assert!(!html.contains("href=\"javascript:") && !html.contains("href=\"data:"), "{html}");
+        }
+        assert!(super::to_html("[safe](https://example.com)").contains("href=\"https://example.com\""));
+    }
 }

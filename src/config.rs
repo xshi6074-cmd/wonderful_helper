@@ -63,6 +63,85 @@ pub enum Api {
     OpenAiCompat,
 }
 
+
+/// 一个内置的 provider 预设。
+///
+/// # 为什么放在 Rust 侧而不是前端
+///
+/// base_url 和密钥变量名是**同一份事实**：`Settings::default()` 要用，UI 的
+/// 「添加 provider」也要用。抄两份迟早对不上，而症状是「照着界面填完连不上」。
+///
+/// `models` 只是给输入框的候选，字段本身仍然是自由文本 —— 厂商加新模型的速度
+/// 比这个列表更新的速度快，写死会拦住用户。
+pub struct Preset {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub api: Api,
+    pub base_url: &'static str,
+    pub key_env: &'static str,
+    pub models: &'static [&'static str],
+}
+
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "anthropic", label: "Anthropic", api: Api::Anthropic,
+        base_url: "https://api.anthropic.com", key_env: "ANTHROPIC_API_KEY",
+        models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    },
+    Preset {
+        name: "openai", label: "OpenAI", api: Api::OpenAiCompat,
+        base_url: "https://api.openai.com/v1", key_env: "OPENAI_API_KEY",
+        models: &["gpt-4o", "gpt-4o-mini", "o3-mini"],
+    },
+    Preset {
+        name: "deepseek", label: "DeepSeek", api: Api::OpenAiCompat,
+        base_url: "https://api.deepseek.com/v1", key_env: "DEEPSEEK_API_KEY",
+        models: &["deepseek-chat", "deepseek-reasoner"],
+    },
+    Preset {
+        name: "zhipu", label: "智谱 GLM", api: Api::OpenAiCompat,
+        base_url: "https://open.bigmodel.cn/api/paas/v4", key_env: "ZHIPUAI_API_KEY",
+        models: &["glm-4-plus", "glm-4-air", "glm-4-flash"],
+    },
+    Preset {
+        name: "moonshot", label: "月之暗面 Kimi", api: Api::OpenAiCompat,
+        base_url: "https://api.moonshot.cn/v1", key_env: "MOONSHOT_API_KEY",
+        models: &["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    },
+    Preset {
+        // 自建 / vLLM / Ollama / LM Studio 都走这条。地址是最常见的那个默认端口。
+        name: "custom", label: "自定义（OpenAI 兼容）", api: Api::OpenAiCompat,
+        base_url: "http://localhost:8000/v1", key_env: "CUSTOM_API_KEY",
+        models: &[],
+    },
+];
+
+impl Preset {
+    pub fn cfg(&self) -> ProviderCfg {
+        ProviderCfg {
+            api: self.api,
+            base_url: self.base_url.into(),
+            key_env: self.key_env.into(),
+        }
+    }
+}
+
+/// 给 UI 的预设清单。
+pub fn presets_json() -> serde_json::Value {
+    serde_json::Value::Array(
+        PRESETS
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "name": p.name, "label": p.label,
+                    "api": match p.api { Api::Anthropic => "anthropic", Api::OpenAiCompat => "open_ai_compat" },
+                    "base_url": p.base_url, "key_env": p.key_env, "models": p.models,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// 一个模型服务方。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCfg {
@@ -142,23 +221,13 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "anthropic".to_string(),
-            ProviderCfg {
-                api: Api::Anthropic,
-                base_url: "https://api.anthropic.com".into(),
-                key_env: "ANTHROPIC_API_KEY".into(),
-            },
-        );
-        providers.insert(
-            "openai".to_string(),
-            ProviderCfg {
-                api: Api::OpenAiCompat,
-                base_url: "https://api.openai.com/v1".into(),
-                key_env: "OPENAI_API_KEY".into(),
-            },
-        );
+        // 花名册直接从预设生成。`custom` 不进默认 —— 它是「添加 provider」
+        // 时的模板，摆在默认里只会多一条永远连不上的条目。
+        let providers: BTreeMap<String, ProviderCfg> = PRESETS
+            .iter()
+            .filter(|p| p.name != "custom")
+            .map(|p| (p.name.to_string(), p.cfg()))
+            .collect();
         Settings {
             providers,
             roles: Roles {

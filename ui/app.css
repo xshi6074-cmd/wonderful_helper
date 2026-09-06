@@ -378,3 +378,45 @@ mark.hit.cur{background:var(--accent);color:#fff}
 /* 上下文占用逼近上限时，chip 自己变色。数字要人去比对，颜色不用。 */
 #token-chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
 #token-chip.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+
+
+/* ───────── 右栏编辑区 ───────── */
+/* 配置和记忆文件是**整篇文本**，塞进侧栏一个三行小框改不了。
+   放到右栏占满高度，才是能真的读、真的改的尺寸。 */
+.pane.editor{display:flex;flex-direction:column;gap:8px;padding:12px 14px 14px}
+.ed-head{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.pane.editor .hint{margin:0}
+#ed-text{flex:1;min-height:0;font-family:var(--mono);font-size:12.5px;line-height:1.6;
+  resize:none;background:var(--surface)}
+.ed-acts{display:flex;gap:7px;align-items:center}
+.ed-acts button{font-size:12.5px}
+
+/* 左栏里文件只剩一行入口，内容不再挤在小框里 */
+.frow.file .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow.file.on{background:var(--surface);box-shadow:var(--shadow);color:var(--accent)}
+
+/* 路径列表 */
+.prow{display:flex;gap:6px;align-items:center;font-size:11.5px;padding:3px 6px;
+  background:var(--sunk);border-radius:6px;margin-bottom:4px}
+.prow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  direction:rtl;text-align:left}
+.pact{display:flex;gap:6px;margin-top:4px}
+
+/* ───────── 目录浏览器 ───────── */
+.br-path{font:11.5px var(--mono);color:var(--muted);word-break:break-all;margin:0 0 8px}
+.br-list{max-height:46vh;overflow:auto;border-radius:var(--r);background:var(--sunk);padding:4px}
+.br-row{display:flex;gap:8px;align-items:center;padding:5px 9px;border-radius:6px;
+  cursor:pointer;font-size:13px}
+.br-row:hover{background:var(--surface)}
+.br-row .ic{width:14px;text-align:center;color:var(--muted);flex:0 0 auto}
+.br-row.d .ic{color:var(--accent)}
+.br-row span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.br-row .pick{opacity:0;font-size:11px;padding:1px 7px}
+.br-row:hover .pick{opacity:1}
+.br-cuts{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.br-cuts button{font-size:11.5px;padding:3px 9px}
+
+/* 报错条可以点掉，也会自己走 */
+#banner .note{cursor:pointer;position:relative;padding-right:34px}
+#banner .note::after{content:"✕";position:absolute;right:14px;opacity:.45;font-size:11px}
+#banner .note:hover::after{opacity:1}

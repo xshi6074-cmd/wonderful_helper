@@ -35,9 +35,13 @@ const S = {
   tools: [], web: '无', metrics: '', memory: [],
   timeline: [], snap: null,
   mode: 'explore', phase: 'designing', tokens: 0, queued: 0,
-  scene: null, running: false, connected: false,
+  scene: null, running: false, turn: null, connected: false,
   stream: null,           // { turn, text }
   fresh: new Set(),       // 刚被改过的图元素 id，画一次高亮就够
+  presets: [],            // provider 预设，来自后端（base_url/密钥变量名只有那一份）
+  saved: null,            // boot 时的配置原件。左栏表单会改 S.settings，这份不动
+  editor: null,           // 右栏正在编辑的文件 { kind, file, orig, note, deletable }
+  browse: null,           // 目录浏览器的当前一层
   banners: [],            // { level, text, key }
 };
 
@@ -60,7 +64,9 @@ function connect() {
 }
 
 function send(op, extra = {}) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ op, ...extra }));
+  if (!ws || ws.readyState !== 1) return false;
+  ws.send(JSON.stringify({ op, ...extra }));
+  return true;
 }
 
 function onMsg(m) {
@@ -69,13 +75,22 @@ function onMsg(m) {
       S.session = m.session; S.sessions = m.sessions; S.settings = m.settings;
       S.keys = m.keys; S.warnings = m.warnings || []; S.tools = m.tools || [];
       S.web = m.web; S.metrics = m.metrics; S.memory = m.memory || [];
+      S.scenes = m.scenes || [];
+      S.presets = m.presets || [];
+      S.saved = m.settings ? JSON.parse(JSON.stringify(m.settings)) : null;
       S.timeline = m.timeline || []; S.snap = m.snap; S.stream = null;
+      S.turn = m.snap?.turn ?? null; S.running = S.turn !== null;
+      S.mode = 'explore'; S.phase = 'designing'; S.scene = null; S.queued = 0;
+      S.foot = null;
+      S.tokens = S.timeline.filter(e => e.kind === 'cost').reduce((n, e) => n + (e.body.usage?.prompt || 0) + (e.body.usage?.completion || 0), 0);
       if (m.snap) { S.mode = m.snap.mode; S.phase = m.snap.phase; S.scene = m.snap.scene; S.queued = m.snap.queued; }
-      S.banners = S.warnings.map((w, i) => ({ level: 'warn', text: w, key: 'cfg' + i }));
+      S.banners = S.banners.filter(b => b.level === 'bad').concat(S.warnings.map((w, i) => ({ level: 'warn', text: w, key: 'cfg' + i })));
       renderAll();
       break;
     case 'event':
+      if (S.timeline.some(e => e.seq === m.seq)) break;
       S.timeline.push(m);
+      if (['asked', 'answered', 'judged', 'scene_overridden'].includes(m.kind)) send('snap');
       if (m.kind === 'wrote') S.stream = null;
       renderStream(); renderTop();
       break;
@@ -84,9 +99,10 @@ function onMsg(m) {
       S.stream.text += m.text;
       liveDelta();
       break;
-    case 'turn_started': S.running = true; S.stream = null; renderTop(); renderStream(); break;
+    case 'turn_started': S.turn = m.turn; S.running = true; S.stream = null; renderTop(); renderStream(); break;
     case 'turn_closed':
-      S.running = false; S.stream = null; renderTop(); renderStream(); send('snap');
+      if (S.turn !== null && S.turn !== m.turn) break;
+      S.turn = null; S.running = false; S.stream = null; dropBanner('stop'); dropBanner('run'); renderTop(); renderStream(); send('snap');
       // 标题是后端按第一句用户发言算的，但那是 boot 时算的。刚说完第一句时
       // 本地补一下，不然侧栏会一直挂着「空对话」直到下次切会话。
       titleSelf();
@@ -101,6 +117,7 @@ function onMsg(m) {
     case 'snap':
       S.snap = m.snap; S.mode = m.snap.mode; S.phase = m.snap.phase;
       S.scene = m.snap.scene; S.queued = m.snap.queued;
+      S.turn = m.snap.turn ?? null; S.running = S.turn !== null;
       renderRight(); renderTop(); renderAsk();
       break;
     case 'cost': S.tokens = m.total; renderTop(); break;
@@ -113,7 +130,7 @@ function onMsg(m) {
     case 'compacted':
       banner('info', `已折叠 ${m.folded} 条早期对话：${m.before} → ${m.after} tok`, 'fold');
       break;
-    case 'distilled': banner('info', `蒸馏草稿写到 ${m.draft}`, 'distill'); send('snap'); break;
+    case 'distilled': banner('info', m.draft.startsWith('(') ? m.draft : `蒸馏草稿写到 ${m.draft}`, 'distill'); send('memory_get'); break;
     case 'footprint': S.foot = m; renderTop(); break;
     case 'persist':
       if (m.ok) dropBanner('persist');
@@ -125,18 +142,37 @@ function onMsg(m) {
       banner('info', `恢复了上次的会话：${m.events} 条事件，修补 ${m.crashed} 个中断轮次，${m.reopened} 个提问重新打开`, 'rec');
       break;
     case 'forked': banner('info', `已从第 ${m.from_turn} 轮分出新分支`, 'fork'); break;
-    case 'probe': $('#probe-out') && ($('#probe-out').textContent = m.text); break;
+    case 'probe': $$('.probe-out').forEach(el => el.textContent = m.text); break;
+    case 'browse':
+      S.browse = m;
+      if (m.error) banner('bad', m.error, 'browse');
+      else renderBrowser();
+      break;
     case 'err': banner('bad', m.msg, 'err' + Date.now()); break;
-    case 'lagged': banner('warn', `推送积压，跳过了 ${m.n} 条（刷新可对齐）`, 'lag'); break;
+    case 'lagged': banner('warn', `推送积压，正在同步 ${m.n} 条遗漏事件`, 'lag'); send('sync'); break;
   }
 }
+
+/** 这两条是**持续状态**，要等对应的解除事件才消失，不能按时间赶走：
+ *  盘还在坏、工具还在跑的时候，横幅消失了等于骗人。其余的都停 10 秒。 */
+const STICKY = new Set(['persist', 'run']);
+const HOLD_MS = 10000;
+const timers = {};
 
 function banner(level, text, key) {
   S.banners = S.banners.filter(b => b.key !== key);
   S.banners.push({ level, text, key });
+  clearTimeout(timers[key]);
+  if (!STICKY.has(key)) timers[key] = setTimeout(() => dropBanner(key), HOLD_MS);
   renderBanner();
 }
-function dropBanner(key) { S.banners = S.banners.filter(b => b.key !== key); renderBanner(); }
+
+function dropBanner(key) {
+  clearTimeout(timers[key]);
+  delete timers[key];
+  S.banners = S.banners.filter(b => b.key !== key);
+  renderBanner();
+}
 
 // ───────────────────────── 顶栏 ─────────────────────────
 
@@ -144,8 +180,9 @@ function renderTop() {
   $$('#mode-seg button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
   $('#phase-chip').textContent = S.phase === 'handoff' ? '交接' : '设计讨论';
   const sc = $('#scene-chip');
-  sc.hidden = !S.scene || S.scene === 'none';
-  if (!sc.hidden) sc.textContent = '场景 ' + S.scene;
+  sc.hidden = false;
+  sc.textContent = '场景 ' + (S.scene || '自动');
+  sc.title = '选择下一轮场景';
   const foot = S.foot ? `　·　上下文 ${S.foot.total} tok` : '';
   const tc = $('#token-chip');
   tc.textContent = `${S.tokens} tok${foot}`;
@@ -170,7 +207,13 @@ function renderTop() {
 
 function renderBanner() {
   const b = $('#banner'); b.textContent = '';
-  for (const n of S.banners) b.append(h('div', { class: 'note ' + n.level }, n.text));
+  for (const n of S.banners) {
+    b.append(h('div', {
+      class: 'note ' + n.level,
+      title: '点掉',
+      onclick: () => dropBanner(n.key),
+    }, n.text));
+  }
 }
 
 // ───────────────────────── 消息流 ─────────────────────────
@@ -246,7 +289,10 @@ function renderStream() {
         h('div', { class: 'bubble', id: 'live-text' }, S.stream.text))));
   }
   if (!S.timeline.length && !S.stream) {
-    const missing = Object.entries(S.keys).filter(([, v]) => !v.has).map(([k]) => k);
+    // 只报**三个角色真正要用**的那几个 provider。S.keys 里还有 firecrawl 这类
+    // 非模型条目，全列出来会让人以为不填就起不来。
+    const need = [...new Set(Object.values(S.settings?.roles || {}).map(r => r.provider))];
+    const missing = need.filter(n => !S.keys[n]?.has);
     const noSession = !S.session;
     st.append(noSession
       ? h('div', { class: 'blank' },
@@ -294,7 +340,8 @@ function updateToBottom() {
   // 短对话时按钮会一直挂在那儿，点了什么也不会发生。
   const scrollable = st.scrollHeight - st.clientHeight > 120;
   const nearBottom = st.scrollTop + st.clientHeight > st.scrollHeight - 160;
-  btn.hidden = !scrollable || nearBottom;
+  // 空态那一屏本来就没有「最新」可回
+  btn.hidden = !S.timeline.length || !scrollable || nearBottom;
 }
 
 /** 流式只改那一个文本节点，不重画整条流 —— 否则每来一个 delta 都会滚动跳一下。 */
@@ -447,7 +494,7 @@ function drawGraph(g) {
     r.forEach((id, i) => { pos[id] = { x: PAD + i * (W + GX), y: PAD + (+L) * (H + GY) }; });
   }
   const width = PAD * 2 + maxCols * W + (maxCols - 1) * GX;
-  const height = PAD * 2 + Object.keys(rows).length * H + (Object.keys(rows).length - 1) * GY;
+  const height = PAD * 2 + H + Math.max(0, ...Object.keys(rows).map(Number)) * (H + GY);
 
   const NS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(NS, 'svg');
@@ -515,12 +562,12 @@ function drawGraph(g) {
 
 // ───────────────────────── 编辑弹层 ─────────────────────────
 
-function modal(title, bodyNodes, onOk) {
+function modal(title, bodyNodes, onOk, okLabel = '应用') {
   const m = $('#modal'), body = $('.sheet-body', m);
   body.textContent = '';
   body.append(h('h3', {}, title), ...bodyNodes,
     h('div', { class: 'acts', style: 'display:flex;gap:8px;margin-top:14px' },
-      h('button', { class: 'primary', onclick: () => { onOk(); close(); } }, '应用'),
+      h('button', { class: 'primary', onclick: () => { onOk(); close(); } }, okLabel),
       h('button', { onclick: close }, '取消')));
   m.hidden = false;
   function close() { m.hidden = true; }
@@ -598,6 +645,142 @@ function renderSessions() {
   }
 }
 
+
+// ───────────────────────── 右栏：编辑区 ─────────────────────────
+//
+// 配置和记忆文件都是**整篇文本**。原来塞在左栏一个三行小框里，读也读不下、
+// 改也改不动。移到右栏之后它占满整列高度，才是能真的动手的尺寸。
+
+function switchRight(which) {
+  document.body.classList.remove('no-right');
+  document.body.classList.add('want-right');
+  $$('#right-seg button').forEach(b => b.classList.toggle('on', b.dataset.rt === which));
+  $$('#right .pane').forEach(p => p.hidden = p.dataset.rp !== which);
+}
+
+/** 打开一个文件到右栏。`kind` 是 'memory' 或 'config'。 */
+function openEditor(kind, file) {
+  let text = '', note = '', deletable = false;
+  if (kind === 'config') {
+    // 用 boot 时存下的那份，不是 S.settings —— 后者会被左栏表单的草稿改动污染，
+    // 而这里明写着「盘上那份」，说了就得是真的。
+    text = JSON.stringify(S.saved ?? S.settings, null, 2);
+    note = '这是盘上那份 config.json。左栏表单里还没保存的改动不在里面。保存会重启当前会话（历史不丢）。';
+  } else {
+    const f = S.memory.find(x => x.file === file);
+    if (!f) return;
+    text = f.text;
+    note = MEM_DESC[file] || (file.startsWith('draft-')
+      ? '蒸馏草稿，还没应用。审阅后把要留的内容并进对应的记忆文件。'
+      : '一条参考案例。命中对应场景时注入回答段。');
+    deletable = file.startsWith('cases/') || file.startsWith('draft-');
+  }
+  S.editor = { kind, file: file || 'config.json', orig: text, note, deletable };
+  $('#ed-text').value = text;
+  renderEditor();
+  switchRight('edit');
+  $('#ed-text').focus();
+}
+
+function renderEditor() {
+  const e = S.editor;
+  $$('#right-seg button').forEach(b => { if (b.dataset.rt === 'edit') b.hidden = !e; });
+  if (!e) { switchRight('infer'); return; }
+  $('#ed-name').textContent = e.file;
+  $('#ed-note').textContent = e.note;
+  $('#ed-del').hidden = !e.deletable;
+  edDirty();
+  renderMemory();
+}
+
+function edDirty() {
+  const e = S.editor;
+  $('#ed-dirty').hidden = !e || $('#ed-text').value === e.orig;
+}
+
+function saveEditor() {
+  const e = S.editor; if (!e) return;
+  const text = $('#ed-text').value;
+  if (e.kind === 'config') {
+    let next;
+    try { next = JSON.parse(text); }
+    catch (err) { banner('bad', 'config.json 格式不对，没保存：' + err.message, 'ed'); return; }
+    send('settings_put', { settings: next });
+  } else {
+    send('memory_put', { file: e.file, text });
+  }
+  e.orig = text;
+  edDirty();
+  banner('info', `已保存 ${e.file}`, 'ed');
+}
+
+function closeEditor() {
+  if (S.editor && $('#ed-text').value !== S.editor.orig
+      && !confirm('有没保存的改动，确定关掉？')) return;
+  S.editor = null;
+  renderEditor();
+}
+
+// ───────────────────────── 目录浏览器 ─────────────────────────
+//
+// **它不走 Policy**，因为它的用途正是「挑一个还没授权的目录加进白名单」。
+// 边界在别处：服务只绑本地回环，而且这是 server 的指令不是工具 —— 模型碰不到，
+// 模型读文件仍然只能走 toolkit 并且必须过闸门。
+
+let pickCb = null;
+
+function openBrowser(start, cb) {
+  pickCb = cb;
+  S.browse = null;
+  send('browse', { path: start || '' });
+}
+
+function renderBrowser() {
+  const b = S.browse; if (!b) return;
+  const manual = h('input', { value: b.path, spellcheck: 'false',
+    onkeydown: (e) => { if (e.key === 'Enter') send('browse', { path: e.target.value }); } });
+  const list = h('div', { class: 'br-list' });
+  if (b.parent) {
+    list.append(h('div', { class: 'br-row d', onclick: () => send('browse', { path: b.parent }) },
+      h('span', { class: 'ic' }, '↰'), h('span', {}, '上一级')));
+  }
+  for (const it of b.entries) {
+    const row = h('div', {
+      class: 'br-row' + (it.dir ? ' d' : ''),
+      onclick: () => { if (it.dir) send('browse', { path: join(b.path, it.name) }); },
+    },
+      h('span', { class: 'ic' }, it.dir ? '▸' : '·'),
+      h('span', {}, it.name),
+      h('button', {
+        class: 'pick',
+        onclick: (e) => { e.stopPropagation(); pick(join(b.path, it.name)); },
+      }, '选它'));
+    list.append(row);
+  }
+  const cuts = h('div', { class: 'br-cuts' });
+  for (const c of b.shortcuts || []) {
+    cuts.append(h('button', { onclick: () => send('browse', { path: c.path }) }, c.label));
+  }
+  modal('选一个目录或文件', [
+    cuts,
+    h('div', { class: 'field' }, h('label', {}, '当前位置（可直接输入路径后回车）'), manual),
+    list,
+    h('p', { class: 'hint', style: 'margin-top:8px' },
+      '选目录 = 这个目录下的东西模型都能读；选单个文件 = 只放行那一个。'),
+  ], () => pick(b.path), '选当前目录');
+}
+
+function pick(p) {
+  $('#modal').hidden = true;
+  const cb = pickCb; pickCb = null;
+  if (cb) cb(p);
+}
+
+function join(base, name) {
+  const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
+  return base.endsWith(sep) ? base + name : base + sep + name;
+}
+
 function renderConfig() {
   const box = $('#config-form'); box.textContent = '';
   const st = S.settings; if (!st) return;
@@ -616,6 +799,26 @@ function renderConfig() {
     for (const o of opts) s.append(h('option', { value: o, selected: obj[k] === o }, o));
     return h('div', { class: 'field' }, h('label', {}, label), s);
   };
+  /** 路径列表：一行一个 + 浏览添加。比让人往小框里手打路径靠谱得多。 */
+  const pathList = (obj, k, label) => {
+    const rows = h('div', {});
+    const redraw = () => {
+      rows.textContent = '';
+      (obj[k] || []).forEach((v, i) => {
+        rows.append(h('div', { class: 'prow' },
+          h('span', { title: v }, v),
+          h('button', {
+            class: 'icon', title: '移除',
+            onclick: () => { obj[k].splice(i, 1); redraw(); },
+          }, '✕')));
+      });
+      rows.append(h('div', { class: 'pact' },
+        h('button', { onclick: () => openBrowser(obj[k]?.[0] || '', p => { (obj[k] ||= []).push(p); redraw(); }) },
+          '浏览添加…')));
+    };
+    redraw();
+    return h('div', { class: 'field' }, h('label', {}, label), rows);
+  };
   const lines = (obj, k, label) => {
     const t = h('textarea', { rows: 3, oninput: e => obj[k] = e.target.value.split('\n').map(s => s.trim()).filter(Boolean) });
     t.value = (obj[k] || []).join('\n');
@@ -630,10 +833,19 @@ function renderConfig() {
   };
 
   const provs = Object.keys(draft.providers);
+  const presetOf = (name) => S.presets.find(p => p.name === name);
+  /** 模型名给候选但不锁死 —— 厂商加新模型比这个列表更新快，写死会拦住人。 */
+  const modelInput = (r) => {
+    const id = 'ml-' + r.provider;
+    const dl = h('datalist', { id });
+    for (const m of presetOf(r.provider)?.models || []) dl.append(h('option', { value: m }));
+    const i = h('input', { value: r.model, list: id, oninput: e => r.model = e.target.value });
+    return h('div', { class: 'field' }, h('label', {}, '模型名'), i, dl);
+  };
   for (const [role, cn] of [['judge', '判断段'], ['answer', '回答段'], ['subagent', '子任务']]) {
     const r = draft.roles[role];
     box.append(block(`${cn} · ${role}`, r.model, [
-      sel(r, 'provider', 'provider', provs), txt(r, 'model', '模型名'),
+      sel(r, 'provider', 'provider', provs), modelInput(r),
       h('div', { class: 'two' }, num(r, 'temperature', '温度'), num(r, 'max_tokens', 'max tokens')),
     ]));
   }
@@ -652,18 +864,64 @@ function renderConfig() {
         }, '存入'),
         st_.has ? h('button', { class: 'danger', onclick: () => send('secret_put', { provider: name, key: '' }) }, '清除') : null),
       h('p', { class: 'hint' }, `环境变量 ${st_.env} 优先级高于这里。`),
+      // 被某个角色用着的 provider 不给删 —— 删了之后症状是「模型没反应」，
+      // 而错误信息要到下一次起会话才出来。
+      (() => {
+        const used = Object.values(draft.roles).filter(r => r.provider === name).length;
+        return h('div', { class: 'acts' }, h('button', {
+          class: 'danger', disabled: used > 0,
+          title: used ? '有角色正在用它，先把那个角色改到别的 provider' : '从花名册里移除',
+          onclick: () => { delete draft.providers[name]; renderConfigFrom(draft); },
+        }, '移除这个 provider'));
+      })(),
+    ]));
+  }
+
+  // ＋ 添加 provider：预设来自后端，base_url 与密钥变量名只有那一份
+  {
+    const psel = h('select', {});
+    let firstPreset = '';
+    for (const p of S.presets) {
+      if (!draft.providers[p.name] || p.name === 'custom') {
+        psel.append(h('option', { value: p.name }, `${p.label}（${p.name}）`));
+        firstPreset ||= p.name;
+      }
+    }
+    psel.value = firstPreset;
+    const nameIn = h('input', { placeholder: '花名册里的名字，留空用预设名' });
+    box.append(block('＋ 添加 provider', S.presets.length ? `${S.presets.length} 个预设` : '', [
+      h('div', { class: 'field' }, h('label', {}, '厂商'), psel),
+      h('div', { class: 'field' }, h('label', {}, '名字'), nameIn),
+      h('p', { class: 'hint' }, 'DeepSeek / 智谱 GLM / 月之暗面都是 OpenAI 兼容协议，选了就自动带上地址和密钥变量名。自建 vLLM、Ollama 选「自定义」再改地址。'),
+      h('div', { class: 'acts' }, h('button', {
+        class: 'primary',
+        onclick: () => {
+          const pre = S.presets.find(x => x.name === psel.value);
+          if (!pre) return;
+          const key = (nameIn.value.trim() || pre.name).replace(/[^A-Za-z0-9_-]/g, '');
+          if (!key) return banner('bad', '名字只能用字母数字和 - _', 'prov');
+          if (draft.providers[key]) return banner('bad', `已经有一个叫 ${key} 的了`, 'prov');
+          draft.providers[key] = { api: pre.api, base_url: pre.base_url, key_env: pre.key_env };
+          renderConfigFrom(draft);
+        },
+      }, '加进花名册')),
     ]));
   }
 
   const w = draft.web;
+  const fireKey = h('input', { type: 'password', placeholder: S.keys.firecrawl?.has ? '已有密钥（留空保持）' : 'Firecrawl 密钥' });
   box.append(block('联网后端', w.fetch, [
     sel(w, 'fetch', '抓取', ['crawl4ai', 'crawl4ai_cli', 'firecrawl', 'http', 'none']),
     txt(w, 'fetch_base', '抓取服务地址'),
     sel(w, 'search', '搜索', ['searxng', 'firecrawl', 'none']),
     txt(w, 'search_base', 'SearXNG 地址'),
+    fireKey,
+    h('div', { class: 'acts' },
+      h('button', { onclick: () => { if (fireKey.value.trim()) send('secret_put', { provider: 'firecrawl', key: fireKey.value }); fireKey.value = ''; } }, '存入 Firecrawl 密钥'),
+      h('button', { onclick: () => send('secret_put', { provider: 'firecrawl', key: '' }) }, '清除')),
     h('p', { class: 'hint' }, 'crawl4ai 与 SearXNG 都是本地自建、不要密钥。firecrawl 要。'),
     h('div', { class: 'acts' }, h('button', { onclick: () => send('probe_web') }, '探活')),
-    h('pre', { id: 'probe-out', class: 'hint', style: 'white-space:pre-wrap;margin:6px 0 0' }),
+    h('pre', { class: 'probe-out hint', style: 'white-space:pre-wrap;margin:6px 0 0' }),
   ]));
 
   const t = draft.tools;
@@ -671,31 +929,34 @@ function renderConfig() {
     h('div', { class: 'kv' },
       h('b', {}, '联网'),
       h('input', { type: 'checkbox', checked: t.net, style: 'width:auto', onchange: e => t.net = e.target.checked })),
-    lines(t, 'roots', '可读目录（一行一个）'),
+    pathList(t, 'roots', '可读目录 / 文件'),
     lines(t, 'allow_hosts', '可抓域名（后缀匹配，* 表示不限）'),
+    lines(t, 'deny_hosts', '禁止抓取的域名（优先于允许列表）'),
     lines(t, 'deny_names', '永不读取的名字'),
+    lines(t, 'exec_allow', '工具后端可启动的程序名'),
     h('div', { class: 'two' }, num(t, 'max_bytes', '单次字节上限'), num(t, 'max_lines', '行数上限')),
     h('div', { class: 'two' }, num(t, 'max_matches', '检索条数'), num(t, 'max_depth', '遍历深度')),
-  ]));
-
-  const raw = h('textarea', { rows: 10 });
-  raw.value = JSON.stringify(draft, null, 2);
-  box.append(block('配置文件（config.json）', '高级', [
-    h('p', { class: 'hint' }, '上面的表单改的就是这份。也可以直接改这里 —— 保存时以这份为准。'),
-    raw,
+    h('div', { class: 'two' }, num(t, 'max_line_len', '单行长度'), num(t, 'max_entries', '文件树条目上限')),
+    num(t, 'max_file_bytes', '单文件读取字节上限'),
   ]));
 
   box.append(h('button', {
     class: 'primary wide', style: 'margin-top:10px',
-    onclick: () => {
-      let next;
-      try { next = JSON.parse(raw.value); } catch { next = draft; }
-      // 表单改的是 draft，文本框如果被动过就以文本框为准；两边一致时无所谓
-      send('settings_put', { settings: raw.value.trim() === JSON.stringify(draft, null, 2).trim() ? draft : next });
-    },
+    onclick: () => send('settings_put', { settings: draft }),
   }, '保存并重启会话'));
+  box.append(h('button', {
+    class: 'wide', style: 'margin-top:6px',
+    onclick: () => openEditor('config'),
+    title: '整份 config.json，在右栏改',
+  }, '✎ 直接改 config.json'));
   box.append(h('p', { class: 'hint', style: 'margin-top:8px' },
     '改动会重启当前会话（历史不丢，从库里恢复）。'));
+}
+
+/** 带着一份改过的 draft 重画配置面板。加/删 provider 之后要用它刷新。 */
+function renderConfigFrom(draft) {
+  S.settings = draft;
+  renderConfig();
 }
 
 const MEM_DESC = {
@@ -708,18 +969,18 @@ const MEM_DESC = {
 
 function renderMemory() {
   const box = $('#memory-list'); box.textContent = '';
+  const openFile = S.editor?.kind === 'memory' ? S.editor.file : null;
   for (const f of S.memory) {
-    const ta = h('textarea', {}); ta.value = f.text;
-    const isCase = f.file.startsWith('cases/');
-    const d = h('details', { class: 'block' });
-    d.append(h('summary', {}, f.file, isCase ? h('span', { class: 'tag' }, '蒸馏结果') : null));
-    d.append(h('div', { class: 'body' },
-      h('p', { class: 'hint' }, MEM_DESC[f.file] || '一条参考案例。命中对应场景时注入回答段。'),
-      ta,
-      h('div', { class: 'acts' },
-        h('button', { class: 'primary', onclick: () => send('memory_put', { file: f.file, text: ta.value }) }, '保存'),
-        isCase ? h('button', { class: 'danger', onclick: () => send('memory_del', { file: f.file }) }, '删除') : null)));
-    box.append(d);
+    const isDraft = f.file.startsWith('draft-');
+    // 一行一个入口，正文去右栏改。侧栏里塞不下一篇 prompts.toml。
+    box.append(h('div', {
+      class: 'frow file' + (f.file === openFile ? ' on' : ''),
+      onclick: () => openEditor('memory', f.file),
+      title: MEM_DESC[f.file] || f.file,
+    },
+      h('span', { class: 'p' }, f.file),
+      isDraft ? h('span', { class: 'm' }, '待审阅') : null,
+      h('span', { class: 'm' }, `${f.text.split('\n').length} 行`)));
   }
   box.append(h('button', {
     class: 'wide', style: 'margin-top:8px',
@@ -737,7 +998,7 @@ function renderTools() {
   box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '联网后端'));
   box.append(h('div', { class: 'kv' }, h('b', {}, '当前'), S.web));
   box.append(h('button', { style: 'margin-top:6px', onclick: () => send('probe_web') }, '探活'));
-  box.append(h('pre', { id: 'probe-out', class: 'hint', style: 'white-space:pre-wrap;margin:6px 0 0' }));
+  box.append(h('pre', { class: 'probe-out hint', style: 'white-space:pre-wrap;margin:6px 0 0' }));
   box.append(h('h4', { style: 'margin:14px 0 6px;font-size:11px;color:var(--muted)' }, '本会话用量'));
   box.append(h('div', { class: 'hint', style: 'font-family:var(--mono);font-size:11px' }, S.metrics || '（还没调用过）'));
   box.append(h('p', { class: 'hint', style: 'margin-top:12px' },
@@ -745,7 +1006,7 @@ function renderTools() {
 }
 
 function renderAll() {
-  renderTop(); renderBanner(); renderStream(); renderRight();
+  renderTop(); renderBanner(); renderStream(); renderRight(); renderEditor();
   renderSessions(); renderConfig(); renderMemory(); renderTools(); renderAsk();
   const roots = S.settings?.tools?.roots || [];
   $('#root-path').value = roots[0] || '.';
@@ -831,9 +1092,36 @@ function boot() {
   $$('#mode-seg button').forEach(b => b.onclick = () => send('mode', { to: b.dataset.mode }));
   $('#phase-chip').onclick = () =>
     send('phase', { to: S.phase === 'handoff' ? 'designing' : 'handoff' });
+  $('#scene-chip').onclick = () => {
+    const select = h('select');
+    for (const scene of S.scenes || []) select.append(h('option', { value: scene.id, selected: scene.id === S.scene }, scene.label || scene.id));
+    if (!select.children.length) return;
+    modal('下一轮场景', [select], () => send('scene', { to: select.value }));
+  };
   $('#new-chat').onclick = () => send('open', { session: '' });
   $('#graph-refresh').onclick = () => send('snap');
-  $('#stop').onclick = () => send('interrupt');
+  $('#stop').onclick = () => { if (S.turn !== null) send('interrupt', { turn: S.turn }); };
+
+  $$('#right-seg button').forEach(b => b.onclick = () => switchRight(b.dataset.rt));
+  $('#ed-save').onclick = saveEditor;
+  $('#ed-close').onclick = closeEditor;
+  $('#ed-revert').onclick = () => {
+    if (!S.editor) return;
+    $('#ed-text').value = S.editor.orig; edDirty();
+  };
+  $('#ed-del').onclick = () => {
+    const e = S.editor; if (!e || e.kind !== 'memory') return;
+    if (!confirm(`删掉 ${e.file}？`)) return;
+    send('memory_del', { file: e.file });
+    S.editor = null; renderEditor();
+  };
+  $('#ed-text').addEventListener('input', edDirty);
+  $('#ed-text').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveEditor(); }
+  });
+  $('#root-browse').onclick = () => openBrowser($('#root-path').value, (p) => {
+    $('#root-path').value = p;
+  });
   $('#stream').addEventListener('scroll', updateToBottom, { passive: true });
   $('#to-bottom').onclick = () => {
     const st = $('#stream'); st.scrollTop = st.scrollHeight;
@@ -846,7 +1134,7 @@ function boot() {
     const text = input.value;
     if (!text.trim()) return;
     // 轮次在跑的时候发出去 = 插话；Core 会决定排队还是打断
-    send('send', { text, interrupt: false });
+    if (!S.session || !send('send', { text, interrupt: false })) return;
     input.value = ''; grow(); input.focus();
   };
   $('#send').onclick = fire;
@@ -856,7 +1144,7 @@ function boot() {
 
   $('#root-save').onclick = () => {
     const next = JSON.parse(JSON.stringify(S.settings));
-    next.tools.roots = [$('#root-path').value.trim() || '.'];
+    next.tools.roots = [$('#root-path').value.trim() || '.', ...next.tools.roots.slice(1)];
     send('settings_put', { settings: next });
   };
 

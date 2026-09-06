@@ -56,6 +56,7 @@ pub struct App {
     settings: RwLock<Settings>,
     secrets: RwLock<Secrets>,
     live: Mutex<Option<Live>>,
+    commands: Mutex<()>,
     /// 已序列化好的 JSON，广播给所有打开的页面。多开一个标签页也能同步看到。
     out: broadcast::Sender<String>,
 }
@@ -87,6 +88,7 @@ impl App {
             settings: RwLock::new(settings),
             secrets: RwLock::new(secrets),
             live: Mutex::new(None),
+            commands: Mutex::new(()),
             out,
         });
         Ok(app)
@@ -103,7 +105,6 @@ impl App {
 
     /// 起一个会话的 Core。`resume` 为 None 表示开新会话。
     async fn open(self: &Arc<Self>, resume: Option<SessionId>) -> Result<(), String> {
-        self.close().await;
         let settings = self.settings.read().await.clone();
         let secrets = self.secrets.read().await.clone();
         let models = settings.build_models(&secrets, &real_env)?;
@@ -115,6 +116,21 @@ impl App {
             .map_err(|e| format!("工具链起不来：{e}"))?;
         let registry = toolkit::register(Registry::new(), &deps);
         let tools = registry.names();
+
+        if let Some(id) = &resume {
+            if self.store.get_session(id).map_err(|e| e.to_string())?.is_none() {
+                return Err("会话不存在".into());
+            }
+        }
+        let mode = {
+            let live = self.live.lock().await;
+            match live.as_ref().filter(|l| resume.as_ref() == Some(&l.session)) {
+                Some(l) => l.handle.session_snapshot().await.map(|s| s.mode).unwrap_or(Mode::Explore),
+                None => Mode::Explore,
+            }
+        };
+        // 配置或目标无效时保留当前 Core；恢复必须等旧 writer 冲完。
+        self.close().await;
 
         let session = resume.clone().unwrap_or_else(SessionId::new);
         if resume.is_none() {
@@ -128,19 +144,15 @@ impl App {
                 title: String::new(),
                 created_ms: crate::event::now_ms(),
             };
-            if let Err(e) = self.store.create_session(&s) {
-                eprintln!("[serve] 登记会话失败：{e}");
-            }
+            self.store.create_session(&s).map_err(|e| format!("登记会话失败：{e}"))?;
         }
         let restored = match &resume {
             Some(id) => {
                 let s = self.store.clone();
                 let id = id.clone();
-                tokio::task::spawn_blocking(move || restore(s.as_ref(), &id).ok())
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|r| !r.events.is_empty() || !r.repairs.is_empty())
+                Some(tokio::task::spawn_blocking(move || restore(s.as_ref(), &id))
+                    .await.map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?)
             }
             None => None,
         };
@@ -154,7 +166,7 @@ impl App {
             session.clone(),
             memory,
             writer,
-            Mode::Explore,
+            mode,
         );
         cd.memory_dir = Some(self.dir.join("memory"));
         cd.restored = restored;
@@ -275,6 +287,7 @@ fn markdown_of(b: &Body) -> Option<String> {
     match b {
         Body::Wrote { text, .. } => Some(text.clone()),
         Body::Said { text, .. } => Some(text.clone()),
+        Body::Answered { choice } => Some(choice.clone()),
         Body::Noted { text } => Some(text.clone()),
         Body::Called { text, .. } if !text.trim().is_empty() => Some(text.clone()),
         Body::Asked { question, .. } => Some(question.clone()),
@@ -319,7 +332,9 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket) {
                 Ok(s) => {
                     if socket.send(Ws::Text(s.into())).await.is_err() { break }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    if socket.send(Ws::Text(json!({"t":"lagged", "n":n}).to_string().into())).await.is_err() { break }
+                }
                 Err(_) => break,
             },
         }
@@ -327,6 +342,7 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket) {
 }
 
 async fn boot(app: &Arc<App>) -> Option<Value> {
+    let memory = Memory::load_or_bootstrap(&app.dir.join("memory")).await;
     let settings = app.settings.read().await.clone();
     let secrets = app.secrets.read().await.clone();
     let live = app.live.lock().await;
@@ -359,13 +375,14 @@ async fn boot(app: &Arc<App>) -> Option<Value> {
             "body": serde_json::to_value(&e.body).unwrap_or(Value::Null),
             "html": markdown_of(&e.body).map(|m| markdown::to_html(&m)),
         })).collect::<Vec<_>>(),
-        "snap": snap.map(|s| snap_json(&s)),
+        "snap": snap.map(|s| snap_json(&s, &memory.prompts.graph)),
+        "presets": crate::config::presets_json(),
+        "scenes": memory.playbook.scenes.values().map(|s| json!({"id":s.id,"label":s.label})).collect::<Vec<_>>(),
         "memory": memory_files(app),
     }))
 }
 
-fn snap_json(s: &crate::msg::Snap) -> Value {
-    let style = crate::memory::GraphStyle::default();
+fn snap_json(s: &crate::msg::Snap, style: &crate::memory::GraphStyle) -> Value {
     json!({
         "session": s.session.0,
         "seq": s.seq.0,
@@ -378,7 +395,7 @@ fn snap_json(s: &crate::msg::Snap) -> Value {
             "seq": q.id.0, "question": q.question, "options": q.options
         })).collect::<Vec<_>>(),
         "ws": serde_json::to_value(&s.ws).unwrap_or(Value::Null),
-        "mermaid": render::source(&s.ws.flow, &style).map(|(_, src)| src),
+        "mermaid": render::source(&s.ws.flow, style).map(|(_, src)| src),
     })
 }
 
@@ -419,7 +436,7 @@ fn first_words(app: &Arc<App>, id: &SessionId) -> String {
 }
 
 fn key_status(s: &Settings, sec: &Secrets) -> Value {
-    Value::Object(
+    let mut status = Value::Object(
         s.providers
             .iter()
             .map(|(n, p)| {
@@ -427,7 +444,9 @@ fn key_status(s: &Settings, sec: &Secrets) -> Value {
                 (n.clone(), json!({ "has": has, "env": p.key_env }))
             })
             .collect(),
-    )
+    );
+    status["firecrawl"] = json!({"has": s.web_key(sec, &real_env).is_some(), "env": "FIRECRAWL_API_KEY"});
+    status
 }
 
 /// 持久层的文件清单 + 内容。**「prompt 都要独立出来」的落点** ——
@@ -435,6 +454,15 @@ fn key_status(s: &Settings, sec: &Secrets) -> Value {
 fn memory_files(app: &Arc<App>) -> Value {
     let dir = app.dir.join("memory");
     let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten().filter(|e| e.path().is_file()) {
+            let name = e.file_name().to_string_lossy().to_string();
+            if draft_allowed(&name) {
+                let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+                out.push(json!({"file": name, "text": text}));
+            }
+        }
+    }
     for name in ["project.md", "preferences.md", "knowledge.md", "playbook.toml", "prompts.toml"] {
         let text = std::fs::read_to_string(dir.join(name)).unwrap_or_default();
         out.push(json!({ "file": name, "text": text }));
@@ -454,6 +482,10 @@ fn memory_files(app: &Arc<App>) -> Value {
 
 async fn handle(app: &Arc<App>, v: Value) {
     let op = v["op"].as_str().unwrap_or("");
+    // 仅串行化生命周期操作，探活/落盘等待不能挡住其他标签页的停止。
+    let _command = if matches!(op, "open" | "fork" | "settings_put" | "secret_put") {
+        Some(app.commands.lock().await)
+    } else { None };
     let live = app.live.lock().await;
     let h = live.as_ref().map(|l| l.handle.clone());
     drop(live);
@@ -485,12 +517,6 @@ async fn handle(app: &Arc<App>, v: Value) {
             let turn = v["turn"].as_u64().map(TurnId);
             if let (Some(h), Some(t)) = (h.clone(), turn) {
                 h.session_interrupt(t).await;
-            } else if let Some(h) = h {
-                if let Some(s) = h.session_snapshot().await {
-                    if let Some(t) = s.turn {
-                        h.session_interrupt(t).await;
-                    }
-                }
             }
         }
         "mode" => {
@@ -566,6 +592,7 @@ async fn handle(app: &Arc<App>, v: Value) {
                     // 而不是浏览器提交上来的那份。
                     next = Settings::load(&app.dir, &real_env);
                     *app.settings.write().await = next;
+                    app.restart().await;
                     app.reboot().await;
                 }
                 Err(e) => app.err(&format!("配置解析不了：{e}")),
@@ -581,6 +608,7 @@ async fn handle(app: &Arc<App>, v: Value) {
                 return app.err(&format!("写 secrets.json 失败：{e}"));
             }
             drop(sec);
+            app.restart().await;
             app.reboot().await;
         }
         "memory_put" => {
@@ -608,6 +636,15 @@ async fn handle(app: &Arc<App>, v: Value) {
             let _ = std::fs::remove_file(app.dir.join("memory").join(file));
             app.push(json!({ "t": "memory", "files": memory_files(app) }));
         }
+        // 目录浏览器。**刻意不过 Policy**：它的用途正是「挑一个还没授权的目录
+        // 加进白名单」，过闸门就永远只能在已授权范围里打转。
+        //
+        // 安全边界靠的是另外两条：这个服务只绑本地回环（见 bin/serve.rs），
+        // 而且它是 **server 的指令、不是工具** —— 模型碰不到它，模型读文件
+        // 仍然只能走 toolkit，仍然必须过 Policy。这里只回名字和是不是目录，
+        // 不回任何文件内容。
+        "browse" => app.push(browse(app, v["path"].as_str().unwrap_or(""))),
+
         "probe_web" => {
             let settings = app.settings.read().await.clone();
             let secrets = app.secrets.read().await.clone();
@@ -627,27 +664,95 @@ async fn handle(app: &Arc<App>, v: Value) {
         "snap" => {
             if let Some(h) = h {
                 if let Some(s) = h.session_snapshot().await {
-                    app.push(json!({ "t": "snap", "snap": snap_json(&s) }));
+                    let memory = Memory::load_or_bootstrap(&app.dir.join("memory")).await;
+                    app.push(json!({ "t": "snap", "snap": snap_json(&s, &memory.prompts.graph) }));
                 }
             }
         }
+        "memory_get" => app.push(json!({ "t": "memory", "files": memory_files(app) })),
+        "sync" => app.reboot().await,
         _ => {}
     }
 }
 
+/// 列一个目录。给操作者挑路径用，见调用点的说明。
+fn browse(app: &Arc<App>, path: &str) -> Value {
+    let target = if path.trim().is_empty() {
+        app.dir.clone()
+    } else {
+        PathBuf::from(path)
+    };
+    let real = match target.canonicalize() {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "t": "browse", "error": format!("{}：{e}", target.display()) });
+        }
+    };
+    let mut dirs: Vec<Value> = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    match std::fs::read_dir(&real) {
+        Ok(rd) => {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                let row = json!({ "name": name, "dir": is_dir });
+                if is_dir { dirs.push(row) } else { files.push(row) }
+                // 一个 node_modules 能有几万项，列全了浏览器先卡死
+                if dirs.len() + files.len() > 800 {
+                    break;
+                }
+            }
+        }
+        Err(e) => return json!({ "t": "browse", "error": format!("读不了：{e}") }),
+    }
+    let key = |v: &Value| v["name"].as_str().unwrap_or("").to_lowercase();
+    dirs.sort_by_key(key);
+    files.sort_by_key(key);
+    dirs.extend(files);
+    json!({
+        "t": "browse",
+        "path": real.display().to_string(),
+        "parent": real.parent().map(|p| p.display().to_string()),
+        "entries": dirs,
+        "shortcuts": [
+            { "label": "工作目录", "path": app.dir.display().to_string() },
+            { "label": "用户目录", "path": home().display().to_string() },
+        ],
+    })
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// `memory/` 下允许浏览器写的名字。**白名单，不是黑名单。**
 fn mem_allowed(f: &str) -> bool {
-    if f.contains("..") || f.contains('\\') || f.starts_with('/') {
+    if f.contains("..") || f.contains('\\') || f.contains(':') || f.starts_with('/') {
         return false;
     }
     matches!(f, "project.md" | "preferences.md" | "knowledge.md" | "playbook.toml" | "prompts.toml")
+        || draft_allowed(f)
         || (f.starts_with("cases/")
             && f.matches('/').count() == 1
             && f.ends_with(".md")
             && !f["cases/".len()..].is_empty())
 }
 
+fn draft_allowed(f: &str) -> bool {
+    f.strip_prefix("draft-").and_then(|s| s.strip_suffix(".md"))
+        .is_some_and(|stamp| !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl App {
+    async fn restart(self: &Arc<Self>) {
+        let session = self.live.lock().await.as_ref().map(|l| l.session.clone());
+        if let Err(e) = self.open(session).await {
+            self.err(&format!("配置已保存，但会话未重启：{e}"));
+        }
+    }
     fn err(&self, msg: &str) {
         self.push(json!({ "t": "err", "msg": msg }));
     }
@@ -698,4 +803,101 @@ pub async fn serve(app: Arc<App>, port: u16) -> Result<(), String> {
     let real = listener.local_addr().map_err(|e| e.to_string())?;
     println!("premortem UI → http://{real}");
     axum::serve(listener, router).await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn fixture() -> Arc<App> {
+        let dir = std::env::temp_dir().join(format!("premortem-ui-{}", uuid::Uuid::new_v4()));
+        let app = App::new(dir).await.unwrap();
+        let mut settings = Settings::default();
+        for provider in settings.providers.values_mut() {
+            provider.key_env = "PREMORTEM_UI_TEST_UNUSED_KEY".into();
+        }
+        settings.tools.net = false;
+        settings.tools.roots = vec![app.dir.display().to_string()];
+        settings.save(&app.dir).unwrap();
+        *app.settings.write().await = settings;
+        let mut secrets = app.secrets.write().await;
+        secrets.put("anthropic", "test-only-no-request");
+        secrets.put("openai", "test-only-no-request");
+        drop(secrets);
+        app
+    }
+
+    async fn cleanup(app: Arc<App>) {
+        app.close().await;
+        let dir = app.dir.clone();
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn answers_render_in_live_and_restored_history() {
+        let body = Body::Answered { choice: "**yes** <img src=x onerror=alert(1)>".into() };
+        let live = fanout(UiEvent::Appended { seq: crate::ids::Seq(2), turn: None, body: Box::new(body.clone()) }).unwrap();
+        let restored = markdown::to_html(&markdown_of(&body).unwrap());
+        assert_eq!(live["html"], restored);
+        assert!(restored.contains("<strong>yes</strong>"));
+        assert!(!restored.contains("onerror"));
+    }
+
+    #[test]
+    fn memory_paths_reject_traversal_and_windows_streams() {
+        for bad in ["../config.json", "cases/../../x.md", "cases/a:b.md", "cases/a\\b.md", "draft-../1.md", "draft-.md"] {
+            assert!(!mem_allowed(bad), "{bad}");
+        }
+        for good in ["project.md", "cases/example.md", "draft-12345.md"] {
+            assert!(mem_allowed(good), "{good}");
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_restart_rebuilds_tools_and_preserves_session_history() {
+        let app = fixture().await;
+        app.open(None).await.unwrap();
+        let old = app.live.lock().await.as_ref().unwrap().handle.clone();
+        let id = old.session_snapshot().await.unwrap().session;
+        old.session_set_mode(Mode::Go).await;
+        old.session_edit(vec![Op::set("audit", "preserved")]).await.unwrap();
+        let mut next = app.settings.read().await.clone();
+        next.tools.net = true;
+        next.web.fetch = web::Fetcher::Http;
+        handle(&app, json!({"op":"settings_put", "settings":next})).await;
+        assert!(old.session_snapshot().await.is_none(), "old Core still active");
+        {
+            let guard = app.live.lock().await;
+            let live = guard.as_ref().unwrap();
+            assert_eq!(live.session, id);
+            assert_eq!(live.handle.session_snapshot().await.unwrap().mode, Mode::Go);
+            assert!(live.tools.iter().any(|s| s == "web_fetch"));
+            assert_eq!(live.handle.session_snapshot().await.unwrap().ws.fields[&crate::state::Path::from("audit")].value, "preserved");
+        }
+        cleanup(app).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_open_preserves_live_core() {
+        let app = fixture().await;
+        app.open(None).await.unwrap();
+        let old = app.live.lock().await.as_ref().unwrap().handle.clone();
+        assert!(app.open(Some(SessionId("missing".into()))).await.is_err());
+        assert!(old.session_snapshot().await.is_some());
+        app.settings.write().await.roles.answer.provider = "missing".into();
+        assert!(app.open(None).await.is_err());
+        assert!(old.session_snapshot().await.is_some());
+        cleanup(app).await;
+    }
+
+    #[tokio::test]
+    async fn saving_first_key_starts_a_session_and_drafts_are_readable() {
+        let app = fixture().await;
+        handle(&app, json!({"op":"secret_put", "provider":"anthropic", "key":"new-test-key"})).await;
+        assert!(app.live.lock().await.is_some());
+        handle(&app, json!({"op":"memory_put", "file":"draft-123.md", "text":"review me"})).await;
+        assert!(memory_files(&app).as_array().unwrap().iter().any(|v| v["file"] == "draft-123.md" && v["text"] == "review me"));
+        cleanup(app).await;
+    }
 }
