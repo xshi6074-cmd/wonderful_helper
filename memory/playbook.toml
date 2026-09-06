@@ -10,6 +10,8 @@ default_tools = [
     "fs_grep",
     "fs_find",
     "repo_tree",
+    "web_search",
+    "web_fetch",
 ]
 
 [[scene]]
@@ -17,7 +19,8 @@ id = "cheap_first"
 label = "优先低成本试验"
 when = "如果讨论较长（10轮+），从推断图看细节丰满，当前问题难通过继续讨论敲定方案，有几个候选，可以考虑建议用户先做低成本尝试。"
 guidance = "根据实际建议先做能最快证伪/排除某些选项的最小实验。给出它要花多少、能排除什么。"
-tools = []
+tools = ["record_graph",
+    "record_note",]
 
 [[scene]]
 id = "bad_implementation"
@@ -35,11 +38,12 @@ guidance = "用户的目标还没落定。建议先把「要验证什么」问�
 tools = ["ask_user"]
 
 [[scene]]
-id = "diverge_design"
-label = "发散设计"
-when = "只有一个方案却要下结论，或者对照组明显不足以支撑 claim"
+id = "need_ablation"
+label = "消融不充分"
+when = "用户给出实验方案，但是基线必要却明显没有"
 guidance = "对照空间还没铺开。建议把可能的对照/消融列出来再收敛，列的时候说明每一条能排除什么可能性。不用追求穷尽。铺出来的对照臂用 record_graph 画成 ablation / baseline 节点，用户要在图上直接删改的就是它们。"
-tools = []
+tools = ["record_graph",
+    "record_note",]
 
 [[scene]]
 id = "none"
@@ -51,25 +55,32 @@ tools = []
 [[scene]]
 id = "stop_and_implement"
 label = "停止讨论进入实现"
-when = "该定的都定了，再讨论边际收益很低"
-guidance = "该收尾了。产出给下游编码 agent 的 brief：要验证的 claim / 要改的具体位置 / 必须保持不变的东西 / 对照清单 / 怎么算验收通过。写 brief 之前先用 record_note 把验收口径落下来（open 里应该清空得差不多了）。**是否真的进入实现由用户拍板，你只给 brief，不要替他宣布开始。**"
+when = "该定的都定了，可以给出实现方案。"
+guidance = "该收尾了。参考推断图，整合讨论得出的有效信息，去除矛盾部分，给出详细的实验方案。参考内容：要验证的 claim / 要改的具体位置 / 必须保持不变的东西 / 对照清单 / 怎么算验收通过。写 brief 之前先用 record_note 把验收口径落下来（open 里应该清空得差不多了）。"
 tools = []
 
 [[scene]]
 id = "teach_background"
 label = "补充领域背景"
 when = "用户储备记录显示这个知识域他明确没有储备，或者他自陈不熟"
-guidance = "先把机制讲通，再把判断交回给用户。讲解要落到他这个仓库/这个实验上，不要泛泛介绍概念。讲完可以问一句他是否要按这个理解继续。"
-tools = []
+guidance = "先把机制讲通，再把判断交回给用户。讲解要落到他这个仓库/这个实验上，不要泛泛介绍概念。可以调用工具查询领域相关论文。"
+tools = ["web_search",
+    "web_fetch",
+    "record_graph",
+    "record_note",]
 
 [[scene]]
 id = "trace_code"
 label = "追踪代码链路"
-when = "用户要改某个模块，但对话里看不出他确认过这个模块的输出被谁消费"
-guidance = '建议先把相关的调用链路走一遍再谈改法 —— repo_tree 看结构、fs_grep 找引用、fs_read 读具体位置。读到什么就用 record_graph 补到图上，source 填 {"repo": "路径:行号"}。读不到的不要猜，要猜就标 source="guess"（会画成虚线）。'
+when = "用户给出模糊实验idea或方向，但推断图尚无或不完整，用户给出仓库/文件夹/论文（当用户希望根据论文做ablation或模块插拔）。"
+guidance = '你需要整理实验预期架构，清晰梳理文件或论文，结合用户的模糊idea给出实验方法架构图。—— repo_tree 看结构、fs_grep 找引用、fs_read 读具体位置。读到什么就用 record_graph 补到图上，source 填 {"repo": "路径:行号"}。目前尚不能确定（比如用户模块插入后哪块可以改哪块不能）写未定，猜测标 source="guess"（会画成虚线）。推测图必须细节丰富，即使用户只给出泛泛想法——把用户未考虑清，但画架构图需要的细节标未定———比如用户可能忽略维度/必要方法（mask etc）/工程细节（DDP ect）/指标'
 tools = [
     "fs_read",
     "fs_grep",
     "fs_find",
     "repo_tree",
+    "record_graph",
+    "record_note",
+    "web_search",
+    "web_fetch",
 ]
