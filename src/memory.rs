@@ -79,6 +79,29 @@ struct CaseFront {
     scenes: Vec<String>,
 }
 
+/// 一个 mode 的全套提示词。
+///
+/// # 为什么 mode 不只是一句话
+///
+/// 上一版 mode 就是往 system 段塞一行字（外加行动 mode 关掉讲解场景）。
+/// 那不够：探索期和行动期该暴露的**工具**不一样，同一个工具该怎么用也不一样 ——
+/// 探索期的 `record_graph` 是「先把结构大致摆出来，拿不准就标 guess」，
+/// 行动期是「图要能直接交给编码 agent，写清楚具体的模块名和指标名」。
+///
+/// 全部放在 `prompts.toml` 里，所以换 mode 的行为**改文件就能调**，不用重编译。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModePrompt {
+    /// 拼进 system 段的那一句（或那几句）。
+    #[serde(default)]
+    pub note: String,
+    /// 这个 mode **额外**暴露的工具，叠在场景的 default_tools 之上。
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// 工具名 → 追加到它 description 后面的一句。同一个工具在两个 mode 下说明不同。
+    #[serde(default)]
+    pub tool_notes: BTreeMap<String, String>,
+}
+
 /// harness 注入的提示词模板。
 ///
 /// 放进持久层而不是写死在 Rust 里，是为了兑现「改动立即生效」：
@@ -92,9 +115,14 @@ pub struct Prompts {
     pub user_field: String,
     /// 折叠早期对话时给摘要模型的指令。
     pub fold: String,
-    /// 探索 mode 的一句话。
+    /// 两个 mode 各自的提示词与工具。键是 `explore` / `go`。
+    #[serde(default)]
+    pub mode: BTreeMap<String, ModePrompt>,
+    /// 旧字段：mode 只有一句话的那一版。**只在 `[mode.*].note` 为空时兜底**，
+    /// 这样老的 prompts.toml 不会因为多一个小节就整份解析失败、静默回退到内置内容。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode_explore: String,
-    /// 行动 mode 的一句话。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode_go: String,
     /// 流程图的形状与配色词表。
     #[serde(default)]
@@ -192,12 +220,9 @@ impl Default for Prompts {
                    已经问过的问题、明确排除的可能性。\n\
                    这些正是推断图里没有、但后面会被引用的东西。叙述过程可以大幅压缩。"
                 .into(),
-            mode_explore: "当前是探索 mode：可以展开讲、可以开放式追问。\
-                           抽取资料时关注动机、领域背景、术语定义。"
-                .into(),
-            mode_go: "当前是行动 mode：用户想往前推进，回答直接一些，不要倒回去讲基础。\
-                      抽取资料时关注方法、超参、实现细节。"
-                .into(),
+            mode: builtin_modes(),
+            mode_explore: String::new(),
+            mode_go: String::new(),
             graph: GraphStyle::default(),
         }
     }
@@ -300,12 +325,31 @@ impl Memory {
             .join("\n\n")
     }
 
-    /// mode 的一句话。文本在持久层里，用户可改。
-    pub fn mode_note(&self, mode: crate::model::Mode) -> &str {
-        match mode {
-            crate::model::Mode::Explore => &self.prompts.mode_explore,
-            crate::model::Mode::Go => &self.prompts.mode_go,
+    /// 这个 mode 的全套提示词，缺项按「文件 → 旧字段 → 内置」逐级兜底。
+    ///
+    /// 逐项兜底而不是整份兜底：用户只想改一句 note，不该因此把工具清单清空。
+    pub fn mode(&self, mode: crate::model::Mode) -> ModePrompt {
+        let key = mode.key();
+        let mut m = self.prompts.mode.get(key).cloned().unwrap_or_default();
+        let builtin = builtin_modes();
+        if m.note.trim().is_empty() {
+            let legacy = match mode {
+                crate::model::Mode::Explore => &self.prompts.mode_explore,
+                crate::model::Mode::Go => &self.prompts.mode_go,
+            };
+            m.note = if legacy.trim().is_empty() {
+                builtin.get(key).map(|d| d.note.clone()).unwrap_or_default()
+            } else {
+                legacy.clone()
+            };
         }
+        if m.tools.is_empty() {
+            m.tools = builtin.get(key).map(|d| d.tools.clone()).unwrap_or_default();
+        }
+        if m.tool_notes.is_empty() {
+            m.tool_notes = builtin.get(key).map(|d| d.tool_notes.clone()).unwrap_or_default();
+        }
+        m
     }
 }
 
@@ -354,6 +398,146 @@ fn parse_case(text: &str) -> Option<Case> {
 /// 直接盖掉用户手写的记忆是一次不该有的越权。用户看过、改过再合并。
 pub fn draft_path(dir: &FsPath, stamp: u64) -> PathBuf {
     dir.join(format!("draft-{stamp}.md"))
+}
+
+
+/// 两个 mode 的内置内容。bootstrap 时落成 `prompts.toml` 的 `[mode.*]` 小节。
+///
+/// 措辞是**想法级**的，等着被重写 —— 提示词本来就该在实测里改，
+/// 而改它只要动这个文件，不用重编译。
+pub fn builtin_modes() -> BTreeMap<String, ModePrompt> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "explore".to_string(),
+        ModePrompt {
+            note: "当前是探索 mode。用户还在摸方向：可以展开讲、可以开放式追问、\
+                   可以把不确定的地方直接摆出来。抽取资料时关注动机、领域背景、术语定义。"
+                .into(),
+            // 探索期要查外部资料，所以给开放搜索；行动期只给按址抓取。
+            tools: ["web_search", "web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
+            tool_notes: [
+                ("record_graph",
+                 "探索期：先把大结构摆出来就行，节点可以只有 label。拿不准就 source=\"guess\"，\
+                  它会画成虚线 —— 虚线本身是给用户看的信息，别为了图好看假装确定。"),
+                ("record_note",
+                 "探索期：重点记用户的原话约束，和你还没搞清楚的问题（写进 open）。"),
+                ("ask_user",
+                 "探索期可以多问，但一次只问一个真正卡住你的点。"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        },
+    );
+    m.insert(
+        "go".to_string(),
+        ModePrompt {
+            note: "当前是行动 mode。用户要往前推进：回答直接一些，不要倒回去讲基础。\
+                   抽取资料时关注方法、超参、实现细节。"
+                .into(),
+            tools: ["web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
+            tool_notes: [
+                ("record_graph",
+                 "行动期：图要能直接交给编码 agent。节点写具体的模块名 / 算子名 / 指标名，\
+                  别停在「编码器」这种泛称；消融臂和对照组要画出来。"),
+                ("record_note",
+                 "行动期：把验收口径写死 —— 指标怎么算、什么算通过、哪些必须保持不变。\
+                  open 里应该只剩真正待定的，定了的就删掉。"),
+                ("ask_user",
+                 "行动期少问，能自己查的先查。"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        },
+    );
+    m
+}
+
+// ───────────────────────── 蒸馏草稿 ─────────────────────────
+//
+// # 为什么草稿要分节
+//
+// 上一版蒸馏产出是一整篇 Markdown，落成 `draft-<stamp>.md` 就完了 ——
+// 要让它生效，用户得自己打开草稿、自己判断哪一段属于哪个文件、自己复制粘贴。
+// 那不是「一键」，那是把最没意思的一步留给了人。
+//
+// 现在模型按目标文件分节输出，程序解析成 [`Section`]，UI 逐节预览 / 修改 /
+// 勾选，一次写回。**写回前要校验**：TOML 追加坏了会让整个 playbook 失效，
+// 而那种失效要到下一轮才以「场景全没了」的形式冒出来。
+
+/// 一节草稿写到哪个文件、怎么写。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Section {
+    pub file: String,
+    pub mode: WriteMode,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteMode {
+    /// 整份替换。三个叙述性文件走这条：模型手里有现有内容，写的是更新后的整份。
+    Replace,
+    /// 追加。`playbook.toml` 走这条 —— 新场景是加一条，不是把用户的场景库覆盖掉。
+    Append,
+}
+
+/// 这个文件名是不是合法的蒸馏目标，以及该怎么写。
+pub fn write_mode_for(file: &str) -> Option<WriteMode> {
+    match file {
+        PROJECT | PREFERENCES | KNOWLEDGE => Some(WriteMode::Replace),
+        PLAYBOOK => Some(WriteMode::Append),
+        // 一个 cases 文件就是一条案例，同名即更新它
+        f if f.starts_with("cases/") && f.ends_with(".md") && f.matches('/').count() == 1 => {
+            Some(WriteMode::Replace)
+        }
+        _ => None,
+    }
+}
+
+/// 从草稿正文里切出各节。节标题形如 `## project.md`。
+///
+/// 认不出的标题连同它下面的正文一起归到**上一节**，而不是丢掉 ——
+/// 模型多写一个 `### 概述` 是常事，那不该让整节消失。
+/// 第一个合法标题之前的内容（模型的开场白之类）直接扔掉。
+pub fn parse_draft(text: &str) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for line in text.lines() {
+        let target = line
+            .strip_prefix("## ")
+            .map(str::trim)
+            .and_then(|t| write_mode_for(t).map(|m| (t.to_string(), m)));
+        match target {
+            Some((file, mode)) => out.push(Section { file, mode, text: String::new() }),
+            None => {
+                if let Some(s) = out.last_mut() {
+                    s.text.push_str(line);
+                    s.text.push('\n');
+                }
+            }
+        }
+    }
+    out.retain(|s| !s.text.trim().is_empty());
+    for s in &mut out {
+        s.text = s.text.trim().to_string();
+    }
+    out
+}
+
+/// 写回之前校验。**结构化文件坏了要当场拦住**，不能等到下一轮
+/// 以「场景全没了」「案例不见了」的形式冒出来。
+pub fn validate(file: &str, merged: &str) -> Result<(), String> {
+    if file == PLAYBOOK {
+        Playbook::from_toml_str(merged).map(|_| ()).map_err(|e| format!("合并后不是合法的 playbook：{e}"))
+    } else if file.starts_with("cases/") {
+        match parse_case(merged) {
+            Some(_) => Ok(()),
+            None => Err("案例要以 TOML frontmatter 开头：--- 换行 id/title/scenes 换行 --- 换行 正文".into()),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 // ────────────────────────── bootstrap ──────────────────────────

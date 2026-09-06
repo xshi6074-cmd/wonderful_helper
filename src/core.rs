@@ -296,11 +296,34 @@ fn has_alias(body: &Body) -> bool {
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// 一键蒸馏的指令。产出是给**下一个新对话**快速入手用的。
-const DISTILL_PROMPT: &str = "把这段会话沉淀成持久记忆的更新草稿。输出四节 Markdown：\n\
-     ## 项目 —— 概述、当前阶段目标、进展（跑通并成立的 / 试过没成立的，各带方法概述）\n\
-     ## 合作偏好 —— 这次交互里显现出来的偏好\n\
-     ## 知识与经验评估 —— 用户在哪些点上有储备 / 没储备 / 看不出来，附依据\n\
-     ## 值得入库的易犯错场景 —— 这次返工或纠正对应的场景与指令草稿\n\n\
+/// 蒸馏指令。
+///
+/// # 为什么标题必须是文件名
+///
+/// 上一版要求的是「## 项目 / ## 合作偏好 / …」这样的人话标题，产物是一整篇
+/// Markdown。要让它生效，用户得自己打开草稿、自己判断哪一段属于哪个文件、
+/// 自己复制粘贴 —— 那不是「一键」。
+///
+/// 现在标题直接就是目标文件名，程序按它切成 [`crate::memory::Section`]，
+/// UI 逐节预览 / 修改 / 勾选，一次写回。切不出来的就退回整篇预览，不丢东西。
+const DISTILL_PROMPT: &str = "把这段会话沉淀成持久记忆的更新草稿。\n\n\
+     输出**必须**用下面这几个二级标题分节，标题就是目标文件名，一个字都不要改。\n\
+     没有内容的小节整节省略，不要留占位。\n\n\
+     ## project.md\n\
+     整份替换后的 project.md。概述 / 当前阶段目标 / 进展（跑通并成立的、试过没成立的，各带方法概述）。\n\
+     上面给了你现在这份的内容，**在它基础上增量更新**，别把已有的东西写丢。\n\n\
+     ## preferences.md\n\
+     整份替换后的 preferences.md。这次交互里显现出来的合作偏好。同样是增量更新。\n\n\
+     ## knowledge.md\n\
+     整份替换后的 knowledge.md。用户在哪些点上有储备 / 没储备 / 看不出来，每条附依据。\n\n\
+     ## playbook.toml\n\
+     **追加**到场景库末尾的内容，必须是合法 TOML 的 [[scene]] 块，字段：\n\
+     id / label / when / guidance / tools。只在这次真的出现了新的易犯错场景时才写这一节。\n\
+     tools 里只能填这一轮实际存在的工具名。\n\n\
+     ## cases/<短横线小写英文 id>.md\n\
+     一条值得留存的参考案例，格式是 TOML frontmatter + 正文：\n\
+     三个减号一行，然后 id / title / scenes 三个字段，再三个减号一行，然后正文。\n\
+     可以有多个这样的小节，每个对应一个文件。没有值得留存的就整节省略。\n\n\
      只写这段会话里真实发生过的事，不要补全、不要推测。\n\
      写给一个没参与过这段对话的新会话看：它读完应该能接手这个项目。";
 
@@ -1070,12 +1093,25 @@ impl Core {
 
     /// 一键蒸馏。**用户操作触发，不是自动行为。**
     ///
-    /// 产出写成草稿文件而不是直接覆盖持久层：蒸馏是模型对整段会话的概括，
-    /// 直接盖掉用户手写的记忆是越权。用户看过、改过再合并。
+    /// # 产出是分好节的草稿，不是一篇要人自己拆的文章
+    ///
+    /// 模型按目标文件名分节输出，这里切成 [`Section`] 推给 UI；用户逐节预览、
+    /// 改、勾选，再由 server 的 `distill_apply` 一次写回（写回前还要校验，
+    /// 见 [`crate::memory::validate`]）。
+    ///
+    /// **仍然不直接覆盖持久层**：蒸馏是模型对整段会话的概括，直接盖掉用户手写的
+    /// 记忆是越权。区别只在于「用户点一下确认」和「用户自己复制粘贴」之间。
+    ///
+    /// 草稿原文照旧落成 `draft-<stamp>.md`：解析不出节的时候还有它可看，
+    /// 而且它进 `memory/` 的文件列表，重启之后还在。
     fn start_distill(&mut self) {
         self.metrics.distills += 1;
         let Some(dir) = self.memory_dir.clone() else {
-            let _ = self.ui.send(UiEvent::Distilled { draft: "(未配置持久层目录)".into() });
+            let _ = self.ui.send(UiEvent::Distilled {
+                path: String::new(),
+                sections: vec![],
+                error: Some("没有配置持久层目录，蒸馏没有地方可写".into()),
+            });
             return;
         };
         let client = self.models.subagent.clone();
@@ -1094,20 +1130,32 @@ impl Core {
                 "本次会话的推断结果：\n{}",
                 serde_json::to_string_pretty(&ws).unwrap_or_default()
             )));
-            // 读全程 —— 折叠只影响拼给模型的那份上下文，原文一直在时间线上。
-            msgs.extend(crate::event::assemble(&events));
+            // `assemble_full` 而不是 `assemble`：后者会跳过被折叠的区间、只留摘要，
+            // 而长会话里最该被沉淀的恰恰是早期那段。原文一直在时间线上。
+            msgs.extend(crate::event::assemble_full(&events));
             match complete(client.as_ref(), msgs, CancellationToken::new()).await {
                 Ok((text, usage)) => {
                     back.cost_out(Role::Subagent, usage).await;
                     let p = crate::memory::draft_path(&dir, stamp);
-                    let draft = match tokio::fs::write(&p, text).await {
-                        Ok(()) => p.display().to_string(),
-                        Err(e) => format!("(蒸馏草稿写入失败: {e})"),
+                    let (path, mut error) = match tokio::fs::write(&p, &text).await {
+                        Ok(()) => (p.display().to_string(), None),
+                        Err(e) => (String::new(), Some(format!("草稿写入失败：{e}"))),
                     };
-                    let _ = ui.send(UiEvent::Distilled { draft });
+                    let sections = crate::memory::parse_draft(&text);
+                    if sections.is_empty() && error.is_none() {
+                        error = Some(
+                            "模型没有按文件名分节，只能整篇看。草稿全文在上面那个路径里。"
+                                .into(),
+                        );
+                    }
+                    let _ = ui.send(UiEvent::Distilled { path, sections, error });
                 }
                 Err(e) => {
-                    let _ = ui.send(UiEvent::Distilled { draft: format!("(蒸馏失败: {e})") });
+                    let _ = ui.send(UiEvent::Distilled {
+                        path: String::new(),
+                        sections: vec![],
+                        error: Some(format!("蒸馏失败：{e}")),
+                    });
                 }
             }
         });

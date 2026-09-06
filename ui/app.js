@@ -42,6 +42,7 @@ const S = {
   saved: null,            // boot 时的配置原件。左栏表单会改 S.settings，这份不动
   editor: null,           // 右栏正在编辑的文件 { kind, file, orig, note, deletable }
   browse: null,           // 目录浏览器的当前一层
+  distill: null,          // 蒸馏草稿的分节结果，等用户勾选写回
   banners: [],            // { level, text, key }
 };
 
@@ -130,7 +131,21 @@ function onMsg(m) {
     case 'compacted':
       banner('info', `已折叠 ${m.folded} 条早期对话：${m.before} → ${m.after} tok`, 'fold');
       break;
-    case 'distilled': banner('info', m.draft.startsWith('(') ? m.draft : `蒸馏草稿写到 ${m.draft}`, 'distill'); send('memory_get'); break;
+    case 'distilled':
+      // 分好节的草稿直接进右栏审阅区。只有用户勾选并点写入，才会碰持久层。
+      S.distill = { path: m.path, error: m.error, sections: (m.sections || []).map(s => ({ ...s, on: true })) };
+      renderDistill();
+      if (m.error) banner('bad', m.error, 'distill');
+      else banner('info', `蒸馏出 ${S.distill.sections.length} 节，去右栏「蒸馏」看`, 'distill');
+      if (S.distill.sections.length) switchRight('distill');
+      break;
+    case 'applied':
+      if (m.errors && m.errors.length) banner('bad', m.errors.join('；'), 'distill');
+      if (m.ok) {
+        banner('info', `写入 ${m.ok} 个文件：${(m.files || []).join('、')}`, 'distill');
+        S.distill = null; renderDistill(); switchRight('infer');
+      }
+      break;
     case 'footprint': S.foot = m; renderTop(); break;
     case 'persist':
       if (m.ok) dropBanner('persist');
@@ -646,6 +661,58 @@ function renderSessions() {
 }
 
 
+
+// ───────────────────────── 蒸馏审阅 ─────────────────────────
+//
+// 模型按目标文件名分节输出，这里逐节预览 / 修改 / 勾选，一次写回。
+// **不做成「给你个草稿路径，自己去改」** —— 判断哪一段属于哪个文件、
+// 复制粘贴进去，这一步本来就该程序做，那才叫一键。
+
+const DI_MODE = {
+  replace: ['整份替换', 'rep', '会覆盖这个文件现在的全部内容'],
+  append: ['追加', 'app', '接在文件末尾，原有内容不动'],
+};
+
+function renderDistill() {
+  const d = S.distill;
+  $$('#right-seg button').forEach(b => { if (b.dataset.rt === 'distill') b.hidden = !d; });
+  if (!d) return;
+  $('#di-path').textContent = d.path ? d.path.split(/[\\/]/).pop() : '';
+  $('#di-path').title = d.path || '';
+  $('#di-note').textContent = d.error
+    ? d.error
+    : '模型写的草稿，还没生效。改完把要留的勾上，一次写进对应文件。';
+  const box = $('#di-list'); box.textContent = '';
+  d.sections.forEach((s, i) => {
+    const [label, cls, why] = DI_MODE[s.mode] || DI_MODE.replace;
+    const ta = h('textarea', { spellcheck: 'false' });
+    ta.value = s.text;
+    ta.addEventListener('input', () => { s.text = ta.value; });
+    const row = h('div', { class: 'dsec' + (s.on === false ? ' off' : '') });
+    const cb = h('input', { type: 'checkbox' });
+    cb.checked = s.on !== false;
+    cb.addEventListener('change', () => {
+      s.on = cb.checked;
+      row.className = 'dsec' + (cb.checked ? '' : ' off');
+    });
+    row.append(
+      h('label', { class: 'dsec-head' },
+        cb,
+        h('span', { class: 'f' }, s.file),
+        h('span', { class: 'tag ' + cls, title: why }, label)),
+      ta);
+    box.append(row);
+    void i;
+  });
+}
+
+function applyDistill() {
+  const d = S.distill; if (!d) return;
+  const picked = d.sections.filter(s => s.on !== false && s.text.trim());
+  if (!picked.length) return banner('bad', '一节都没勾，没有可写的', 'distill');
+  send('distill_apply', { sections: picked.map(s => ({ file: s.file, mode: s.mode, text: s.text })) });
+}
+
 // ───────────────────────── 右栏：编辑区 ─────────────────────────
 //
 // 配置和记忆文件都是**整篇文本**。原来塞在左栏一个三行小框里，读也读不下、
@@ -685,7 +752,12 @@ function openEditor(kind, file) {
 function renderEditor() {
   const e = S.editor;
   $$('#right-seg button').forEach(b => { if (b.dataset.rt === 'edit') b.hidden = !e; });
-  if (!e) { switchRight('infer'); return; }
+  // 关掉编辑区时别把用户正在看的蒸馏审阅一起顶掉
+  if (!e) {
+    if (!$('.pane[data-rp="distill"]').hidden) return;
+    switchRight('infer');
+    return;
+  }
   $('#ed-name').textContent = e.file;
   $('#ed-note').textContent = e.note;
   $('#ed-del').hidden = !e.deletable;
@@ -985,7 +1057,7 @@ function renderMemory() {
   box.append(h('button', {
     class: 'wide', style: 'margin-top:8px',
     onclick: () => send('distill'),
-    title: '把这次会话的结论蒸馏成草稿，写进 memory/。只有你按了才会写。',
+    title: '把这次会话的结论蒸馏成草稿，在右栏逐节预览、改完再一键写入。只有你点了写入才会动持久层。',
   }, '⚗ 一键蒸馏'));
 }
 
@@ -1006,7 +1078,7 @@ function renderTools() {
 }
 
 function renderAll() {
-  renderTop(); renderBanner(); renderStream(); renderRight(); renderEditor();
+  renderTop(); renderBanner(); renderStream(); renderRight(); renderEditor(); renderDistill();
   renderSessions(); renderConfig(); renderMemory(); renderTools(); renderAsk();
   const roots = S.settings?.tools?.roots || [];
   $('#root-path').value = roots[0] || '.';
@@ -1104,6 +1176,8 @@ function boot() {
 
   $$('#right-seg button').forEach(b => b.onclick = () => switchRight(b.dataset.rt));
   $('#ed-save').onclick = saveEditor;
+  $('#di-apply').onclick = applyDistill;
+  $('#di-close').onclick = () => { S.distill = null; renderDistill(); switchRight('infer'); };
   $('#ed-close').onclick = closeEditor;
   $('#ed-revert').onclick = () => {
     if (!S.editor) return;

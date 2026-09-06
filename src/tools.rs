@@ -19,7 +19,7 @@ use crate::ids::TaskId;
 use crate::model::Call;
 use crate::msg::UiEvent;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -74,7 +74,9 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    fn of(call: &Call, content: impl Into<String>, kind: ToolResultKind) -> Self {
+    /// 通用构造。turn 侧的动作工具要自己造结果（它们不走 `Tool::run`），
+    /// 所以这个是公开的。
+    pub fn of(call: &Call, content: impl Into<String>, kind: ToolResultKind) -> Self {
         Self {
             call_id: call.id.clone(),
             name: call.name.clone(),
@@ -160,17 +162,51 @@ impl Registry {
     }
 
     /// 本轮**暴露**给模型的工具清单。场景只决定这个子集，不决定调用哪个、调几次。
-    pub fn specs(&self, names: &[String]) -> Vec<crate::model::ToolSpec> {
-        names
-            .iter()
-            .filter_map(|n| self.tools.get(n))
-            .map(|t| crate::model::ToolSpec {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                schema: t.schema(),
-            })
-            .collect()
+    ///
+    /// # 认不出的名字必须报出来
+    ///
+    /// 上一版这里是 `filter_map` 静默丢弃。于是 `playbook.toml` 里写着
+    /// `read_repo` / `repo_qa`（注册表里根本没有这两个名字），整套
+    /// `fs_*` / `repo_tree` / `web_*` **从来没有被暴露给模型过** ——
+    /// 而症状只是「模型好像从来不调工具」，指标上是 `tools_run: 0`，
+    /// 看起来像模型不想调。这种错必须有声音。
+    ///
+    /// `notes` 是当前 mode 给各个工具追加的说明（来自 `prompts.toml`），
+    /// 所以同一个工具在探索期和行动期对模型讲的话可以不一样。
+    pub fn specs(&self, names: &[String], notes: &BTreeMap<String, String>) -> Exposed {
+        let mut specs = Vec::new();
+        let mut missing = Vec::new();
+        for n in names {
+            match self.tools.get(n) {
+                Some(t) => {
+                    let mut description = t.description().to_string();
+                    if let Some(extra) = notes.get(n).filter(|s| !s.trim().is_empty()) {
+                        description.push_str("\n");
+                        description.push_str(extra.trim());
+                    }
+                    specs.push(crate::model::ToolSpec {
+                        name: t.name().to_string(),
+                        description,
+                        schema: t.schema(),
+                    });
+                }
+                // 联网工具按配置注册，没配就是没有，那不是配置错误，不报
+                None if OPTIONAL.contains(&n.as_str()) => {}
+                None => missing.push(n.clone()),
+            }
+        }
+        Exposed { specs, missing }
     }
+}
+
+/// 联网工具按 `Settings.web` 注册。场景里列着但没配 = 用户没开联网，不是写错了名字。
+const OPTIONAL: &[&str] = &["web_search", "web_fetch"];
+
+/// [`Registry::specs`] 的结果。
+pub struct Exposed {
+    pub specs: Vec<crate::model::ToolSpec>,
+    /// 场景 / mode 里写了、注册表里却没有的名字。**必须报给用户。**
+    pub missing: Vec<String>,
 }
 
 /// 内置工具：把一个带候选项的问题呈现给用户。

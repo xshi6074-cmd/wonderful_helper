@@ -420,3 +420,20 @@ mark.hit.cur{background:var(--accent);color:#fff}
 #banner .note{cursor:pointer;position:relative;padding-right:34px}
 #banner .note::after{content:"✕";position:absolute;right:14px;opacity:.45;font-size:11px}
 #banner .note:hover::after{opacity:1}
+
+
+/* ───────── 蒸馏审阅 ───────── */
+/* 一节一个目标文件。整份替换的和追加的要一眼分得开 ——
+   前者会盖掉用户手写的内容，后者不会。 */
+.pane.distill{display:flex;flex-direction:column;gap:8px;padding:12px 14px 14px}
+.pane.distill .hint{margin:0}
+#di-list{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.dsec{background:var(--sunk);border-radius:var(--r);padding:8px 10px 10px}
+.dsec-head{display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:6px}
+.dsec-head .f{font-family:var(--mono);font-weight:600}
+.dsec-head input{margin:0}
+.dsec textarea{width:100%;min-height:96px;font-family:var(--mono);font-size:12px;
+  line-height:1.55;resize:vertical;background:var(--surface)}
+.dsec.off{opacity:.45}
+.tag.rep{background:color-mix(in oklab,var(--bad) 16%,transparent);color:var(--bad)}
+.tag.app{background:color-mix(in oklab,var(--info) 18%,transparent);color:var(--info)}

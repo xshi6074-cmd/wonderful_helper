@@ -243,6 +243,20 @@ pub fn now_ms() -> u64 {
 ///
 /// 嵌套折叠自然按最外层生效：内层那条 `Folded` 的 seq 落在外层区间里，
 /// 会连同被它覆盖的原文一起被跳过，不会重复注入两份摘要。
+/// 组装**全部**原文，忽略折叠。
+///
+/// 蒸馏用它。`assemble` 会跳过被 `Folded` 覆盖的区间、只留一条摘要 ——
+/// 那对拼 prompt 是对的（就是为了省 token），但对蒸馏是错的：
+/// 长会话里最该被沉淀的恰恰是早期那段，读到摘要等于二次压缩。
+/// 原文一直在时间线上，这里就直接读原文，只把 `Folded` 那条摘要本身跳过。
+pub fn assemble_full(events: &[Event]) -> Vec<Message> {
+    events
+        .iter()
+        .filter(|e| !matches!(e.body, Body::Folded { .. }))
+        .filter_map(|e| e.body.as_message(e.seq, e.corr))
+        .collect()
+}
+
 pub fn assemble(events: &[Event]) -> Vec<Message> {
     let folds: Vec<(Seq, Seq)> = events
         .iter()

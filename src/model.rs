@@ -16,7 +16,7 @@
 
 use crate::ids::TurnId;
 use crate::scene::SceneId;
-use crate::state::{Op, Phase};
+use crate::state::Phase;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
@@ -194,7 +194,17 @@ pub struct JudgeReq {
     pub token: CancellationToken,
 }
 
-/// 判断段的输出：**一次场景判定，外加顺手做出的推断更新。**
+/// 判断段的输出：**只有一次场景判定。**
+///
+/// # 这里原来还有 `ops` 和 `retrieve`，都删了
+///
+/// - `ops`：**判断和推断是两回事。** 判断跑在回答段之前、在模型读任何材料之前，
+///   而推断是读完之后才形成的东西。挂在这里等于要求模型在还没看材料时就下结论。
+///   而且那条路从来没通过 —— 工具 schema 里 `ops` 是个空对象，没有任何地方
+///   告诉过模型 op 长什么样，真实模型跑出来永远是 `inferred_ops: 0`。
+///   写推断现在是回答段的两个工具，见 [`crate::actions`]。
+/// - `retrieve`：真实客户端里恒为 `vec![]`，turn 侧那段消费代码是死的。
+///   要检索，回答段自己调 `fs_*` / `web_*`。
 ///
 /// 注意它不含任何「让 harness 去做某事」的字段。harness 拿到 `scene` 之后
 /// 只做三件准备工作：注入 guidance、注入案例、暴露工具。
@@ -204,14 +214,6 @@ pub struct JudgeOut {
     pub scene: SceneId,
     /// 为什么判成这个场景。UI 侧栏要显示它，用户才能判断要不要一键更换场景。
     pub rationale: String,
-    /// 顺带推断出的字段改动，走 pending 提交给 Core 裁决。
-    pub ops: Vec<Op>,
-    /// 为**组装回答段上下文**而需要的检索（案例检索、仓库问答）。
-    ///
-    /// 这不是「代替模型执行动作」：它取回来的东西是注入给回答段的**材料**，
-    /// 模型在回答段依然可以自己再调工具。对应设计文档图 2 里那条
-    /// 「判断调用 → 需要时 subagent → 返回序号 → 注入」的支线。
-    pub retrieve: Vec<Call>,
     pub usage: Usage,
 }
 
@@ -234,7 +236,7 @@ pub enum StreamEvent {
     Failed(String),
 }
 
-/// 探索 / 行动。不是两套 prompt，只是同一套上的偏置。
+/// 探索 / 行动。**两套 prompt，不是一个开关。**
 ///
 /// # 原来有第三个旋钮「打扰预算」，已删除
 ///
@@ -250,6 +252,14 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// `prompts.toml` 里 `[mode.*]` 的键。
+    pub fn key(&self) -> &'static str {
+        match self {
+            Mode::Explore => "explore",
+            Mode::Go => "go",
+        }
+    }
+
     /// 旋钮一：这个 mode 下不启用的场景。
     ///
     /// 行动 mode 关掉讲解类场景 —— 用户已经表示要往前走了，就别倒回去讲基础。
@@ -260,28 +270,9 @@ impl Mode {
         }
     }
 
-    /// 旋钮二：论文/资料抽取目标。
-    pub fn extraction_target(&self) -> &'static str {
-        match self {
-            Mode::Explore => "动机、领域背景、术语定义",
-            Mode::Go => "方法、超参、实现细节",
-        }
-    }
-
-    /// 注入 system 段的一句话。
-    pub fn note(&self) -> String {
-        match self {
-            Mode::Explore => format!(
-                "当前是探索 mode：可以展开讲、可以开放式追问。抽取资料时关注{}。",
-                self.extraction_target()
-            ),
-            Mode::Go => format!(
-                "当前是行动 mode：用户想往前推进，回答直接一些，不要倒回去讲基础。\
-                 抽取资料时关注{}。",
-                self.extraction_target()
-            ),
-        }
-    }
+    // 原来这里还有 note() 和 extraction_target()：mode 的全部内容就是硬编码的两句话。
+    // 现在整套（note + 额外工具 + 每个工具在这个 mode 下的补充说明）都在
+    // `prompts.toml` 的 [mode.explore] / [mode.go] 里，见 `Memory::mode`。
 }
 
 /// 跑一次非流式补全：把流收干，返回全文与用量。

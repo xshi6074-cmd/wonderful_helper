@@ -100,7 +100,13 @@ pub struct Deps {
 }
 
 /// 按当前配置注册可用的工具。
+///
+/// **这里的名字就是 `playbook.toml` / `prompts.toml` 里能写的名字。**
+/// 两边对不上会被 [`crate::tools::Registry::specs`] 报出来 —— 上一版对不上
+/// 且没有声音，于是整套 fs_* 从来没被暴露过。
 pub fn register(mut reg: Registry, d: &Deps) -> Registry {
+    // 两个动作工具：模型把推断写回主时间线的唯一通道。永远注册，不看配置。
+    reg = crate::actions::register(reg);
     // ask_user 之前只在一个测试里注册过，生产路径上模型根本问不了用户 ——
     // 而「提问是持久实体」是这套设计里明确保留的一条打扰权。补上。
     reg = reg

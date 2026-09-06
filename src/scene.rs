@@ -18,8 +18,16 @@
 //! 3. 把命中这个场景的参考案例检索出来一并注入（案例在自己的文件里声明服务于哪些场景，
 //!    见 [`crate::memory::Case`]）。
 //!
-//! harness 之后不再干预回答段。模型想提问就自己调 `ask_user`，想读仓库就自己调 `read_repo`，
-//! 也可以什么都不调直接回答。
+//! harness 之后不再干预回答段。模型想提问就自己调 `ask_user`，想读仓库就自己调 `fs_read`，
+//! 想把读到的落成推断就自己调 `record_graph`，也可以什么都不调直接回答。
+//!
+//! # 这里写的工具名必须真的存在
+//!
+//! 上一版这份内置目录里写的是 `read_repo` / `repo_qa` / `search_cases` ——
+//! **注册表里一个都没有**，而 `Registry::specs` 当时是 `filter_map` 静默丢弃。
+//! 结果整套 `fs_*` / `repo_tree` / `web_*` 从来没被暴露给模型过，
+//! 指标上表现为 `tools_run: 0`，看起来像模型不爱调工具。
+//! 现在认不出的名字会报到界面上，见 [`crate::tools::Exposed::missing`]。
 //!
 //! # 状态机负责什么
 //!
@@ -95,10 +103,14 @@ impl Playbook {
             .join("\n")
     }
 
-    /// 这个场景下模型能看到的全部工具名（场景专属 + 默认）。
-    pub fn exposed_tools(&self, scene: &Scene) -> Vec<String> {
+    /// 这个场景下模型能看到的全部工具名：默认 + 场景专属 + **当前 mode 额外给的**。
+    ///
+    /// mode 也参与，是因为「探索期能开放搜索、行动期只按址抓」这类差别属于 mode
+    /// 不属于场景。三份来源合并去重，顺序按「默认 → 场景 → mode」，
+    /// 模型看到的工具列表因此是稳定的。
+    pub fn exposed_tools(&self, scene: &Scene, mode_extra: &[String]) -> Vec<String> {
         let mut v = self.default_tools.clone();
-        for t in &scene.tools {
+        for t in scene.tools.iter().chain(mode_extra.iter()) {
             if !v.contains(t) {
                 v.push(t.clone());
             }
@@ -187,9 +199,10 @@ impl Playbook {
             "trace_code",
             "追踪代码链路",
             "用户要改某个模块，但对话里看不出他确认过这个模块的输出被谁消费",
-            "建议先把相关的调用链路走一遍再谈改法 —— 可以用 read_repo / repo_qa。\
-             读到什么就在推断图上补什么，并标好 source。读不到的不要猜，标成低 confidence。",
-            &["read_repo", "repo_qa"],
+            "建议先把相关的调用链路走一遍再谈改法 —— repo_tree 看结构、fs_grep 找引用、\
+             fs_read 读具体位置。读到什么就用 record_graph 补到图上，source 填 \
+             {\"repo\": \"路径:行号\"}。读不到的不要猜，要猜就标 source=\"guess\"（会画成虚线）。",
+            &["fs_read", "fs_grep", "fs_find", "repo_tree"],
         );
         add(
             "check_assumption",
@@ -204,7 +217,9 @@ impl Playbook {
             "发散设计",
             "只有一个方案却要下结论，或者对照组明显不足以支撑 claim",
             "对照空间还没铺开。建议把可能的对照/消融列出来再收敛，\
-             列的时候说明每一条能排除什么可能性。不用追求穷尽。",
+             列的时候说明每一条能排除什么可能性。不用追求穷尽。\
+             铺出来的对照臂用 record_graph 画成 ablation / baseline 节点，\
+             用户要在图上直接删改的就是它们。",
             &[],
         );
         add(
@@ -221,14 +236,27 @@ impl Playbook {
             "该定的都定了，再讨论边际收益很低",
             "该收尾了。产出给下游编码 agent 的 brief：要验证的 claim / 要改的具体位置 / \
              必须保持不变的东西 / 对照清单 / 怎么算验收通过。\
+             写 brief 之前先用 record_note 把验收口径落下来（open 里应该清空得差不多了）。\
              **是否真的进入实现由用户拍板，你只给 brief，不要替他宣布开始。**",
             &[],
         );
 
         Playbook {
             scenes,
-            // 默认工具集：读类工具随时可用，跟场景无关。
-            default_tools: vec!["repo_qa".into(), "search_cases".into()],
+            // 默认工具集：**这些名字必须在 Registry 里真的存在**。
+            //
+            // 两个动作工具永远在：模型能不能把推断写下来，不该是个可选项。
+            // 读类文件工具也永远在：它们不依赖任何外部服务，跟场景无关。
+            // 联网的两个不在这里 —— 它们按配置注册，由 mode 决定要不要给
+            // （见 prompts.toml 的 [mode.*].tools）。
+            default_tools: vec![
+                "record_graph".into(),
+                "record_note".into(),
+                "fs_read".into(),
+                "fs_grep".into(),
+                "fs_find".into(),
+                "repo_tree".into(),
+            ],
         }
     }
 }

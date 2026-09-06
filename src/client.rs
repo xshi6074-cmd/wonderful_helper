@@ -26,7 +26,6 @@ use crate::model::{
     AnswerReq, BoxFuture, BoxStream, Call, JudgeOut, JudgeReq, Message, ModelClient, ModelError,
     MsgRole, StreamEvent, ToolSpec, Usage,
 };
-use crate::state::Op;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -148,8 +147,7 @@ impl HttpClient {
                     "system": system,
                     "messages": messages,
                     "tools": [anthropic_tool(&tool)],
-                    // 强制走这一个工具 ⇒ 拿到的是 schema 校验过的参数对象
-                    "tool_choice": { "type": "tool", "name": JUDGE_TOOL },
+                    "tool_choice": judge_tool_choice(Api::Anthropic),
                 })
             }
             Api::OpenAiCompat => json!({
@@ -158,7 +156,7 @@ impl HttpClient {
                 "temperature": self.temperature,
                 "messages": openai_messages(msgs),
                 "tools": [openai_tool(&tool)],
-                "tool_choice": { "type": "function", "function": { "name": JUDGE_TOOL } },
+                "tool_choice": judge_tool_choice(Api::OpenAiCompat),
             }),
         }
     }
@@ -199,20 +197,45 @@ impl HttpClient {
     }
 }
 
+/// 判断段的 `tool_choice`。**「必须调工具」，而不是「必须调这一个工具」。**
+///
+/// 候选本来就只有 `record_judgement` 一个，所以两种写法效果相同 —— 但指名道姓
+/// 那种（Anthropic 的 `{type:"tool",name:...}` / OpenAI 的
+/// `{type:"function",function:{name:...}}`）在**开了 thinking 的模型**上会被直接拒：
+///
+/// ```text
+/// 400 Bad Request
+/// tool_choice 'specified' is incompatible with thinking enabled
+/// ```
+///
+/// 换成 any / required 之后，同一份代码在开不开 thinking 的服务上都能跑，
+/// 而「必须产出一个 schema 校验过的场景判定」这条保证一点没少。
+///
+/// 单独拿出来是个测试缝：这一条错的话，症状是每一轮都判断段失败、
+/// 降级成「本轮无场景」，而对话表面上还在正常进行。
+pub fn judge_tool_choice(api: Api) -> Value {
+    match api {
+        Api::Anthropic => json!({ "type": "any" }),
+        Api::OpenAiCompat => json!("required"),
+    }
+}
+
+/// 判断段的工具。**只判场景，不写推断。**
+///
+/// 原来这里还有一个 `ops` 字段，schema 是 `{"type":"object"}` —— 没有任何字段
+/// 说明，也没有任何 prompt 告诉过模型 op 长什么样。于是真实模型永远给不出
+/// 合法的 op，指标上是 `inferred_ops: 0`，而这看起来像「模型不爱写推断」。
+/// 写推断挪到了回答段的两个工具（[`crate::actions`]）：那才是模型读完材料、
+/// 真正形成判断的时刻。
 fn judge_tool_spec() -> ToolSpec {
     ToolSpec {
         name: JUDGE_TOOL.into(),
-        description: "记录这一轮的场景判定与顺带做出的推断更新。必须调用一次。".into(),
+        description: "记录这一轮的场景判定。必须调用一次，且只调这一个。".into(),
         schema: json!({
             "type": "object",
             "properties": {
                 "scene": { "type": "string", "description": "场景目录里的 id；都不匹配就填 none" },
-                "rationale": { "type": "string", "description": "为什么判成这个场景，一两句" },
-                "ops": {
-                    "type": "array",
-                    "description": "顺带做出的推断更新。没有就给空数组。",
-                    "items": { "type": "object" }
-                }
+                "rationale": { "type": "string", "description": "为什么判成这个场景，一两句" }
             },
             "required": ["scene", "rationale"]
         }),
@@ -386,23 +409,7 @@ fn parse_judge(api: Api, v: &Value) -> Result<JudgeOut, ModelError> {
 
     let scene = input["scene"].as_str().unwrap_or("none").to_string();
     let rationale = input["rationale"].as_str().unwrap_or("").to_string();
-    Ok(JudgeOut { scene, rationale, ops: parse_ops(&input["ops"]), retrieve: vec![], usage })
-}
-
-/// 逐条解析 op。**坏的那条丢掉，不连累整次判断。**
-///
-/// 判断段失败意味着这一轮没有场景、没有推断更新；为了一条格式不对的 op
-/// 赔上整轮不成比例。丢掉的会在 stderr 上留一行，跑真实链路时看得见。
-pub fn parse_ops(v: &Value) -> Vec<Op> {
-    let Some(arr) = v.as_array() else { return vec![] };
-    let mut out = Vec::new();
-    for item in arr {
-        match serde_json::from_value::<Op>(item.clone()) {
-            Ok(op) => out.push(op),
-            Err(e) => eprintln!("[judge] 丢掉一条解析不了的 op：{e} — {}", clip(&item.to_string(), 200)),
-        }
-    }
-    out
+    Ok(JudgeOut { scene, rationale, usage })
 }
 
 // ───────────────────────── SSE ─────────────────────────

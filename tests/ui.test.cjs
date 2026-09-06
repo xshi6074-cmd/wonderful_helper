@@ -78,6 +78,43 @@ test('config editor saves valid JSON and refuses malformed', () => {
   f.evalUI('saveEditor()');
   assert.equal(f.evalUI('sent.length'), before);
 });
+// 蒸馏的重点不是「模型写了什么」，是「用户不用自己搬」：分好的节要能逐节改、
+// 逐节取舍，写回的必须**正好**是屏幕上那份。
+test('distill sections are previewed, editable, and only the checked ones are written', () => {
+  const f = setup();
+  f.evalUI(`switchRight = () => {};
+    onMsg({ t:'distilled', path:'/w/memory/draft-1.md', sections:[
+      { file:'project.md', mode:'replace', text:'新的项目描述' },
+      { file:'playbook.toml', mode:'append', text:'[[scene]]\\nid = "x"' },
+    ]});`);
+  assert.equal(f.evalUI('S.distill.sections.length'), 2);
+
+  const rows = all(f.doc.querySelector('#di-list'));
+  const boxes = rows.filter(e => e.attrs.type === 'checkbox');
+  const areas = rows.filter(e => e.tag === 'textarea');
+  assert.equal(boxes.length, 2, '一节一个勾选框');
+  assert.equal(areas[0].value, '新的项目描述', '正文直接铺出来给人改，不是只给个路径');
+
+  // 改第一节、去掉第二节
+  areas[0].value = '我改过的项目描述';
+  areas[0].fire('input');
+  boxes[1].checked = false;
+  boxes[1].fire('change');
+
+  f.evalUI('applyDistill()');
+  const msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.op, 'distill_apply');
+  assert.equal(msg.sections.length, 1, '没勾的那节不写');
+  assert.equal(msg.sections[0].file, 'project.md');
+  assert.equal(msg.sections[0].text, '我改过的项目描述', '写回的是屏幕上那份，不是模型原文');
+  assert.equal(msg.sections[0].mode, 'replace');
+
+  // 一节都不勾就什么都不发 —— 静默写空文件是最糟的一种
+  f.evalUI(`S.distill.sections.forEach(s => s.on = false);`);
+  const before = f.evalUI('sent.length');
+  f.evalUI('applyDistill()');
+  assert.equal(f.evalUI('sent.length'), before);
+});
 test('memory files open in the right pane instead of an inline box', () => {
   const f = setup();
   f.evalUI(`S.memory = [{file:'prompts.toml', text:'a\\nb'}]; renderMemory();`);

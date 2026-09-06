@@ -8,4 +8,4 @@
 /premortem.db-wal
 /premortem.db-shm
 /workspace/
-/memory/
+secrets.json

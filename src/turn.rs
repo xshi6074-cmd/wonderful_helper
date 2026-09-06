@@ -1,45 +1,51 @@
 //! `run_turn`：一轮的**全部**控制流。
 //!
 //! ```text
-//! 重读持久层        ── 用户改了 memory/*.md，这一轮就生效
-//! 取一次视图        ── 只为拿 mode 与 scene_override（本轮一次性的东西）
+//! 重读持久层        ── 用户改了 memory/*，这一轮就生效
+//! 取一次视图        ── mode 与 scene_override（本轮一次性的东西）
 //! 接近上下文上限 ⇒ 折叠早期对话（落成一条 Folded 事件，原文不删）
-//! 'turn: loop {
-//!     检查点 0  ── 吸收中途插话（只拿计数，内容从视图来）
-//!     取视图 ①  ── 拼判断段的 prompt
-//!     判断段    ── 判定场景 → 提交推断 → 为组装上下文做检索
-//!     检查点 1  ── subagent 跑的这段时间里用户说话了吗 ⇒ continue（重走判断）
-//!     取视图 ②  ── ★ 必须重取：判断段刚写进去的推断，回答段要看得见
-//!     回答段    ── 注入 scene.guidance + 案例 + 暴露 scene.tools，然后流式
+//!
+//! 判断段            ── ★ 一轮**只跑一次**，在回答循环之外
+//!   取视图 ①        ── 拼判断段的 prompt
+//!   判定场景        ── 只判场景。不写推断、不做检索
+//!   落 Judged + Cost
+//!
+//! 'turn: loop {                       ← 回答循环。判断段不在里面
+//!     检查点        ── 吸收中途插话（只拿计数，内容从视图来）
+//!     取视图        ── ★ 每次重取：上一圈工具刚写进去的推断要看得见
+//!     回答段        ── 注入 scene.guidance + 案例 + 本 mode 的工具，然后流式
 //!       ├─ ToolCalls ⇒ 发 Called → 跑工具 → 发 Returned ⇒ continue
 //!       └─ Done      ⇒ 发 Wrote ⇒ break
 //! }
 //! ```
 //!
+//! # 判断和推断是两回事
+//!
+//! **判断段只回答「这一轮该进哪个场景」**，它跑在回答段之前、在模型读任何材料之前，
+//! 所以一轮跑一次就够了。上一版把它放在循环里，工具每返回一次就重判一次场景 ——
+//! 三轮工具就是四次判断段，而判断段吃的是和回答段一模一样的完整对话，
+//! 等于把最贵的那段 prompt 发了四遍，换来的只是一个几乎不会变的场景 id。
+//!
+//! **推断是读完材料之后才形成的东西**，所以它在回答段，而且是模型自己调的工具：
+//! `record_graph` 写图，`record_note` 写图外的关键信息（见 [`crate::actions`]）。
+//! 理想顺序写在那两个工具的 description 里 —— 先读（`fs_*` / `web_*`），
+//! 再写推断，最后写正文。写在 description 里而不是 harness 里，是这个项目一贯的做法。
+//!
+//! # 中途插话不重判场景
+//!
+//! 插话在用户按下发送时就进了主时间线，下一次取视图自然带上，回答段看得见。
+//! 为它重跑一次判断段是同一笔钱买同一个答案。
+//!
 //! # turn 不持有任何状态副本
 //!
 //! **每次要拼 prompt 就向 Core 取一次当前视图**（[`CoreHandle::view`]），不缓存、
-//! 不冻结、不自己在 turn 里攒一份平行的时间线。
-//!
-//! 上一版这里错得很典型：`TurnInput` 轮初取一次就冻住，判断段的 `Emit::Infer`
-//! 进了 Core 的 workspace，**回答段却还在用轮初那份** —— 判断段刚写下的结论，
-//! 回答段看不见。同时 turn 又自己维护一个 `local: Vec<Event>` 把插话拼进去，
-//! 而那些事件早就在主时间线上了。两处都是「同一份数据在同一时刻有两个值」。
-//!
-//! 现在的规则：**Workspace 是即时工作台，消费者拿到的永远是最新的那份。**
-//! [`crate::msg::Injected`] 只返回计数，结构上就不可能再把插话拼进局部副本。
-//!
-//! 这**不等于**「用户编辑会重新驱动 turn」：用户中途改侧栏不会打断、不会让 turn
-//! 回退重跑，流程上它只是进 `turn_edits` 参与仲裁。但下一次拼 prompt 时，
-//! 图上就是他改过的值 —— 拼 prompt 用的是拼那一刻的真实状态。
+//! 不冻结、不自己在 turn 里攒一份平行的时间线。[`crate::msg::Injected`] 只返回计数，
+//! 结构上就不可能再把插话拼进局部副本。
 //!
 //! # harness 在这里**不**做什么
 //!
 //! 判断段只产出一个**场景判定**，harness 拿它做三件准备 —— 注入 guidance、
-//! 注入案例、暴露这个场景的工具 —— 然后就不再干预。模型想提问就自己调 `ask_user`，
-//! 想读仓库就自己调 `read_repo`，也可以什么都不调直接回答。
-//!
-//! # 哪些「打扰用户」的权限被掐掉了
+//! 注入案例、暴露这个场景与这个 mode 的工具 —— 然后就不再干预。
 //!
 //! | 位置 | 判断 | 现状 |
 //! |---|---|---|
@@ -49,19 +55,23 @@
 //! | 判断段失败 → 阻断回答 | 不该有 | 降级为「本轮无场景」并在时间线上留明账 |
 //! | 上下文压缩 → 弹窗请示 | 不该有 | 自动折叠 + 事后告知 |
 //! | 落盘失败 → 弹窗 | 不该有 | 状态栏降级提示，对话继续 |
-//! | 蒸馏写入长期记忆 | **反过来** | 只能用户按一键蒸馏触发 |
+//! | 蒸馏写入长期记忆 | **反过来** | 只能用户按一键蒸馏触发，且写的是草稿 |
 //! | 模型调用 `ask_user` | **该有** | 保留，且提问是持久实体 |
 //! | 心跳 `StillRunning` | 不是打扰 | 保留。这是进度反馈 |
 
+use crate::actions;
 use crate::context::{CompactPlan, Context, ContextLimit, fold_instruction, plan_compaction};
 use crate::event::assemble;
 use crate::handle::CoreHandle;
 use crate::ids::TurnId;
-use crate::memory::Memory;
-use crate::model::{AnswerReq, JudgeReq, Message, Models, Role, StreamEvent, Usage, complete};
+use crate::memory::{Memory, ModePrompt};
+use crate::model::{
+    AnswerReq, Call, JudgeReq, Message, Models, Role, StreamEvent, Usage, complete,
+};
 use crate::msg::{Emit, TurnOutcome, TurnStats, TurnView, UiEvent};
 use crate::scene::SceneId;
-use crate::tools::{ASK_USER, AskUser, Registry, ToolConfig, ToolCtx, run_tools};
+use crate::state::Op;
+use crate::tools::{ASK_USER, AskUser, Registry, ToolConfig, ToolCtx, ToolResult, run_tools};
 use futures_util::StreamExt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -126,7 +136,8 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     let mut aborted = false;
     let mut partial = String::new();
     // 打断兜底记账用：最后一次发出去的 prompt 有多大。钱已经花了，账不能漏。
-    let mut last_prompt_tokens: u32 = 0;
+    // 不给初值：判断段一定会在任何 return 之前写它，编译器替我们盯着这一条。
+    let mut last_prompt_tokens: u32;
 
     // ── 每轮重读持久层 ────────────────────────────────────────
     // 「metadata 动态拼接，改动立即生效」的落点：用户改了 project.md、
@@ -147,14 +158,16 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     let mode = v0.mode;
     // scene_override 是一次性的：Core 在第一次取视图时就 take 掉了。
     let scene_override: Option<SceneId> = v0.scene_override.clone();
-    let mode_note = memory.mode_note(mode).to_string();
+    // 这个 mode 的全套提示词：system 段那一句、额外暴露的工具、
+    // 以及每个工具在这个 mode 下要追加的说明。全部来自 prompts.toml。
+    let mp: ModePrompt = memory.mode(mode);
 
     // ── 接近上下文上限 ⇒ 先折叠早期对话 ────────────────────────
     //
     // 位置很重要：**判断段之前、上一轮的推断已提交之后**。那时值得留下的结构化
     // 信息已经在图里，被折叠的是叙述过程。折的是事件区间，原文一条不删。
     {
-        let probe = ctx_of(&v0, &memory, &mode_note);
+        let probe = ctx_of(&v0, &memory, &mp.note);
         let fp = probe.footprint();
         if let CompactPlan::Fold { from, to, msgs, count } =
             plan_compaction(&v0.events, fp.cacheable + fp.inference, &ctx.context_limit)
@@ -177,31 +190,19 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     }
     drop(v0);
 
-    'turn: loop {
-        stats.loops += 1;
-
-        // ── 检查点 0：吸收中途插话 ──────────────────────────────
-        // 只拿计数。内容不用管：那些事件在用户按下发送时就进时间线了，
-        // 下面取视图自然就看到。
-        let Some(inj) = ctx.core.take_injections(ctx.id).await else {
-            aborted = true;
-            break 'turn;
-        };
-        stats.injections += inj.said;
-        stats.answers += inj.answered;
-
-        // ── 取视图 ① ──────────────────────────────────────────
+    // ══════════ 判断段：一轮一次，在回答循环之外 ══════════
+    //
+    // 判断段和回答段吃同一份对话 —— 判断「这一轮该进哪个场景」本来就要看
+    // 用户刚说了什么。两段式省下的是场景 guidance 与案例。
+    let scene_id: SceneId;
+    {
         let Some(v) = ctx.core.view(ctx.id).await else {
-            aborted = true;
-            break 'turn;
+            return TurnOutcome { aborted: true, stats };
         };
-        let context = ctx_of(&v, &memory, &mode_note);
+        let context = ctx_of(&v, &memory, &mp.note);
         let phase = v.ws.phase;
         drop(v);
 
-        // ── 判断段 ─────────────────────────────────────────────
-        // 判断段和回答段吃同一份对话 —— 判断「这一轮该进哪个场景」本来就要看
-        // 用户刚说了什么。两段式省下的是场景 guidance 与案例。
         let t_judge = Instant::now();
         let judge_msgs = context.for_judge();
         last_prompt_tokens = ctx.models.judge.estimate_prompt_tokens(&judge_msgs);
@@ -213,8 +214,7 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
             token: ctx.token.child_token(),
         };
         let Some(judged) = guarded(&ctx.token, ctx.models.judge.judge(req)).await else {
-            aborted = true;
-            break 'turn;
+            return TurnOutcome { aborted: true, stats };
         };
         stats.judge_ms += t_judge.elapsed().as_millis() as u64;
 
@@ -232,8 +232,6 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                 crate::model::JudgeOut {
                     scene: "none".into(),
                     rationale: format!("判断段失败：{e}"),
-                    ops: vec![],
-                    retrieve: vec![],
                     usage: Usage::default(),
                 }
             }
@@ -241,26 +239,23 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
 
         // 场景：用户点过换场景 ⇒ 以他的为准。**并且真的注入新场景的材料** ——
         // 只换标签不换 prompt，等于用户点了半天模型什么都没感觉到。
-        let mut scene_id: SceneId = match &scene_override {
+        let mut id: SceneId = match &scene_override {
             Some(s) => {
                 stats.scene_overridden = true;
                 s.clone()
             }
             None => judge.scene.clone(),
         };
-        if mode.disabled_scenes().contains(&scene_id.as_str()) {
-            scene_id = "none".into();
+        if mode.disabled_scenes().contains(&id.as_str()) {
+            id = "none".into();
         }
-        let scene = match memory.playbook.get(&scene_id) {
-            Some(s) => s.clone(),
-            None => {
-                // 模型给了不认识的 id ⇒ 回退到 none，不报错、不打扰用户
-                stats.scene_unknown = true;
-                scene_id = "none".into();
-                memory.playbook.get("none").cloned().expect("playbook 必须有 none 场景")
-            }
-        };
-        stats.scene = scene_id.clone();
+        if memory.playbook.get(&id).is_none() {
+            // 模型给了不认识的 id ⇒ 回退到 none，不报错、不打扰用户
+            stats.scene_unknown = true;
+            id = "none".into();
+        }
+        stats.scene = id.clone();
+        scene_id = id;
         ctx.core
             .emit(
                 ctx.id,
@@ -269,82 +264,65 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
             .await;
         // 账记在判定之后：时间线读起来是「判成了 X，为此花了 Y」。
         ctx.core.cost(ctx.id, Role::Judge, judge.usage).await;
+    }
 
-        // 判断段顺带推断出的字段 → 交给 Core 仲裁。
-        // 它们**当场**进 workspace，所以下面取视图 ② 时回答段就看得见 ——
-        // 这正是上一版漏掉的那一条链。
-        if !judge.ops.is_empty() {
-            stats.inferred_ops += judge.ops.len() as u32;
-            match ctx.core.emit(ctx.id, Emit::Infer { ops: judge.ops.clone() }).await {
-                None => {
-                    aborted = true;
-                    break 'turn;
-                }
-                Some(a) => {
-                    stats.dropped_ops += a.dropped.len() as u32;
-                    // 被丢的必须回喂，否则模型下一轮还会提交同样的改动，白花钱
-                    if let Some(fb) = a.feedback() {
-                        ctx.core.emit(ctx.id, Emit::Noted { text: fb }).await;
-                    }
-                }
-            }
-        }
+    let scene = memory
+        .playbook
+        .get(&scene_id)
+        .cloned()
+        .expect("playbook 必须有 none 场景，且 scene_id 已经回退过");
+    let cases = memory.cases_for(&scene_id);
 
-        // 判断段为**组装回答段上下文**而做的检索。
-        // 取回来的是材料，模型在回答段依然可以自己再调工具。
-        //
-        // 落成一条 `Noted` 进时间线，而不是只在本轮内存里飘一下：不落的话，
-        // 三十轮之后回头看这段对话，会看到一个凭空冒出来的结论。
-        if !judge.retrieve.is_empty() {
-            let (rs, ts) = run_tools(judge.retrieve.clone(), &ctx.tool_ctx()).await;
-            stats.absorb_tools(&ts);
-            let text = format!(
-                "为本轮检索到的材料：\n{}",
-                rs.iter()
-                    .map(|r| format!("- [{}] {}", r.name, r.content))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            ctx.core.emit(ctx.id, Emit::Noted { text }).await;
-            if ctx.token.is_cancelled() {
-                aborted = true;
-                break 'turn;
-            }
-        }
+    // 本轮暴露的工具：场景的 + 这个 mode 额外给的。
+    // 认不出的名字**要报出来** —— 上一版这里静默丢弃，结果整套 fs_* / web_*
+    // 从来没被暴露过，而症状只是「模型好像从来不调工具」。
+    let exposed_names = memory.playbook.exposed_tools(&scene, &mp.tools);
+    let exposed = ctx.registry.specs(&exposed_names, &mp.tool_notes);
+    if !exposed.missing.is_empty() {
+        let _ = ctx.ui.send(UiEvent::MemoryDegraded {
+            file: "playbook.toml".into(),
+            err: format!(
+                "场景 {scene_id} / mode {} 里这些工具名注册表里没有，已跳过：{}。现有的是：{}",
+                mode.key(),
+                exposed.missing.join("、"),
+                ctx.registry.names().join("、")
+            ),
+        });
+    }
 
-        // ── 检查点 1：subagent 跑的这段时间里用户说话了吗 ────────
+    // ══════════ 回答循环 ══════════
+    'turn: loop {
+        stats.loops += 1;
+
+        // ── 检查点：吸收中途插话 ────────────────────────────────
+        // 只拿计数，**不重判场景**。那些事件在用户按下发送时就进时间线了，
+        // 下面取视图自然就看到。
         let Some(inj) = ctx.core.take_injections(ctx.id).await else {
             aborted = true;
             break 'turn;
         };
-        if !inj.is_empty() {
-            stats.injections += inj.said;
-            stats.answers += inj.answered;
-            continue 'turn; // 有新输入 ⇒ 重走判断，场景可能变了
-        }
+        stats.injections += inj.said;
+        stats.answers += inj.answered;
 
-        // ── 取视图 ②：★ 必须重取 ────────────────────────────────
-        // 判断段刚写进去的推断、刚回喂的 Noted、刚检索到的材料，都在取视图 ①
-        // 之后才进的时间线与 workspace。拿视图 ① 拼回答段的 prompt 就是错的。
+        // ── 取视图：★ 每圈重取 ──────────────────────────────────
+        // 上一圈 record_graph / record_note 刚写进去的推断、刚回喂的工具结果，
+        // 都要在这一圈的 prompt 里看得见。
         let Some(v) = ctx.core.view(ctx.id).await else {
             aborted = true;
             break 'turn;
         };
-        let context = ctx_of(&v, &memory, &mode_note);
+        let context = ctx_of(&v, &memory, &mp.note);
         drop(v);
 
         // ── 回答段 ─────────────────────────────────────────────
         let t_answer = Instant::now();
-        let exposed = memory.playbook.exposed_tools(&scene);
-        let tools = ctx.registry.specs(&exposed);
-        let cases = memory.cases_for(&scene_id);
         let answer_msgs = context.for_answer(&scene, &cases, &[]);
         last_prompt_tokens = ctx.models.answer.estimate_prompt_tokens(&answer_msgs);
         let req = AnswerReq {
             turn: ctx.id,
             mode,
             msgs: answer_msgs,
-            tools,
+            tools: exposed.specs.clone(),
             token: ctx.token.child_token(),
         };
         let Some(opened) = guarded(&ctx.token, ctx.models.answer.stream(req)).await else {
@@ -402,8 +380,11 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                             }
                         }
 
-                        let (rs, ts) = run_tools(cs, &ctx.tool_ctx()).await;
-                        stats.absorb_tools(&ts);
+                        let Some(rs) = run_batch(&ctx, cs, &mut stats).await else {
+                            aborted = true;
+                            stats.answer_ms += t_answer.elapsed().as_millis() as u64;
+                            break 'turn;
+                        };
                         for r in &rs {
                             ctx.core.emit(ctx.id, Emit::Returned {
                                 call_id: r.call_id.clone(),
@@ -454,6 +435,102 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
     }
 
     TurnOutcome { aborted, stats }
+}
+
+/// 跑一批工具调用，**按原顺序**返回结果。
+///
+/// # 动作工具在这里就地提交
+///
+/// `record_graph` / `record_note` 要写主时间线，而 `Tool::run` 只拿得到 call 和
+/// token —— 握着 [`CoreHandle`] 的只有 turn 这一层。所以它们和 `ask_user` 落
+/// `Asked` 事件一样，在这里特判。
+///
+/// **同一批调用合并成一次 `Emit::Infer`**：别名（`$enc`）的作用域就是一次提交，
+/// 拆成两次，`record_note` 里 `anchor: "$enc"` 就指不到同一批 `record_graph`
+/// 刚建的那个节点了。批 = 模型的一条 assistant 消息 = 一个别名作用域。
+///
+/// 返回 `None` = Core 没了（被打断或关闭）。
+async fn run_batch(
+    ctx: &TurnCtx,
+    calls: Vec<Call>,
+    stats: &mut TurnStats,
+) -> Option<Vec<ToolResult>> {
+    let n = calls.len();
+    let mut slots: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
+
+    // ── 动作调用：解析 → 合并 → 一次提交 ──
+    let act_idx: Vec<usize> =
+        (0..n).filter(|&i| actions::is_action(&calls[i].name)).collect();
+    if !act_idx.is_empty() {
+        let mut ops: Vec<Op> = Vec::new();
+        // (下标, 这次调用贡献了几条 op, 解析不了的, 放错工具的条数)
+        let mut per: Vec<(usize, usize, Vec<String>, usize)> = Vec::new();
+        for &i in &act_idx {
+            let (o, bad) = actions::parse(&calls[i]);
+            let want_graph = calls[i].name == actions::RECORD_GRAPH;
+            let misplaced =
+                o.iter().filter(|op| actions::is_graph_op(op) != want_graph).count();
+            per.push((i, o.len(), bad, misplaced));
+            ops.extend(o);
+        }
+        stats.inferred_ops += ops.len() as u32;
+        // 动作调用也是模型发出的工具调用，要进 tools_run。不计的话，
+        // 「模型调了两次 record_graph」在指标上仍然是 tools_run: 0。
+        stats.tools_run += act_idx.len() as u32;
+        let applied = ctx.core.emit(ctx.id, Emit::Infer { ops }).await?;
+        stats.dropped_ops += applied.dropped.len() as u32;
+        // 被丢的必须回喂，否则模型下一轮还会提交同样的改动，白花钱。
+        // 回喂走工具结果，不再另发一条 Noted —— 工具结果本来就是给模型的回话。
+        let feedback = applied.feedback();
+        for (i, count, bad, misplaced) in per {
+            let mut msg = if count == 0 {
+                "一条改动都没提交。".to_string()
+            } else {
+                format!("提交了 {count} 条改动。")
+            };
+            if !bad.is_empty() {
+                msg.push_str(&format!(
+                    "\n有 {} 条解析不了、已丢弃：\n{}",
+                    bad.len(),
+                    bad.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n")
+                ));
+            }
+            if misplaced > 0 {
+                let (here, there) = if calls[i].name == actions::RECORD_GRAPH {
+                    ("record_graph", "record_note")
+                } else {
+                    ("record_note", "record_graph")
+                };
+                msg.push_str(&format!(
+                    "\n其中 {misplaced} 条不是 {here} 该收的（已照样提交），下次放 {there}。"
+                ));
+            }
+            if let Some(f) = &feedback {
+                msg.push('\n');
+                msg.push_str(f);
+            }
+            let kind = if count == 0 {
+                stats.tools_failed += 1;
+                crate::tools::ToolResultKind::Failed
+            } else {
+                crate::tools::ToolResultKind::Ok
+            };
+            slots[i] = Some(ToolResult::of(&calls[i], msg, kind));
+        }
+    }
+
+    // ── 其余走正常的工具调度 ──
+    let rest_idx: Vec<usize> = (0..n).filter(|i| slots[*i].is_none()).collect();
+    if !rest_idx.is_empty() {
+        let rest: Vec<Call> = rest_idx.iter().map(|&i| calls[i].clone()).collect();
+        let (rs, ts) = run_tools(rest, &ctx.tool_ctx()).await;
+        stats.absorb_tools(&ts);
+        for (slot, r) in rest_idx.into_iter().zip(rs) {
+            slots[slot] = Some(r);
+        }
+    }
+
+    Some(slots.into_iter().flatten().collect())
 }
 
 impl TurnStats {

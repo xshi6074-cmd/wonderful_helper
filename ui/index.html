@@ -40,6 +40,21 @@
 
     <section class="pane" data-pane="tools" hidden>
       <div id="tools-panel"></div>
+    <!-- 蒸馏审阅：一节一个目标文件，改完勾选，一次写回。
+         不做成「打开草稿自己复制粘贴」，那一步本来就该程序做。 -->
+    <section class="pane distill" data-rp="distill" hidden>
+      <div class="ed-head">
+        <b>蒸馏草稿</b>
+        <span class="spacer"></span>
+        <span class="chip ghost" id="di-path" title="草稿全文落盘位置"></span>
+      </div>
+      <p class="hint" id="di-note"></p>
+      <div id="di-list"></div>
+      <div class="ed-acts">
+        <button class="primary" id="di-apply">写入选中的</button>
+        <span class="spacer"></span>
+        <button class="ghost" id="di-close">关闭</button>
+      </div>
     </section>
   </aside>
   <div class="grip" id="lgrip" title="拖动调宽"></div>
@@ -93,6 +108,7 @@
       <div class="seg" id="right-seg">
         <button data-rt="infer" class="on">推断</button>
         <button data-rt="edit" hidden>编辑</button>
+        <button data-rt="distill" hidden>蒸馏</button>
       </div>
       <span class="spacer"></span>
       <button class="icon" id="graph-refresh" title="刷新">⟳</button>

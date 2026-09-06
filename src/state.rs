@@ -88,14 +88,19 @@ pub enum Origin {
 
 /// 这个推断是从哪来的。无实证来源的元素在图上渲染为虚线 —— 那正是该警惕的地方。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Source {
     /// 仓库位置，如 `src/model/generator.py:42`
+    #[serde(alias = "Repo")]
     Repo(String),
     /// 论文章节
+    #[serde(alias = "Paper")]
     Paper(String),
     /// 用户口述
+    #[serde(alias = "User")]
     User,
     /// 模型推测 —— 渲染成虚线的就是它
+    #[serde(alias = "Guess")]
     Guess,
 }
 
@@ -639,6 +644,15 @@ pub const DEFAULT_NODE_KIND: &str = "module";
 /// 建边时的兜底：张量 / 数据流。
 pub const DEFAULT_EDGE_KIND: &str = "flow";
 
+/// `Option<Option<T>>` 的反序列化：区分「字段没给」和「字段给了 null」。
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
+}
+
 /// 单个改动。
 ///
 /// 图内的 op **全部是 patch**（`None` = 这一项不改）：这是「只改 label 不动 body」
@@ -685,7 +699,15 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
         /// `Some(None)` = 从分组里挪出来；`None` = 不动。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ///
+        /// 要 `double_option`：serde 默认会把 JSON 的 `null` 收成外层的 `None`，
+        /// 也就是「不动」—— 于是「提到顶层」这个意思**从 JSON 根本表达不出来**。
+        /// 模型侧的 schema 里写了 `parent: null` 能提到顶层，这里就得真的做到。
+        #[serde(
+            default,
+            deserialize_with = "double_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         parent: Option<Option<NodeId>>,
         /// 值为 `None` = 删这个 attr。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

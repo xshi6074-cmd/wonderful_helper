@@ -22,10 +22,10 @@ use premortem::handle::CoreHandle;
 use premortem::ids::{NodeId, Seq, SessionId, TurnId};
 use premortem::memory::Memory;
 use premortem::mock::{
-    EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, call_with, default_judge,
+    EchoTool, FlakyTool, MockModel, SlowTool, ask_call, call, call_with, default_judge, judge_of,
 };
 use premortem::policy::{Policy, PolicyCfg};
-use premortem::model::{JudgeOut, Message, Mode, Models, MsgRole, Role, StreamEvent, Usage};
+use premortem::model::{Message, Mode, Models, MsgRole, Role, StreamEvent, Usage};
 use premortem::msg::{SendMode, UiEvent};
 use premortem::persist::{restore, spawn_writer};
 use premortem::scene::Playbook;
@@ -377,19 +377,18 @@ fn chunks(parts: &[&str]) -> Vec<StreamEvent> {
     v
 }
 
+/// 判断段暴露给模型的工具名。只有一个 —— 这是 any/required 能替代点名的前提。
+fn judge_tool_names() -> Vec<&'static str> {
+    vec!["record_judgement"]
+}
+
 fn ok_kind(r: &premortem::tools::ToolResult) -> bool {
     r.kind == premortem::tools::ToolResultKind::Ok
 }
 
-fn judge_with(scene: &str, ops: Vec<Op>) -> JudgeOut {
-    JudgeOut {
-        scene: scene.into(),
-        rationale: format!("判成 {scene}"),
-        ops,
-        retrieve: vec![],
-        usage: Usage { prompt: 120, completion: 30, estimated: false },
-    }
-}
+// judge_with(scene, ops) 没了：判断段不再写推断。
+// 判成某场景用 mock::judge_of，提交推断用 .on_ops() / .push_ops()
+// —— 后者走的是回答段的动作工具，也就是真实模型走的那条路。
 
 // ══════════════════════════════ 场景 ══════════════════════════════
 
@@ -411,7 +410,7 @@ async fn s01_normal_turn() {
 async fn s02_scene_injected() {
     head("S02", "场景选定后真的灌进 prompt");
     let m = MockModel::new()
-        .on_judge(judge_with("check_assumption", vec![]))
+        .on_judge(judge_of("check_assumption"))
         .on_answer(chunks(&["嗯"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("直接上大实验", SendMode::Queue).await;
@@ -532,10 +531,8 @@ async fn s07_arbitration() {
     head("S07", "turn 内仲裁：撞上用户改动就丢，时间线只记生效的");
     let m = MockModel::new()
         .judge_delay(Duration::from_millis(80))
-        .on_judge(judge_with(
-            "none",
-            vec![Op::set("spec.claim", "模型写的"), Op::set("spec.metric", "BWT")],
-        ))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::set("spec.claim", "模型写的"), Op::set("spec.metric", "BWT")])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("开始", SendMode::Queue).await;
@@ -570,9 +567,13 @@ async fn s07_arbitration() {
     ok(!recorded_paths.contains(&"spec.claim".to_string()), "被丢的那条没进事件的 ops");
     ok(recorded_paths.contains(&"spec.metric".to_string()), "没撞车的那条正常生效");
     ok(dropped.contains(&"spec.claim".to_string()), "被丢的路径记在 dropped 里（审计）");
+    // 回喂现在走工具返回，不再另发一条 Noted：动作调用本来就有一条回话，
+    // 「你这条没生效」写在那里，模型下一步一定读得到。
     ok(
-        tl.iter().any(|e| matches!(&e.body, Body::Noted{text} if text.contains("没有生效"))),
-        "被丢的改动回喂给了模型",
+        tl.iter().any(|e| matches!(&e.body,
+            Body::Returned { name, content, .. }
+            if name == premortem::actions::RECORD_NOTE && content.contains("没有生效"))),
+        "被丢的改动回喂给了模型（写在动作工具的返回里）",
     );
 
     let s = r.finish().await;
@@ -586,7 +587,8 @@ async fn s07_arbitration() {
 async fn s08_edit_outside_turn() {
     head("S08", "轮外编辑不进仲裁集：模型下一轮可以改");
     let m = MockModel::new()
-        .on_judge(judge_with("none", vec![Op::set("spec.claim", "模型改的")]))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::set("spec.claim", "模型改的")])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     // 空闲时编辑
@@ -705,12 +707,13 @@ async fn s12_graceful_restart() {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::memory().unwrap());
     {
         let m = MockModel::new()
-            .on_judge(judge_with("none", vec![Op::grounded(
+            .on_judge(judge_of("none"))
+        .on_ops(&[Op::grounded(
                 "spec.dataset",
                 "CIFAR100",
                 Source::Repo("configs/a.yaml:12".into()),
                 0.9,
-            )]))
+            )])
             .on_answer(chunks(&["记下了"]));
         let opts = RigOpts { store: store.clone(), ..Default::default() };
         let r = Rig::build(m, Registry::new(), opts).await;
@@ -829,7 +832,8 @@ async fn s15_fork() {
     let mut m = MockModel::new();
     for i in 0..3 {
         m = m
-            .on_judge(judge_with("none", vec![Op::set(format!("f{i}"), format!("v{i}"))]))
+            .on_judge(judge_of("none"))
+        .on_ops(&[Op::set(format!("f{i}"), format!("v{i}"))])
             .on_answer(chunks(&["好"]));
     }
     let opts = RigOpts { store: store.clone(), ..Default::default() };
@@ -941,9 +945,9 @@ async fn s16_memory_hot_reload() {
 async fn s17_scene_override() {
     head("S17", "换场景：下一轮真的注入新场景的材料");
     let m = MockModel::new()
-        .on_judge(judge_with("none", vec![]))
+        .on_judge(judge_of("none"))
         .on_answer(chunks(&["一"]))
-        .on_judge(judge_with("none", vec![]))
+        .on_judge(judge_of("none"))
         .on_answer(chunks(&["二"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("第一轮", SendMode::Queue).await;
@@ -990,7 +994,7 @@ async fn s18_judge_failure() {
 async fn s19_adversarial_model() {
     head("S19", "对抗性 mock：未知场景 / 重复 call_id / 只吐工具不吐正文");
     let m = MockModel::new()
-        .on_judge(judge_with("这个场景根本不存在", vec![]))
+        .on_judge(judge_of("这个场景根本不存在"))
         .on_answer(vec![StreamEvent::ToolCalls(vec![
             call("dup", "echo"),
             call("dup", "echo"),
@@ -1055,10 +1059,8 @@ async fn s21_open_parked() {
     head("S21", "待落定/搁置走同一条 op 通道，享受同一套仲裁");
     let m = MockModel::new()
         .judge_delay(Duration::from_millis(80))
-        .on_judge(judge_with(
-            "none",
-            vec![Op::open(vec!["模型加的问题".into()]), Op::parked(vec!["模型搁置的".into()])],
-        ))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::open(vec!["模型加的问题".into()]), Op::parked(vec!["模型搁置的".into()])])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("整理一下", SendMode::Queue).await;
@@ -1081,7 +1083,8 @@ async fn s22_checkpoint_equivalence() {
     let mut m = MockModel::new();
     for i in 0..3 {
         m = m
-            .on_judge(judge_with("none", vec![Op::set(format!("k{i}"), i as i64)]))
+            .on_judge(judge_of("none"))
+        .on_ops(&[Op::set(format!("k{i}"), i as i64)])
             .on_answer(chunks(&["好"]));
     }
     let opts = RigOpts { store: store.clone(), checkpoint_every: 3, ..Default::default() };
@@ -1123,7 +1126,8 @@ async fn s23_memstore_parity() {
     let a: Arc<dyn Store> = Arc::new(SqliteStore::memory().unwrap());
     let b: Arc<dyn Store> = Arc::new(MemStore::new());
     let m = MockModel::new()
-        .on_judge(judge_with("none", vec![Op::set("x", "1"), Op::open(vec!["q".into()])]))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::set("x", "1"), Op::open(vec!["q".into()])])
         .on_answer(chunks(&["好"]));
     let opts = RigOpts { store: a.clone(), ..Default::default() };
     let r = Rig::build(m, Registry::new(), opts).await;
@@ -1148,7 +1152,8 @@ async fn s23_memstore_parity() {
 async fn s24_message_assembly() {
     head("S24", "组装：状态与观测事件不进 prompt，对话事件全进");
     let m = MockModel::new()
-        .on_judge(judge_with("none", vec![Op::set("a", "1")]))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::set("a", "1")])
         .on_answer(chunks(&["答"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("问", SendMode::Queue).await;
@@ -1157,7 +1162,15 @@ async fn s24_message_assembly() {
     let s = r.finish().await;
     let msgs = assemble(&s.events);
     let roles: Vec<String> = msgs.iter().map(|m| format!("{:?}", m.role)).collect();
-    ok(roles == vec!["User", "Assistant"], &format!("只有对话进 prompt：{roles:?}"));
+    // 一次动作调用 = 一条带 tool_calls 的 assistant + 一条 tool 返回，本来就该在。
+    ok(
+        roles == vec!["User", "Assistant", "Tool", "Assistant"],
+        &format!("只有对话与工具往返进 prompt：{roles:?}"),
+    );
+    ok(
+        !msgs.iter().any(|m| m.content.contains("\"a\"") && m.content.contains("\"b\"")),
+        "★ 推断与用户编辑本身不进 prompt（它们是 metadata，组装时现拼）",
+    );
     ok(
         s.events.iter().any(|e| e.body.tag() == "inferred"),
         "推断改动在时间线上（作为 metadata 动态拼，不作为消息）",
@@ -1170,34 +1183,31 @@ async fn s24_message_assembly() {
 }
 
 async fn s25_answer_sees_judge() {
-    head("S25", "★ 回答段必须看得见判断段刚写下的东西");
-    // 判断段推断出两个字段、回喂一条 Noted、检索到一段材料，
-    // 这些全部发生在「取视图 ①」之后。回答段的 prompt 必须都有。
+    head("S25", "★ 模型刚写下的推断，同一轮的下一次回答调用就看得见");
+    // 新架构：推断由**回答段**的动作工具写。第一次回答调用提交 op，
+    // 第二次回答调用的 prompt 里必须已经有它 —— 这条链断了的话，
+    // 模型会在同一轮里反复重写同一个结论。
     let m = MockModel::new()
-        .on_judge(JudgeOut {
-            scene: "none".into(),
-            rationale: "顺手记两个字段".into(),
-            ops: vec![
-                Op::set("spec.dataset", "CIFAR100-仅判断段写的"),
-                Op::set("spec.metric", "BWT-仅判断段写的"),
-            ],
-            retrieve: vec![call("r1", "echo")],
-            usage: Usage { prompt: 120, completion: 30, estimated: false },
-        })
+        .on_judge(judge_of("none"))
+        .on_ops(&[
+            Op::set("spec.dataset", "CIFAR100-模型写的"),
+            Op::set("spec.metric", "BWT-模型写的"),
+        ])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new().with(Arc::new(EchoTool))).await;
     r.handle.session_send("开始", SendMode::Queue).await;
     ok(r.quiet(1).await, "一轮跑完");
 
     let jp = r.model.judge_prompt(0);
-    let ap = r.model.answer_prompt(0);
-    ok(!jp.contains("CIFAR100-仅判断段写的"), "判断段自己的 prompt 里当然没有（那时还没写）");
+    let ap0 = r.model.answer_prompt(0);
+    let ap1 = r.model.answer_prompt(1);
+    ok(!jp.contains("CIFAR100-模型写的"), "判断段跑在最前面，那时还没有这条推断");
+    ok(!ap0.contains("CIFAR100-模型写的"), "第一次回答调用也没有 —— 它正是产出这条 op 的那次");
     ok(
-        ap.contains("CIFAR100-仅判断段写的") && ap.contains("BWT-仅判断段写的"),
-        "★ 判断段写进 workspace 的推断，回答段 prompt 里看得见",
+        ap1.contains("CIFAR100-模型写的") && ap1.contains("BWT-模型写的"),
+        "★ 动作工具写进 workspace 的推断，同一轮下一次回答就看得见",
     );
-    ok(ap.contains("为本轮检索到的材料"), "★ 判断段检索到的材料也在");
-    ok(ap.contains("(本轮)"), "本轮新写的字段被标出来了（field.seq > turn_start）");
+    ok(ap1.contains("(本轮)"), "本轮新写的字段被标出来了（field.seq > turn_start）");
     let s = r.finish().await;
     inv::all(&s.events, &s.ws, &s.cost);
 }
@@ -1206,7 +1216,8 @@ async fn s26_answer_sees_injection_and_drop() {
     head("S26", "★ 插话与被丢弃的改动，也都从视图走，不靠 turn 自己攒");
     let m = MockModel::new()
         .judge_delay(Duration::from_millis(80))
-        .on_judge(judge_with("none", vec![Op::set("spec.claim", "模型写的")]))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::set("spec.claim", "模型写的")])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("第一句", SendMode::Queue).await;
@@ -1229,15 +1240,13 @@ async fn s26_answer_sees_injection_and_drop() {
 async fn s27_model_builds_graph() {
     head("S27", "★ 模型建图：别名铸成真 id，图与明细都进 prompt");
     let m = MockModel::new()
-        .on_judge(judge_with(
-            "none",
-            vec![
+        .on_judge(judge_of("none"))
+        .on_ops(&[
                 Op::node("$enc", "module", "对比编码器"),
                 Op::node("$loss", "loss", "InfoNCE"),
                 Op::edge("$e1", "$enc", "$loss"),
                 Op::anchored("risk.negatives", "负样本数可能不够", "$loss"),
-            ],
-        ))
+            ])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("我想做对比学习", SendMode::Queue).await;
@@ -1262,7 +1271,8 @@ async fn s27_model_builds_graph() {
         "★ 图外推断挂到了真节点上",
     );
 
-    let ap = r.model.answer_prompt(0);
+    // 图是这一轮的回答段自己画的，所以看的是**下一次**回答调用的 prompt。
+    let ap = r.model.answer_prompt(1);
     ok(ap.contains("flowchart"), "回答段 prompt 里有 mermaid");
     ok(ap.contains("对比编码器") && ap.contains("InfoNCE"), "两个节点的标签都在");
     ok(
@@ -1279,14 +1289,12 @@ async fn s28_edge_relink_blocked() {
     head("S28", "★ 漏洞 1：用户断开一条线，模型换个 edge id 也加不回来");
     let m = MockModel::new()
         .judge_delay(Duration::from_millis(80))
-        .on_judge(judge_with(
-            "none",
-            vec![
+        .on_judge(judge_of("none"))
+        .on_ops(&[
                 Op::node("$a", "data", "原始语料"),
                 Op::node("$b", "module", "分词器"),
                 Op::edge("$e", "$a", "$b"),
-            ],
-        ))
+            ])
         .on_answer(chunks(&["建好了"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("建图", SendMode::Queue).await;
@@ -1298,10 +1306,8 @@ async fn s28_edge_relink_blocked() {
     ok(ids.len() == 2 && snap.ws.flow.edges.len() == 1, "两个节点一条边");
 
     // 第二轮：模型用一个**全新的 edge id** 把同样的连接加回来
-    r.model.push_judge(judge_with(
-        "none",
-        vec![Op::edge("$again", ids[0].clone(), ids[1].clone())],
-    ));
+    r.model.push_judge(judge_of("none"));
+    r.model.push_ops(&[Op::edge("$again", ids[0].clone(), ids[1].clone())]);
     r.model.push_answer(chunks(&["继续"]));
     r.handle.session_send("继续", SendMode::Queue).await;
     r.wait(|e| matches!(e, UiEvent::TurnStarted { turn, .. } if turn.0 == 2), 1000)
@@ -1321,13 +1327,11 @@ async fn s29_node_resurrect_blocked() {
     head("S29", "★ 漏洞 2：用户删掉一个节点，模型换 id 新建同名的也复活不了");
     let m = MockModel::new()
         .judge_delay(Duration::from_millis(80))
-        .on_judge(judge_with(
-            "none",
-            vec![
+        .on_judge(judge_of("none"))
+        .on_ops(&[
                 Op::node("$a", "data", "原始语料"),
                 Op::node("$b", "module", "分词器"),
-            ],
-        ))
+            ])
         .on_answer(chunks(&["建好了"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("建图", SendMode::Queue).await;
@@ -1344,8 +1348,8 @@ async fn s29_node_resurrect_blocked() {
         .unwrap();
 
     // 第二轮：模型新建一个 label 一模一样的节点
-    r.model
-        .push_judge(judge_with("none", vec![Op::node("$dup", "module", "分词器")]));
+    r.model.push_judge(judge_of("none"));
+    r.model.push_ops(&[Op::node("$dup", "module", "分词器")]);
     r.model.push_answer(chunks(&["继续"]));
     r.handle.session_send("继续", SendMode::Queue).await;
     r.wait(|e| matches!(e, UiEvent::TurnStarted { turn, .. } if turn.0 == 2), 1000)
@@ -1366,9 +1370,8 @@ async fn s29_node_resurrect_blocked() {
 async fn s30_phantom_ids_rejected() {
     head("S30", "★ 幽灵 id 拦在门外；删节点连带收掉它的边");
     let m = MockModel::new()
-        .on_judge(judge_with(
-            "none",
-            vec![
+        .on_judge(judge_of("none"))
+        .on_ops(&[
                 Op::node("$a", "data", "训练集"),
                 Op::node("$b", "module", "主干"),
                 Op::edge("$ok", "$a", "$b"),
@@ -1378,8 +1381,7 @@ async fn s30_phantom_ids_rejected() {
                 Op::node("n77_7", "module", "凭空冒出来的"),
                 // 删一个不存在的东西
                 Op::drop_node("n66_6"),
-            ],
-        ))
+            ])
         .on_answer(chunks(&["好"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("建图", SendMode::Queue).await;
@@ -1408,27 +1410,28 @@ async fn s31_two_ways_to_draw() {
     head("S31", "★ 两种画法并存：程序画的图与模型自己画的图");
     let sketch = "graph LR\n  X[\"自己画的编码器\"] --> Y[\"自己画的投影头\"]";
     let m = MockModel::new()
-        .on_judge(judge_with("none", vec![Op::node("$a", "module", "程序画的编码器")]))
+        .on_judge(judge_of("none"))
+        .on_ops(&[Op::node("$a", "module", "程序画的编码器")])
         .on_answer(chunks(&["先结构化"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("开始", SendMode::Queue).await;
     ok(r.quiet(1).await, "第一轮");
-    let ap0 = r.model.answer_prompt(0);
+    // 第 0 次是产出这张图的那次调用，图要到第 1 次才出现在 prompt 里。
+    let ap0 = r.model.answer_prompt(1);
     ok(
         ap0.contains("flowchart") && ap0.contains("程序画的编码器"),
         "第一轮 prompt 里是程序渲染的那份",
     );
 
     // 第二轮：模型自己画一张，并且切过去
-    r.model.push_judge(judge_with(
-        "none",
-        vec![Op::sketch(Lang::Mermaid, sketch), Op::view(FlowView::Sketch)],
-    ));
+    r.model.push_judge(judge_of("none"));
+    r.model.push_ops(&[Op::sketch(Lang::Mermaid, sketch), Op::view(FlowView::Sketch)]);
     r.model.push_answer(chunks(&["换成我画的"]));
     r.handle.session_send("你自己画", SendMode::Queue).await;
     ok(r.quiet(2).await, "第二轮");
 
-    let ap1 = r.model.answer_prompt(1);
+    // 0/1 是第一轮的两次调用，2 是第二轮提交 sketch 的那次，3 才带上它。
+    let ap1 = r.model.answer_prompt(3);
     ok(ap1.contains("自己画的编码器"), "★ 切到 Sketch 后 prompt 里是模型自己写的源码");
     ok(!ap1.contains("程序画的编码器"), "结构化那份这一轮不进 prompt");
     ok(ap1.contains("不能点选"), "★ prompt 里说清了这张图放弃了结构化编辑");
@@ -1887,11 +1890,270 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"
     // ── 工具 schema 真的传出去了 ──
     let dir = tmpdir("schema");
     let (_, reg) = toolchain(&dir, None);
-    let specs = reg.specs(&reg.names());
-    let read = specs.iter().find(|s| s.name == "fs_read").unwrap();
+    let ex = reg.specs(&reg.names(), &Default::default());
+    let read = ex.specs.iter().find(|s| s.name == "fs_read").unwrap();
     ok(read.schema["properties"]["offset"]["type"] == "integer", "★ fs_read 报了准确的参数 schema");
     ok(read.schema["required"][0] == "path", "必填项标出来了");
-    ok(specs.iter().all(|s| s.schema["type"] == "object"), "每个工具都有 schema");
+    ok(ex.specs.iter().all(|s| s.schema["type"] == "object"), "每个工具都有 schema");
+    ok(ex.missing.is_empty(), "注册表自己的名字当然都认得");
+
+    // ── 判断段的 tool_choice ──
+    // 指名道姓要某个工具，在开了 thinking 的模型上会 400：
+    // `tool_choice 'specified' is incompatible with thinking enabled`。
+    // 症状很隐蔽：每轮判断段失败、降级成「本轮无场景」，对话表面上还在正常跑。
+    let ja = premortem::client::judge_tool_choice(Api::Anthropic);
+    let jo = premortem::client::judge_tool_choice(Api::OpenAiCompat);
+    ok(ja["type"] == "any" && ja.get("name").is_none(), "★ Anthropic 侧用 any，不点名");
+    ok(jo == serde_json::json!("required"), "★ OpenAI 兼容侧用 required，不点名");
+    ok(judge_tool_names().len() == 1, "候选只有一个工具，所以 any/required 等价于点名");
+    // 两个动作工具的 schema 必须真的列出字段 —— 上一版判断段那个 ops 字段
+    // 是个空对象，模型怎么写都错，而且错得没有声音。
+    for name in [premortem::actions::RECORD_GRAPH, premortem::actions::RECORD_NOTE] {
+        let s = ex.specs.iter().find(|s| s.name == name).unwrap();
+        ok(
+            s.schema["properties"]["ops"]["items"]["properties"]["op"]["enum"].is_array(),
+            &format!("★ {name} 的 schema 列出了 op 的取值，不是个空对象"),
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+// ══════════════ 这一轮改动的四条链路 ══════════════
+
+/// 从时间线上取本轮的 TurnStats。指标该打出来看，不是只做断言。
+fn stats_of(events: &[Event]) -> Option<premortem::msg::TurnStats> {
+    events.iter().rev().find_map(|e| match &e.body {
+        Body::TurnClosed { stats, .. } => serde_json::from_str(stats).ok(),
+        _ => None,
+    })
+}
+
+async fn s41_judge_runs_once_per_turn() {
+    head("S41", "★ 判断段一轮只跑一次 —— 工具往返多少次都不再重判场景");
+    // 模型连着调三轮工具再说话。旧版每次工具返回都 continue 到检查点 0，
+    // 于是判断段跟着跑四次，而判断段吃的是和回答段一样的完整对话 ——
+    // 等于把最贵的那段 prompt 发了四遍，换来一个几乎不会变的场景 id。
+    let m = MockModel::new()
+        .on_judge(judge_of("check_assumption"))
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call("t1", "echo")])])
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call("t2", "echo")])])
+        .on_ops(&[Op::set("spec.claim", "读完才写的")])
+        .on_answer(chunks(&["读完了，结论是"]));
+    let r = Rig::new(m, Registry::new().with(Arc::new(EchoTool))).await;
+    r.handle.session_send("查一下", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    ok(r.model.judge_calls() == 1, "★ 判断段只被调用了 1 次");
+    ok(r.model.answer_calls() == 4, "回答段调了 4 次（三次工具往返 + 收尾）");
+    let s = r.finish().await;
+    let st = stats_of(&s.events).expect("TurnClosed 带 stats");
+    println!(
+        "      · 本轮：judge 调用 1 · answer 调用 4 · loops {} · tools_run {} · inferred_ops {} · scene {}",
+        st.loops, st.tools_run, st.inferred_ops, st.scene
+    );
+    ok(st.loops == 4, "四圈回答循环");
+    ok(st.scene == "check_assumption", "场景是判断段那一次定下的，全程没变");
+    ok(
+        s.events.iter().filter(|e| e.body.tag() == "judged").count() == 1,
+        "★ 时间线上只有一条 judged",
+    );
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
+async fn s42_actions_write_inference() {
+    head("S42", "★ 推断由回答段的动作工具写，同一批里别名互通");
+    // 断链 2 的堵法：模型有 record_graph / record_note 两个工具，
+    // 同一条 assistant 消息里的两次调用合并成**一次**提交 ——
+    // 所以 record_note 的 anchor 能指到同一批 record_graph 刚建的节点。
+    let dir = tmpdir("actions");
+    let (_, reg) = toolchain(&dir, None);
+    let m = MockModel::new().on_judge(judge_of("trace_code")).on_answer(vec![
+        StreamEvent::ToolCalls(vec![
+            call_with(
+                "g1",
+                premortem::actions::RECORD_GRAPH,
+                serde_json::json!({ "ops": [
+                    { "op": "node", "id": "$enc", "kind": "module", "label": "编码器",
+                      "source": { "repo": "src/model.py:42" }, "confidence": 0.9 },
+                    { "op": "node", "id": "$loss", "kind": "loss", "label": "对比损失" },
+                    { "op": "edge", "id": "$e", "from": "$enc", "to": "$loss", "kind": "supervises" },
+                ]}),
+            ),
+            call_with(
+                "n1",
+                premortem::actions::RECORD_NOTE,
+                serde_json::json!({ "ops": [
+                    { "op": "set", "path": "spec.temp", "value": "0.07", "anchor": "$loss",
+                      "source": "user" },
+                    { "op": "set", "path": "open", "open": ["负样本从哪来？"] },
+                ]}),
+            ),
+        ]),
+    ]).on_answer(chunks(&["图画好了"]));
+    let r = Rig::new(m, reg).await;
+    r.handle.session_send("看看这个模型", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    let g = &snap.ws.flow;
+    ok(g.nodes.len() == 2 && g.edges.len() == 1, "两个节点一条边落地了");
+    ok(g.nodes.keys().all(|n| !n.0.starts_with('$')), "别名全部铸成了真 id");
+    let loss = g.nodes.values().find(|n| n.label == "对比损失").map(|n| n.id.clone()).unwrap();
+    let temp = snap.ws.fields.get(&premortem::state::Path::new("spec.temp")).unwrap();
+    ok(
+        temp.anchor.as_ref() == Some(&loss),
+        "★ record_note 的 anchor 指到了同一批 record_graph 刚建的节点（一批一个别名作用域）",
+    );
+    ok(snap.ws.open == vec!["负样本从哪来？".to_string()], "待落定清单也写进去了");
+    ok(
+        g.nodes.values().any(|n| matches!(&n.prov.source, Some(Source::Repo(p)) if p.contains("model.py"))),
+        "★ source 按 schema 里写的形状收下来了",
+    );
+
+    // 回喂：两个调用各自拿到一条结果，模型下一步就知道写成没写成
+    let ap1 = r.model.answer_prompt(1);
+    ok(ap1.contains("提交了 3 条改动") && ap1.contains("提交了 2 条改动"), "★ 两个动作各自有回执");
+    ok(ap1.contains("对比损失") && ap1.contains("flowchart"), "写完的图立刻回到 prompt 里");
+
+    let s = r.finish().await;
+    let st = stats_of(&s.events).expect("stats");
+    println!(
+        "      · 本轮：inferred_ops {} · dropped_ops {} · tools_run {} · tools_failed {}",
+        st.inferred_ops, st.dropped_ops, st.tools_run, st.tools_failed
+    );
+    ok(st.inferred_ops == 5, "5 条 op 都记在指标里");
+    ok(st.tools_run == 2, "★ 动作调用也算进 tools_run —— 否则指标上永远是 0");
+    inv::all(&s.events, &s.ws, &s.cost);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s43_tool_names_resolve() {
+    head("S43", "★ 场景与 mode 里写的工具名，注册表里必须真的有");
+    // 断链 1 的堵法。上一版 playbook 写的是 read_repo / repo_qa / search_cases，
+    // 注册表里一个都没有，而 specs() 是 filter_map 静默丢弃 ——
+    // 于是整套 fs_* / repo_tree 从来没被暴露给模型过，指标上只是 tools_run: 0。
+    let dir = tmpdir("names");
+    // 带一个假的联网后端，好看清「联网工具按配置注册」这条
+    let web: Arc<dyn premortem::web::WebBackend> =
+        Arc::new(premortem::web::MockWeb::new().hit("t", "https://arxiv.org/abs/1", "s"));
+    let (_, reg) = toolchain(&dir, Some(web));
+    let known: std::collections::HashSet<String> = reg.names().into_iter().collect();
+    let pb = Playbook::builtin();
+    let prompts = premortem::memory::Prompts::default();
+
+    let mut bad: Vec<String> = Vec::new();
+    for sc in pb.scenes.values() {
+        for mode in [Mode::Explore, Mode::Go] {
+            let mp = prompts.mode.get(mode.key()).cloned().unwrap_or_default();
+            for t in pb.exposed_tools(sc, &mp.tools) {
+                if !known.contains(&t) {
+                    bad.push(format!("{}/{}: {t}", sc.id, mode.key()));
+                }
+            }
+        }
+    }
+    ok(bad.is_empty(), &format!("★ 内置场景 × 两个 mode，工具名全部认得（对不上的：{bad:?}）"));
+    for must in ["record_graph", "record_note", "fs_read", "fs_grep", "fs_find", "repo_tree"] {
+        ok(known.contains(must), &format!("{must} 在注册表里"));
+    }
+
+    // 反向：写一个不存在的名字，必须报出来，不能静默吞掉
+    let ex = reg.specs(&["fs_read".into(), "read_repo".into()], &Default::default());
+    ok(ex.specs.len() == 1 && ex.missing == vec!["read_repo".to_string()], "★ 认不出的名字进 missing，不是静默丢弃");
+    // 联网工具按配置注册，没配不算配置错误
+    let none = toolchain(&dir, None).1;
+    let ex2 = none.specs(&["web_search".into()], &Default::default());
+    ok(ex2.specs.is_empty() && ex2.missing.is_empty(), "没配联网时 web_search 缺席但不报错");
+
+    // mode 换 prompt、换工具、换工具说明
+    let ex_e = reg.specs(
+        &pb.exposed_tools(pb.get("none").unwrap(), &prompts.mode["explore"].tools),
+        &prompts.mode["explore"].tool_notes,
+    );
+    let ex_g = reg.specs(
+        &pb.exposed_tools(pb.get("none").unwrap(), &prompts.mode["go"].tools),
+        &prompts.mode["go"].tool_notes,
+    );
+    let names = |e: &premortem::tools::Exposed| {
+        e.specs.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+    };
+    ok(
+        names(&ex_e).contains(&"web_search".to_string())
+            && !names(&ex_g).contains(&"web_search".to_string()),
+        "★ 探索 mode 有开放搜索，行动 mode 没有 —— 工具集真的随 mode 变",
+    );
+    let d = |e: &premortem::tools::Exposed, n: &str| {
+        e.specs.iter().find(|s| s.name == n).unwrap().description.clone()
+    };
+    ok(
+        d(&ex_e, "record_graph") != d(&ex_g, "record_graph"),
+        "★ 同一个工具在两个 mode 下的说明不同",
+    );
+    ok(d(&ex_g, "record_graph").contains("编码 agent"), "行动 mode 的说明要求图能直接交下去");
+    ok(
+        prompts.mode["explore"].note != prompts.mode["go"].note,
+        "两个 mode 的 system 段也不同",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s44_distill_sections_apply() {
+    head("S44", "★ 一键蒸馏：分节草稿 → 预览 → 一键写回，坏 TOML 当场拦住");
+    let draft = concat!(
+        "先说两句没用的开场白，应该被丢掉。\n\n",
+        "## project.md\n# 项目\n新的项目描述。\n\n",
+        "## knowledge.md\n- 持续学习 / BWT — 有储备 — 他自己推了公式\n\n",
+        "## playbook.toml\n[[scene]]\nid = \"seed_control\"\nlabel = \"对照组种子\"\n",
+        "when = \"对照组和实验组用了不同的随机种子\"\nguidance = \"提醒他固定种子\"\n",
+        "tools = []\n\n",
+        "## cases/seed-drift.md\n---\nid = \"seed-drift\"\ntitle = \"种子漂移\"\n",
+        "scenes = [\"check_assumption\"]\n---\n那次的教训。\n",
+    );
+    let secs = premortem::memory::parse_draft(draft);
+    ok(secs.len() == 4, &format!("切出 4 节（实际 {}）", secs.len()));
+    ok(secs[0].file == "project.md" && secs[0].mode == premortem::memory::WriteMode::Replace, "叙述文件是整份替换");
+    ok(secs[2].file == "playbook.toml" && secs[2].mode == premortem::memory::WriteMode::Append, "★ 场景库是追加，不覆盖用户的场景");
+    ok(!secs[0].text.contains("开场白"), "第一个合法标题之前的东西丢掉");
+
+    // 写回：追加到 playbook 之后仍然是合法的场景库
+    let dir = tmpdir("distill");
+    let mem = dir.join("memory");
+    let _ = Memory::load_or_bootstrap(&mem).await; // 先 bootstrap 出基础文件
+    let mut wrote = 0;
+    for s in &secs {
+        let path = mem.join(&s.file);
+        let merged = if s.mode == premortem::memory::WriteMode::Append {
+            let cur = std::fs::read_to_string(&path).unwrap_or_default();
+            format!("{}\n\n{}\n", cur.trim_end(), s.text.trim())
+        } else {
+            format!("{}\n", s.text.trim())
+        };
+        ok(premortem::memory::validate(&s.file, &merged).is_ok(), &format!("{} 校验通过", s.file));
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        std::fs::write(&path, merged).unwrap();
+        wrote += 1;
+    }
+    ok(wrote == 4, "四个文件都写了");
+
+    let back = Memory::load_or_bootstrap(&mem).await;
+    ok(back.warnings.is_empty(), "★ 写回之后持久层还读得动（追加没把 TOML 弄坏）");
+    ok(back.playbook.get("seed_control").is_some(), "★ 新场景真的进了场景库");
+    ok(back.playbook.get("none").is_some(), "原有场景一条没丢");
+    ok(back.project.contains("新的项目描述"), "project.md 换成了新的");
+    ok(back.cases.iter().any(|c| c.id == "seed-drift"), "★ 新案例读得出来");
+
+    // 坏内容必须在写之前被拦住 —— 它的症状要到下一轮才以「场景全没了」的形式冒出来
+    let broken = format!("{}\n\n这不是 TOML，只是一段话。\n", std::fs::read_to_string(mem.join("playbook.toml")).unwrap());
+    ok(premortem::memory::validate("playbook.toml", &broken).is_err(), "★ 追加成非法 TOML 被拦住");
+    ok(
+        premortem::memory::validate("cases/x.md", "没有 frontmatter 的正文").is_err(),
+        "★ 缺 frontmatter 的案例也被拦住（否则它只是静默读不出来）",
+    );
+    ok(premortem::memory::write_mode_for("config.json").is_none(), "非持久层文件不是合法目标");
+    ok(premortem::memory::write_mode_for("../x.md").is_none(), "路径穿越不是合法目标");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1940,11 +2202,15 @@ async fn main() {
     s38_toolchain_in_a_turn().await;
     s39_config_reaches_the_gate().await;
     s40_wire_format().await;
+    s41_judge_runs_once_per_turn().await;
+    s42_actions_write_inference().await;
+    s43_tool_names_resolve().await;
+    s44_distill_sections_apply().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);
     println!("\n{}", "═".repeat(64));
-    println!("40 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
+    println!("44 个场景 · {} 条断言：{p} 通过，{f} 失败", p + f);
     if f > 0 {
         std::process::exit(1);
     }

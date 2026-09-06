@@ -210,18 +210,22 @@ async fn normal_turn_round_trips_through_a_reopened_sqlite_file() {
 
 #[tokio::test]
 async fn accepted_inference_is_visible_to_same_turn_answer() {
-    let mut judge = default_judge();
-    judge.ops = vec![Op::set("audit.fact", "new-value")];
-    let model = Arc::new(MockModel::new().on_judge(judge).on_answer(answer("ok")));
+    // 推断由回答段的动作工具写，所以看的是**下一次**回答调用的 prompt。
+    let model = Arc::new(
+        MockModel::new()
+            .on_judge(default_judge())
+            .on_ops(&[Op::set("audit.fact", "new-value")])
+            .on_answer(answer("ok")),
+    );
     let store: Arc<dyn Store> = Arc::new(SqliteStore::memory().unwrap());
     let mut rig = build(model.clone(), store, None, 200);
     rig.handle.session_send("infer it", SendMode::Queue).await;
     wait_closed(&mut rig.ui).await;
-    let prompt = model.answer_prompt(0);
+    let prompt = model.answer_prompt(1);
     stop(rig).await;
     assert!(
         prompt.contains("audit.fact") && prompt.contains("new-value"),
-        "accepted judge inference missing from same-turn answer prompt: {prompt}"
+        "accepted inference missing from same-turn answer prompt: {prompt}"
     );
 }
 

@@ -340,7 +340,18 @@ pub enum UiEvent {
     /// 早期对话被折叠了。**告知，不是征求同意。**
     Compacted { folded: u32, before_tokens: u32, after_tokens: u32 },
     /// 一键蒸馏完成，草稿写在这个路径。
-    Distilled { draft: String },
+    /// 一键蒸馏出结果了。
+    ///
+    /// `sections` 是**按目标文件切好的**，UI 逐节预览 / 修改 / 勾选，再一次写回。
+    /// 上一版这里只有一个草稿文件路径，用户得自己打开、自己判断哪段属于哪个文件、
+    /// 自己复制粘贴 —— 那不是「一键」，那是把最没意思的一步留给了人。
+    Distilled {
+        /// 草稿原文落盘的位置。解析失败时仍然有它可看。
+        path: String,
+        sections: Vec<crate::memory::Section>,
+        /// 蒸馏本身失败了，或者一节都没解析出来。
+        error: Option<String>,
+    },
     /// 上下文占用，供状态栏显示。
     ContextFootprint { total: u32, cacheable: u32, events: usize },
     PhaseChanged { to: Phase },

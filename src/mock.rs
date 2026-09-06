@@ -77,6 +77,20 @@ impl MockModel {
         self.answer_script.lock().unwrap().push_back(events);
     }
 
+    /// 回答段先调一次动作工具提交这批 op，然后（下一圈）继续走脚本。
+    pub fn on_ops(self, ops: &[crate::state::Op]) -> Self {
+        self.answer_script.lock().unwrap().push_back(op_events(ops));
+        self
+    }
+
+    pub fn push_ops(&self, ops: &[crate::state::Op]) {
+        self.answer_script.lock().unwrap().push_back(op_events(ops));
+    }
+
+    pub fn judge_calls(&self) -> usize {
+        self.seen_judge.lock().unwrap().len()
+    }
+
     pub fn judge_delay(mut self, d: Duration) -> Self {
         self.judge_delay = d;
         self
@@ -108,11 +122,15 @@ fn flatten(msgs: &[crate::model::Message]) -> String {
 }
 
 pub fn default_judge() -> JudgeOut {
+    judge_of("none")
+}
+
+/// 判成某个场景。**判断段只判场景** —— 推断改动走回答段的动作工具，
+/// 见 [`op_events`]。
+pub fn judge_of(scene: &str) -> JudgeOut {
     JudgeOut {
-        scene: "none".into(),
-        rationale: "没有需要特别处理的地方".into(),
-        ops: vec![],
-        retrieve: vec![],
+        scene: scene.into(),
+        rationale: format!("判成 {scene}"),
         usage: Usage { prompt: 120, completion: 30, estimated: false },
     }
 }
@@ -265,6 +283,33 @@ pub fn call(id: &str, name: &str) -> Call {
 /// 带参数的调用。图/工具链的场景要给工具真的传东西。
 pub fn call_with(id: &str, name: &str, args: serde_json::Value) -> Call {
     Call { id: id.into(), name: name.into(), args }
+}
+
+/// 把一批 op 包成回答段的一次动作调用。
+///
+/// 图内的走 `record_graph`，图外的走 `record_note`，两者**在同一批里**发出 ——
+/// 那正是别名作用域的边界，也是真实模型该有的用法。
+pub fn op_calls(ops: &[crate::state::Op]) -> Vec<Call> {
+    let (g, n): (Vec<_>, Vec<_>) =
+        ops.iter().cloned().partition(crate::actions::is_graph_op);
+    let mut out = Vec::new();
+    let pack = |name: &str, v: Vec<crate::state::Op>| Call {
+        id: format!("{name}-1"),
+        name: name.into(),
+        args: serde_json::json!({ "ops": v }),
+    };
+    if !g.is_empty() {
+        out.push(pack(crate::actions::RECORD_GRAPH, g));
+    }
+    if !n.is_empty() {
+        out.push(pack(crate::actions::RECORD_NOTE, n));
+    }
+    out
+}
+
+/// 回答段脚本：先提交一批推断，什么都不说。下一圈由 `on_answer` 接着走。
+pub fn op_events(ops: &[crate::state::Op]) -> Vec<StreamEvent> {
+    vec![StreamEvent::ToolCalls(op_calls(ops))]
 }
 
 pub fn ask_call(id: &str, question: &str, options: &[&str]) -> Call {

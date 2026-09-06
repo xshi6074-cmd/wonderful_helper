@@ -256,7 +256,17 @@ fn fanout(e: UiEvent) -> Option<Value> {
         UiEvent::Compacted { folded, before_tokens, after_tokens } => json!({
             "t": "compacted", "folded": folded, "before": before_tokens, "after": after_tokens
         }),
-        UiEvent::Distilled { draft } => json!({ "t": "distilled", "draft": draft }),
+        UiEvent::Distilled { path, sections, error } => json!({
+            "t": "distilled", "path": path, "error": error,
+            "sections": sections.iter().map(|s| json!({
+                "file": s.file,
+                "mode": match s.mode {
+                    crate::memory::WriteMode::Replace => "replace",
+                    crate::memory::WriteMode::Append => "append",
+                },
+                "text": s.text,
+            })).collect::<Vec<_>>(),
+        }),
         UiEvent::ContextFootprint { total, cacheable, events } => json!({
             "t": "footprint", "total": total, "cacheable": cacheable, "events": events
         }),
@@ -547,6 +557,12 @@ async fn handle(app: &Arc<App>, v: Value) {
                 h.session_distill().await;
             }
         }
+        // 一键写回蒸馏结果。用户在右栏逐节改过、勾选过之后才走到这里。
+        //
+        // **每一节单独校验、单独写**：一节的 TOML 写坏了不该连累其它几节，
+        // 而且坏在哪一节要说得出来。全成功才算一次成功，部分失败要照实报。
+        "distill_apply" => app.push(distill_apply(app, &v["sections"])),
+
         "edit" => {
             let Some(h) = h else { return };
             match serde_json::from_value::<Vec<Op>>(v["ops"].clone()) {
@@ -673,6 +689,58 @@ async fn handle(app: &Arc<App>, v: Value) {
         "sync" => app.reboot().await,
         _ => {}
     }
+}
+
+/// 把蒸馏的若干节写回 `memory/`。返回一条给 UI 的结果。
+///
+/// # 为什么写之前要校验
+///
+/// `playbook.toml` 是追加写：追进去的东西不是合法 TOML 的话，整份场景库就废了，
+/// 而那种失效要到**下一轮**才以「场景全没了、回退到内置目录」的形式冒出来 ——
+/// 隔着一次交互的错最难查。案例文件同理：frontmatter 不对就整条读不出来，
+/// 而且是静默的（`load_cases` 里 `parse_case` 返回 None 就跳过）。
+fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
+    let Some(arr) = sections.as_array() else {
+        return json!({ "t": "applied", "ok": 0, "errors": ["没有要写的内容"] });
+    };
+    let root = app.dir.join("memory");
+    let mut done: Vec<String> = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+
+    for s in arr {
+        let file = s["file"].as_str().unwrap_or("").to_string();
+        let text = s["text"].as_str().unwrap_or("").to_string();
+        if !mem_allowed(&file) || crate::memory::write_mode_for(&file).is_none() {
+            errs.push(format!("{file}：不是允许写入的持久层文件"));
+            continue;
+        }
+        if text.trim().is_empty() {
+            errs.push(format!("{file}：内容是空的，跳过"));
+            continue;
+        }
+        let path = root.join(&file);
+        let append = s["mode"].as_str() == Some("append");
+        let merged = if append {
+            let cur = std::fs::read_to_string(&path).unwrap_or_default();
+            format!("{}\n\n{}\n", cur.trim_end(), text.trim())
+        } else {
+            format!("{}\n", text.trim())
+        };
+        if let Err(e) = crate::memory::validate(&file, &merged) {
+            errs.push(format!("{file}：{e}"));
+            continue;
+        }
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        match std::fs::write(&path, &merged) {
+            Ok(()) => done.push(file),
+            Err(e) => errs.push(format!("{file}：写入失败 {e}")),
+        }
+    }
+
+    app.push(json!({ "t": "memory", "files": memory_files(app) }));
+    json!({ "t": "applied", "ok": done.len(), "files": done, "errors": errs })
 }
 
 /// 列一个目录。给操作者挑路径用，见调用点的说明。
