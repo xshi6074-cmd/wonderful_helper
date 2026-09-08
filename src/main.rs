@@ -1898,14 +1898,22 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"
     ok(ex.missing.is_empty(), "注册表自己的名字当然都认得");
 
     // ── 判断段的 tool_choice ──
-    // 指名道姓要某个工具，在开了 thinking 的模型上会 400：
-    // `tool_choice 'specified' is incompatible with thinking enabled`。
-    // 症状很隐蔽：每轮判断段失败、降级成「本轮无场景」，对话表面上还在正常跑。
-    let ja = premortem::client::judge_tool_choice(Api::Anthropic);
-    let jo = premortem::client::judge_tool_choice(Api::OpenAiCompat);
+    // 第一档不点名：指名道姓要某个工具，在开了 thinking 的模型上会 400
+    // （`tool_choice 'specified' is incompatible with thinking enabled`），
+    // 而症状很隐蔽 —— 每轮判断段失败、降级成「本轮无场景」，对话表面上还在正常跑。
+    let c = premortem::caps::Caps::default();
+    let ja = c.tool_choice(true, "t").unwrap();
+    let jo = c.tool_choice(false, "t").unwrap();
     ok(ja["type"] == "any" && ja.get("name").is_none(), "★ Anthropic 侧用 any，不点名");
     ok(jo == serde_json::json!("required"), "★ OpenAI 兼容侧用 required，不点名");
     ok(judge_tool_names().len() == 1, "候选只有一个工具，所以 any/required 等价于点名");
+    // 被拒之后才点名，再被拒才放弃 tool_choice。**降级的是发法，不是要求。**
+    let mut c2 = premortem::caps::Caps::default();
+    c2.next("tool_choice 'specified' is incompatible with thinking enabled").unwrap();
+    ok(c2.tool_choice(false, "t").unwrap()["type"] == "function", "★ 下一档改成点名");
+    c2.next("does not support tool_choice").unwrap();
+    ok(c2.tool_choice(false, "t").is_none(), "再下一档才不发 tool_choice");
+    ok(c2.next("does not support tool_choice").is_none(), "★ 到底了要说没招，不是无限重试");
     // 两个动作工具的 schema 必须真的列出字段 —— 上一版判断段那个 ops 字段
     // 是个空对象，模型怎么写都错，而且错得没有声音。
     for name in [premortem::actions::RECORD_GRAPH, premortem::actions::RECORD_NOTE] {

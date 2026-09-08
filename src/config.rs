@@ -122,6 +122,9 @@ impl Preset {
             api: self.api,
             base_url: self.base_url.into(),
             key_env: self.key_env.into(),
+            // 预设不预判调用方式：第一次撞墙时现协商，结果才写进来。
+            // 写死在预设里就是那张会过期的能力表。
+            caps: None,
         }
     }
 }
@@ -149,6 +152,12 @@ pub struct ProviderCfg {
     pub base_url: String,
     /// 去哪个环境变量里找密钥。**这里只写变量名，永远不写密钥本身。**
     pub key_env: String,
+    /// 实测出来的调用方式。第一次撞墙时协商出来，之后直接用。
+    ///
+    /// 放在 config.json 里而不是一个隐藏缓存：用户看得见、改得动，
+    /// 换了模型把这一段删掉就会重新协商一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<crate::caps::Caps>,
 }
 
 /// 一个角色用什么模型。
@@ -432,6 +441,17 @@ impl Settings {
         secrets: &Secrets,
         env: Env<'_>,
     ) -> Result<crate::model::Models, String> {
+        self.build_models_with(secrets, env, None)
+    }
+
+    /// 同上，外加一个协商结果的出口：客户端试出新的调用方式时往里发一条，
+    /// 由 server 写回 config.json。传 `None` 就是不落盘（测试用）。
+    pub fn build_models_with(
+        &self,
+        secrets: &Secrets,
+        env: Env<'_>,
+        sink: Option<crate::client::CapsSink>,
+    ) -> Result<crate::model::Models, String> {
         let mk = |r: Role| -> Result<std::sync::Arc<dyn crate::model::ModelClient>, String> {
             let m = self.roles.of(r);
             let p = self.providers.get(&m.provider).ok_or_else(|| {
@@ -443,7 +463,18 @@ impl Settings {
                     m.provider, p.key_env, SECRETS_FILE
                 )
             })?;
-            Ok(std::sync::Arc::new(crate::client::HttpClient::new(p, m, key)?))
+            let role = match r {
+                Role::Judge => "判断段",
+                Role::Answer => "回答段",
+                Role::Subagent => "子任务",
+            };
+            Ok(std::sync::Arc::new(crate::client::HttpClient::with_sink(
+                p,
+                m,
+                key,
+                role,
+                sink.clone(),
+            )?))
         };
         Ok(crate::model::Models {
             judge: mk(Role::Judge)?,

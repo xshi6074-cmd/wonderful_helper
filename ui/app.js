@@ -47,6 +47,8 @@ const S = {
   editor: null,           // 遮罩里那个文件的 { kind, file, orig }
   browse: null,           // 目录浏览器的当前一层
   distill: null,          // 蒸馏草稿的分节结果，等用户勾选写回
+  caps: null,             // 协商失败报告。在没换模型之前它一直有效
+  focusRole: null,        // 配置面板要展开并滚到哪个角色
   banners: [],            // { level, text, key }
 };
 
@@ -155,6 +157,18 @@ function onMsg(m) {
       else banner('bad', `落盘失败（已积压 ${m.pending} 条），对话不受影响：${m.why}`, 'persist');
       break;
     case 'memory_bad': banner('warn', `${m.file} 解析失败，已回退内置：${m.err}`, 'mem' + m.file); break;
+    // 协商试成了：静默更新配置，让面板显示实测出来的调用方式。
+    case 'caps':
+      S.settings = m.settings; S.saved = JSON.parse(JSON.stringify(m.settings));
+      renderConfig();
+      break;
+    // 协商到底了。**这是持续状态**，不按 10 秒赶走 —— 在换模型之前，
+    // 每一轮的场景判定都是空的，而那件事在对话里完全看不出来。
+    case 'caps_failed':
+      S.caps = m;
+      banner('bad', `${m.role}用不了 ${m.provider}·${m.model}：${m.verdict.split('。')[0]}。`, 'caps');
+      openCaps();
+      break;
     case 'memory': S.memory = m.files; renderMemory(); break;
     case 'scenes':
       S.playbook = m.scenes || [];
@@ -1000,6 +1014,62 @@ function applyDistill() {
   send('distill_apply', { sections: picked.map(s => ({ file: s.file, mode: s.mode, text: s.text })) });
 }
 
+
+// ───────────────────────── 能力协商失败 ─────────────────────────
+//
+// 判断段拿不到强制工具调用时，场景判定整个失效 —— 而这件事在对话里
+// 一点痕迹都没有：模型照样回答，只是再也没有 guidance 和案例注入。
+// 所以它必须是**一屏说清楚**的东西，而不是一行红字。
+//
+// 报告的顺序是有讲究的：先说这个角色需要什么能力、缺了会少什么，
+// 再说试了哪几种发法、厂商原话是什么，最后给一个能立刻动手的出口。
+// 反过来（先甩一堆 400）用户只会知道「坏了」，不知道该改什么。
+
+function openCaps() {
+  const c = S.caps; if (!c) return;
+  const need = h('div', { class: 'caps-need' });
+  for (const r of c.required || []) {
+    need.append(h('div', { class: 'caps-row' },
+      h('code', { class: 'cc' }, r.code),
+      h('div', {}, h('b', {}, r.label), h('p', { class: 'hint' }, r.need))));
+  }
+  const steps = h('ol', { class: 'caps-steps' });
+  for (const s of c.steps || []) {
+    steps.append(h('li', { class: 'st-' + s.outcome },
+      h('code', { class: 'cc' }, s.code),
+      h('span', { class: 'tr' }, s.tried),
+      h('span', { class: 'oc' }, { ok: '成了', rejected: '被拒', exhausted: '没招了' }[s.outcome] || s.outcome),
+      s.detail ? h('pre', { class: 'raw' }, s.detail) : null));
+  }
+  openOver({
+    kind: 'caps',
+    title: `${c.role}用不了这个模型`,
+    note: c.verdict,
+    body: [
+      h('h4', {}, `${c.provider} · ${c.model}`),
+      h('p', { class: 'hint' }, '这个角色需要下面这些能力：'),
+      need,
+      h('p', { class: 'hint' }, '按这个顺序换过发法（降级的是怎么发，不是要什么）：'),
+      steps,
+    ],
+    dirty: () => false,
+    acts: [
+      // 出口一：直接跳到这个角色的配置，展开、滚过去。
+      act('去改这个角色', () => {
+        S.focusRole = { judge: 'judge', 判断段: 'judge', 回答段: 'answer', 子任务: 'subagent' }[c.role] || 'judge';
+        closeOver(true);
+        openTab('config');
+        renderConfig();
+      }, 'primary'),
+      // 出口二：整份日志拷走，去搜、去问厂商客服。原话不改写就是为了能搜到。
+      act('复制日志', async () => {
+        try { await navigator.clipboard.writeText(c.text); banner('info', '日志已复制', 'caps-copy'); }
+        catch { banner('bad', '复制失败，手动选中吧', 'caps-copy'); }
+      }),
+    ],
+  });
+}
+
 // ───────────────────────── 目录浏览器 ─────────────────────────
 //
 // **它不走 Policy**，因为它的用途正是「挑一个还没授权的目录加进白名单」。
@@ -1127,10 +1197,21 @@ function renderConfig() {
   };
   for (const [role, cn] of [['judge', '判断段'], ['answer', '回答段'], ['subagent', '子任务']]) {
     const r = draft.roles[role];
-    box.append(block(`${cn} · ${role}`, r.model, [
+    // 协商失败的那个角色自动展开并标红，用户点「去改这个角色」就落在这里。
+    const broken = S.caps && S.caps.role === cn;
+    const b = block(`${cn} · ${role}`, r.model, [
+      broken ? h('p', { class: 'note bad', style: 'margin:0 0 8px' },
+        `${S.caps.verdict}　`,
+        h('button', { class: 'ghost', onclick: (e) => { e.preventDefault(); openCaps(); } }, '看完整日志')) : null,
       sel(r, 'provider', 'provider', provs), modelInput(r),
       h('div', { class: 'two' }, num(r, 'temperature', '温度'), num(r, 'max_tokens', 'max tokens')),
-    ]));
+    ].filter(Boolean));
+    if (broken || S.focusRole === role) {
+      b.open = true;
+      b.className = 'block bad';
+      if (S.focusRole === role) { S.focusRole = null; setTimeout(() => b.scrollIntoView?.({ block: 'center' }), 0); }
+    }
+    box.append(b);
   }
 
   for (const name of provs) {

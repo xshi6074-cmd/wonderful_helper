@@ -484,3 +484,22 @@ mark.hit.cur{background:var(--accent);color:#fff}
 
 /* 一轮收尾那行：指标压成一句人话，全文挂 title */
 .mono-hint{font-family:var(--mono);font-size:11px;opacity:.7;cursor:help}
+
+
+/* ───────── 能力协商失败 ─────────
+   判断段拿不到强制工具调用时，场景判定整个失效，而对话里一点痕迹都没有。
+   所以它得是一屏说清楚的东西：先说需要什么，再说试过什么，最后给出口。 */
+.caps-need{display:flex;flex-direction:column;gap:8px;margin:6px 0 14px}
+.caps-row{display:flex;gap:9px;align-items:flex-start}
+.caps-row .hint{margin:2px 0 0}
+code.cc{flex:0 0 auto;font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:5px;
+  background:var(--accent-soft);color:var(--accent)}
+.caps-steps{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:8px}
+.caps-steps li{font-size:12.5px;line-height:1.55}
+.caps-steps .tr{margin:0 7px}
+.caps-steps .oc{font-size:11px;padding:0 6px;border-radius:5px;background:var(--sunk);color:var(--muted)}
+.caps-steps li.st-ok .oc{background:color-mix(in oklab,var(--ok,#3a9) 18%,transparent)}
+.caps-steps li.st-exhausted .oc{background:color-mix(in oklab,var(--bad) 18%,transparent);color:var(--bad)}
+.caps-steps .raw{margin:5px 0 0;padding:6px 8px;border-radius:6px;background:var(--sunk);
+  font-family:var(--mono);font-size:11px;line-height:1.5;white-space:pre-wrap;color:var(--muted)}
+details.block.bad > summary{color:var(--bad)}

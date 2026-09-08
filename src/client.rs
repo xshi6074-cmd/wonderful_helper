@@ -21,6 +21,7 @@
 //! 映射过去就是连着几条 user。不合并的话 API 直接 400，而错误信息只说
 //! "messages: roles must alternate"，第一次遇到会查很久。所以有一遍合并。
 
+use crate::caps::{Cap, Caps, Outcome, Report, Step};
 use crate::config::{Api, ModelCfg, ProviderCfg};
 use crate::model::{
     AnswerReq, BoxFuture, BoxStream, Call, JudgeOut, JudgeReq, Message, ModelClient, ModelError,
@@ -39,12 +40,36 @@ pub struct HttpClient {
     base: String,
     key: String,
     model: String,
+    provider: String,
+    role: &'static str,
     temperature: f32,
     max_tokens: u32,
+    /// 当前这套发法。协商成功会就地改它，并通过 `sink` 报给上层落盘。
+    caps: std::sync::Mutex<Caps>,
+    /// 协商出新发法时往这里发一条 `(provider, caps)`，由 server 写进 config.json。
+    /// `None` = 不落盘（测试、或者上层不关心）。
+    sink: Option<CapsSink>,
 }
+
+/// 协商结果的出口。用通道而不是回调：写 config.json 是 server 的事，
+/// 客户端不该知道配置文件在哪，也不该在请求路径上做磁盘 IO。
+pub type CapsSink = tokio::sync::mpsc::UnboundedSender<(String, Caps)>;
 
 impl HttpClient {
     pub fn new(p: &ProviderCfg, m: &ModelCfg, key: String) -> Result<HttpClient, String> {
+        Self::with_sink(p, m, key, "", None)
+    }
+
+    /// 带上「我是哪个 provider / 哪个角色」和协商出口。
+    ///
+    /// 角色只用在失败报告里 —— 判断段挂了和 subagent 挂了，用户要做的事不一样。
+    pub fn with_sink(
+        p: &ProviderCfg,
+        m: &ModelCfg,
+        key: String,
+        role: &'static str,
+        sink: Option<CapsSink>,
+    ) -> Result<HttpClient, String> {
         let http = reqwest::Client::builder()
             // 只给连接阶段设超时。整体超时会在长回答中途把流掐断，
             // 而那正是最不该掐的时刻 —— 用户已经看到半截正文了。
@@ -58,9 +83,26 @@ impl HttpClient {
             base: p.base_url.trim_end_matches('/').to_string(),
             key,
             model: m.model.clone(),
+            provider: m.provider.clone(),
+            role,
             temperature: m.temperature,
             max_tokens: m.max_tokens,
+            // 盘上有实测结果就用它；没有就从最严的一档开始。
+            caps: std::sync::Mutex::new(p.caps.clone().unwrap_or_default()),
+            sink,
         })
+    }
+
+    fn caps(&self) -> Caps {
+        self.caps.lock().unwrap().clone()
+    }
+
+    /// 记下新的发法并报给上层落盘。
+    fn adopt(&self, c: Caps) {
+        *self.caps.lock().unwrap() = c.clone();
+        if let Some(s) = &self.sink {
+            let _ = s.send((self.provider.clone(), c));
+        }
     }
 
     fn endpoint(&self) -> String {
@@ -105,17 +147,65 @@ impl HttpClient {
 impl ModelClient for HttpClient {
     fn judge<'a>(&'a self, req: JudgeReq) -> BoxFuture<'a, Result<JudgeOut, ModelError>> {
         Box::pin(async move {
-            let body = self.judge_body(&req.msgs);
-            let resp = tokio::select! {
-                biased;
-                _ = req.token.cancelled() => return Err(ModelError::Call("已取消".into())),
-                r = self.send(body) => r?,
-            };
-            let v: Value = resp
-                .json()
-                .await
-                .map_err(|e| ModelError::Call(format!("判断段响应不是 JSON：{e}")))?;
-            parse_judge(self.api, &v)
+            // ── 调用方式协商 ──
+            //
+            // 正常路径就是一次调用：按当前这套发法发出去。被拒了才换发法重试。
+            // **降级的是「怎么发」，不是「要什么」** —— 判断段要的始终是一个
+            // schema 校验过的场景判定。一路试到底还拿不到，就带着完整阶梯报错，
+            // 不假装判成 none：悄悄降级的代价是用户以为场景判定在工作，
+            // 实际每轮都是空的，而这件事在界面上完全看不出来。
+            let mut caps = self.caps();
+            let start = caps.clone();
+            let mut steps: Vec<Step> = Vec::new();
+            // 阶梯最多这么长。每一档只走一次，这里是防呆上限。
+            for _ in 0..8 {
+                let body = self.judge_body(&req.msgs, &caps);
+                let sent = tokio::select! {
+                    biased;
+                    _ = req.token.cancelled() => return Err(ModelError::Call("已取消".into())),
+                    r = self.send(body) => r,
+                };
+                let err = match sent {
+                    Ok(resp) => {
+                        let v: Value = resp.json().await.map_err(|e| {
+                            ModelError::Call(format!("判断段响应不是 JSON：{e}"))
+                        })?;
+                        return match parse_judge(self.api, &v) {
+                            Ok(out) => {
+                                if caps != start {
+                                    steps.push(Step {
+                                        cap: Cap::ForcedTool,
+                                        tried: "这套发法成了，记进 config.json".into(),
+                                        outcome: Outcome::Ok,
+                                        detail: String::new(),
+                                    });
+                                    self.adopt(caps);
+                                }
+                                Ok(out)
+                            }
+                            // 请求本身过了，但没拿到工具调用 —— 多半是 thinking 开着
+                            // 把强制降级成了 auto，模型于是只写了一段思考。
+                            // 这也算一次「被拒」，继续往下试。
+                            Err(e) => {
+                                let msg = e.to_string();
+                                match caps.next(&msg) {
+                                    Some(s) => {
+                                        steps.push(s);
+                                        continue;
+                                    }
+                                    None => Err(self.caps_error(steps, msg)),
+                                }
+                            }
+                        };
+                    }
+                    Err(e) => e.to_string(),
+                };
+                match caps.next(&err) {
+                    Some(s) => steps.push(s),
+                    None => return Err(self.caps_error(steps, err)),
+                }
+            }
+            Err(self.caps_error(steps, "试完了所有发法".into()))
         })
     }
 
@@ -135,88 +225,95 @@ impl ModelClient for HttpClient {
 // ───────────────────────── 请求体 ─────────────────────────
 
 impl HttpClient {
-    fn judge_body(&self, msgs: &[Message]) -> Value {
+    fn judge_body(&self, msgs: &[Message], caps: &Caps) -> Value {
         let tool = judge_tool_spec();
-        match self.api {
+        let anthropic = self.api == Api::Anthropic;
+        let mut b = match self.api {
             Api::Anthropic => {
                 let (system, messages) = anthropic_messages(msgs);
                 json!({
                     "model": self.model,
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature,
                     "system": system,
                     "messages": messages,
                     "tools": [anthropic_tool(&tool)],
-                    "tool_choice": judge_tool_choice(Api::Anthropic),
                 })
             }
             Api::OpenAiCompat => json!({
                 "model": self.model,
-                "max_tokens": self.max_tokens,
-                "temperature": self.temperature,
                 "messages": openai_messages(msgs),
                 "tools": [openai_tool(&tool)],
-                "tool_choice": judge_tool_choice(Api::OpenAiCompat),
             }),
+        };
+        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens);
+        if let Some(tc) = caps.tool_choice(anthropic, JUDGE_TOOL) {
+            b["tool_choice"] = tc;
         }
+        b
     }
 
+    /// 阶梯走到底：带上完整记录，说清这个角色需要什么、试了什么、厂商怎么说的。
+    fn caps_error(&self, mut steps: Vec<Step>, last: String) -> ModelError {
+        steps.push(Step {
+            cap: Cap::ForcedTool,
+            tried: "没有别的发法了".into(),
+            outcome: Outcome::Exhausted,
+            detail: last,
+        });
+        ModelError::Caps(Box::new(Report {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            role: if self.role.is_empty() { "判断段".into() } else { self.role.into() },
+            required: vec![Cap::ForcedTool, Cap::ThinkingOff, Cap::SystemRole],
+            steps,
+            verdict: format!(
+                "{} 上的 {} 给不出「强制工具调用」，当不了判断段。\
+                 换一个非 thinking 的型号，或者把这个角色换到别家。",
+                self.provider, self.model
+            ),
+        }))
+    }
+
+    /// 回答段。**这里不协商** —— 它是流式的，试错要把已经吐出来的正文丢掉，
+    /// 而判断段每轮都先跑一次，协商在那边做完了，这边直接用结果。
     fn answer_body(&self, msgs: &[Message], tools: &[ToolSpec]) -> Value {
-        match self.api {
+        let caps = self.caps();
+        let anthropic = self.api == Api::Anthropic;
+        let mut b = match self.api {
             Api::Anthropic => {
                 let (system, messages) = anthropic_messages(msgs);
-                let mut b = json!({
+                json!({
                     "model": self.model,
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature,
                     "system": system,
                     "messages": messages,
                     "stream": true,
-                });
-                if !tools.is_empty() {
-                    b["tools"] = Value::Array(tools.iter().map(anthropic_tool).collect());
-                }
-                b
+                })
             }
-            Api::OpenAiCompat => {
-                let mut b = json!({
-                    "model": self.model,
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature,
-                    "messages": openai_messages(msgs),
-                    "stream": true,
-                    // 不加这个，流式结束时拿不到 usage，R6 的账就得全靠估
-                    "stream_options": { "include_usage": true },
-                });
-                if !tools.is_empty() {
-                    b["tools"] = Value::Array(tools.iter().map(openai_tool).collect());
-                }
-                b
-            }
+            Api::OpenAiCompat => json!({
+                "model": self.model,
+                "messages": openai_messages(msgs),
+                "stream": true,
+            }),
+        };
+        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens);
+        // 回答段要模型好好想，所以**不关 thinking** —— 关它是判断段的需要
+        // （thinking 会顶掉强制工具调用），不是全局策略。
+        if b.get("thinking").is_some_and(|t| t["type"] == "disabled") {
+            b.as_object_mut().unwrap().remove("thinking");
         }
-    }
-}
-
-/// 判断段的 `tool_choice`。**「必须调工具」，而不是「必须调这一个工具」。**
-///
-/// 候选本来就只有 `record_judgement` 一个，所以两种写法效果相同 —— 但指名道姓
-/// 那种（Anthropic 的 `{type:"tool",name:...}` / OpenAI 的
-/// `{type:"function",function:{name:...}}`）在**开了 thinking 的模型**上会被直接拒：
-///
-/// ```text
-/// 400 Bad Request
-/// tool_choice 'specified' is incompatible with thinking enabled
-/// ```
-///
-/// 换成 any / required 之后，同一份代码在开不开 thinking 的服务上都能跑，
-/// 而「必须产出一个 schema 校验过的场景判定」这条保证一点没少。
-///
-/// 单独拿出来是个测试缝：这一条错的话，症状是每一轮都判断段失败、
-/// 降级成「本轮无场景」，而对话表面上还在正常进行。
-pub fn judge_tool_choice(api: Api) -> Value {
-    match api {
-        Api::Anthropic => json!({ "type": "any" }),
-        Api::OpenAiCompat => json!("required"),
+        if !caps.stream_usage {
+            // 拿不到就只能估算
+        } else if !anthropic {
+            b["stream_options"] = json!({ "include_usage": true });
+        }
+        if !tools.is_empty() {
+            b["tools"] = Value::Array(
+                tools
+                    .iter()
+                    .map(if anthropic { anthropic_tool } else { openai_tool })
+                    .collect(),
+            );
+        }
+        b
     }
 }
 

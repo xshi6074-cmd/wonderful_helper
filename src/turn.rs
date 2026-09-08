@@ -228,6 +228,11 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
         let judge = match judged {
             Ok(j) => j,
             Err(e) => {
+                // 协商到底 ≠ 网络抖了一下。前者要换模型，后者重试就好，
+                // 所以带着完整阶梯单独推给界面，而不是并进一条泛泛的红条。
+                if let crate::model::ModelError::Caps(r) = &e {
+                    let _ = ctx.ui.send(UiEvent::CapsFailed { report: r.clone() });
+                }
                 ctx.core
                     .emit(
                         ctx.id,

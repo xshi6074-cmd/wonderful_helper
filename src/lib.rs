@@ -33,6 +33,7 @@
 //! - 每个长 await 都要过 [`turn::guarded`]，否则 cancel 之后任务还在跑，钱照烧。
 
 pub mod actions;
+pub mod caps;
 pub mod client;
 pub mod config;
 pub mod context;

@@ -369,6 +369,11 @@ pub enum UiEvent {
     /// 「文件就是界面」的代价：用户改坏了 `playbook.toml`，必须像界面报错一样报出来，
     /// 不能只 eprintln 然后静悄悄用内置目录继续跑。
     MemoryDegraded { file: String, err: String },
+    /// 调用方式协商到底了：这个模型给不出这个角色必需的能力。
+    ///
+    /// **和「模型调用失败」分开推**。后者重试就好，前者要换模型 ——
+    /// 界面得给不同的出口，而不是都塞进同一条红条。
+    CapsFailed { report: Box<crate::caps::Report> },
     /// 上次异常退出留下的痕迹，已修补。
     Recovered { events: usize, crashed_turns: usize, reopened_questions: usize },
     /// 从某一轮分叉出了一个新会话。原会话不受影响。

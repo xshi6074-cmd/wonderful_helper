@@ -86,6 +86,7 @@ fn client(base: &str) -> HttpClient {
         api: Api::OpenAiCompat,
         base_url: base.to_string(),
         key_env: "X".into(),
+        caps: None,
     };
     let m = ModelCfg {
         provider: "stub".into(),

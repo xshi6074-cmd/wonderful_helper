@@ -31,6 +31,12 @@ pub enum ModelError {
     Call(String),
     #[error("判断段输出不是合法的场景判定: {0}")]
     Schema(String),
+    /// 调用方式协商到底了 —— 这个模型给不出这个角色必需的能力。
+    ///
+    /// **单独一个变体**，因为它和「网络抖了一下」不是一回事：前者换个模型就好，
+    /// 后者重试就好。界面要按这个区别给不同的出口。
+    #[error("{}", .0.verdict)]
+    Caps(Box<crate::caps::Report>),
 }
 
 /// 三个模型角色，各自可配 provider / model / 参数。

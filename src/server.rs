@@ -59,6 +59,8 @@ pub struct App {
     commands: Mutex<()>,
     /// 已序列化好的 JSON，广播给所有打开的页面。多开一个标签页也能同步看到。
     out: broadcast::Sender<String>,
+    /// 客户端协商出新的调用方式时从这里进来，落进 config.json。
+    caps_in: tokio::sync::mpsc::UnboundedSender<(String, crate::caps::Caps)>,
 }
 
 struct Live {
@@ -82,6 +84,7 @@ impl App {
         let settings = Settings::load(&dir, &real_env);
         let (secrets, _) = Secrets::load(&dir);
         let (out, _) = broadcast::channel(4096);
+        let (caps_in, mut caps_rx) = tokio::sync::mpsc::unbounded_channel();
         let app = Arc::new(App {
             dir,
             store,
@@ -90,6 +93,31 @@ impl App {
             live: Mutex::new(None),
             commands: Mutex::new(()),
             out,
+            caps_in,
+        });
+
+        // 协商结果落盘。**单独一个任务**，因为写文件不能挡在模型请求的路径上 ——
+        // 判断段每轮都跑，为了记一次调用方式让它多等一次磁盘 IO 不划算。
+        let bg = app.clone();
+        tokio::spawn(async move {
+            while let Some((provider, caps)) = caps_rx.recv().await {
+                let mut s = bg.settings.write().await;
+                let Some(p) = s.providers.get_mut(&provider) else { continue };
+                if p.caps.as_ref() == Some(&caps) {
+                    continue;
+                }
+                p.caps = Some(caps);
+                let snapshot = s.clone();
+                drop(s);
+                if let Err(e) = snapshot.save(&bg.dir) {
+                    eprintln!("[caps] 协商结果写不进 config.json：{e}");
+                    continue;
+                }
+                bg.push(json!({
+                    "t": "caps", "provider": provider,
+                    "settings": serde_json::to_value(&snapshot).unwrap_or(Value::Null),
+                }));
+            }
         });
         Ok(app)
     }
@@ -107,7 +135,7 @@ impl App {
     async fn open(self: &Arc<Self>, resume: Option<SessionId>) -> Result<(), String> {
         let settings = self.settings.read().await.clone();
         let secrets = self.secrets.read().await.clone();
-        let models = settings.build_models(&secrets, &real_env)?;
+        let models = settings.build_models_with(&secrets, &real_env, Some(self.caps_in.clone()))?;
 
         let key = settings.web_key(&secrets, &real_env);
         let backend = web::build(&settings.web, &settings.tools, key);
@@ -282,6 +310,24 @@ fn fanout(e: UiEvent) -> Option<Value> {
         UiEvent::MemoryDegraded { file, err } => {
             json!({ "t": "memory_bad", "file": file, "err": err })
         }
+        UiEvent::CapsFailed { report } => json!({
+            "t": "caps_failed",
+            "provider": report.provider, "model": report.model, "role": report.role,
+            "verdict": report.verdict,
+            "required": report.required.iter().map(|c| json!({
+                "code": c.code(), "label": c.label(), "need": c.need(),
+            })).collect::<Vec<_>>(),
+            "steps": report.steps.iter().map(|s| json!({
+                "code": s.cap.code(), "cap": s.cap.label(), "tried": s.tried,
+                "outcome": match s.outcome {
+                    crate::caps::Outcome::Ok => "ok",
+                    crate::caps::Outcome::Rejected => "rejected",
+                    crate::caps::Outcome::Exhausted => "exhausted",
+                },
+                "detail": s.detail,
+            })).collect::<Vec<_>>(),
+            "text": report.text(),
+        }),
         UiEvent::Recovered { events, crashed_turns, reopened_questions } => json!({
             "t": "recovered", "events": events, "crashed": crashed_turns, "reopened": reopened_questions
         }),
