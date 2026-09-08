@@ -641,6 +641,35 @@ async fn handle(app: &Arc<App>, v: Value) {
                 Err(e) => app.err(&format!("配置解析不了：{e}")),
             }
         }
+        // 只改可读目录。**不走 settings_put。**
+        //
+        // 输入区那个「应用」原来是把浏览器里整份 settings 发上来覆盖磁盘 ——
+        // 而浏览器那份是上一次 boot 的快照。用户在别处改过模型配置之后再点它，
+        // 就会把 roles 打回默认（anthropic），下一次重启报「缺密钥」，
+        // 看起来像密钥判断错了，实际是配置被这一下覆盖掉了。
+        //
+        // 现在它只带一个路径：**盘上那份读出来，只动 tools.roots，再写回**。
+        // 结构上就不可能再捎带覆盖别的字段。
+        "roots_put" => {
+            let path = v["path"].as_str().unwrap_or("").trim().to_string();
+            if path.is_empty() {
+                return app.err("目录不能为空");
+            }
+            let mut next = Settings::load(&app.dir, &real_env);
+            let mut roots = next.tools.roots.clone();
+            if roots.is_empty() {
+                roots.push(path.clone());
+            } else {
+                roots[0] = path.clone();
+            }
+            next.tools.roots = roots;
+            if let Err(e) = next.save(&app.dir) {
+                return app.err(&format!("写 config.json 失败：{e}"));
+            }
+            *app.settings.write().await = Settings::load(&app.dir, &real_env);
+            app.restart().await;
+            app.reboot().await;
+        }
         "secret_put" => {
             let provider = v["provider"].as_str().unwrap_or("").to_string();
             let key = v["key"].as_str().unwrap_or("").to_string();
@@ -1042,6 +1071,42 @@ mod tests {
             assert!(live.tools.iter().any(|s| s == "web_fetch"));
             assert_eq!(live.handle.session_snapshot().await.unwrap().ws.fields[&crate::state::Path::from("audit")].value, "preserved");
         }
+        cleanup(app).await;
+    }
+
+    /// 输入区那个「应用」只能动可读目录。
+    ///
+    /// 它原来是把浏览器手上那份完整 settings 发上来覆盖磁盘，而那是上一次 boot
+    /// 的快照 —— 用户在别处把 roles 改到别家、填好密钥、跑起来之后再点一下它，
+    /// roles 就被打回默认（anthropic），下一次重启报「provider 缺密钥」。
+    /// 看起来像密钥判断写错了，实际是配置被这一下覆盖掉了。
+    #[tokio::test]
+    async fn roots_put_only_touches_roots() {
+        let app = fixture().await;
+        app.open(None).await.unwrap();
+        // 用户把角色改到别家并存好
+        {
+            let mut s = app.settings.write().await;
+            s.roles.judge.provider = "openai".into();
+            s.roles.answer.provider = "openai".into();
+            s.roles.subagent.provider = "openai".into();
+            s.tools.roots = vec![app.dir.display().to_string(), "/second".into()];
+            s.save(&app.dir).unwrap();
+        }
+        let target = app.dir.join("sub");
+        std::fs::create_dir_all(&target).unwrap();
+        handle(&app, json!({ "op": "roots_put", "path": target.display().to_string() })).await;
+
+        let on_disk = Settings::load(&app.dir, &real_env);
+        assert_eq!(on_disk.tools.roots[0], target.display().to_string(), "第一条换成新目录");
+        assert_eq!(on_disk.tools.roots[1], "/second", "★ 其余授权原样保留");
+        assert_eq!(on_disk.roles.answer.provider, "openai", "★ 模型配置一个字都没动");
+        assert_eq!(on_disk.roles.judge.provider, "openai");
+        assert_eq!(on_disk.roles.subagent.provider, "openai");
+        // 空路径不写任何东西
+        handle(&app, json!({ "op": "roots_put", "path": "   " })).await;
+        let again = Settings::load(&app.dir, &real_env);
+        assert_eq!(again.tools.roots[0], target.display().to_string(), "★ 空路径不把目录改回去");
         cleanup(app).await;
     }
 

@@ -323,11 +323,13 @@ function renderStream() {
     const need = [...new Set(Object.values(S.settings?.roles || {}).map(r => r.provider))];
     const missing = need.filter(n => !S.keys[n]?.has);
     const noSession = !S.session;
+    // 不写死某一家。默认配置里三个角色都指向 anthropic，照着 missing 直接报
+    // 会让人以为「必须先有 anthropic 的 key」—— 而任何一家都行。
     st.append(noSession
       ? h('div', { class: 'blank' },
-          h('h2', {}, '先填一个模型密钥'),
+          h('h2', {}, '未配置 API key'),
           h('p', {}, missing.length
-            ? `${missing.join(' / ')} 还没有密钥。填好之后会话会自动起来。`
+            ? `当前三个角色指向 ${missing.join(' / ')}，还没有密钥。换成你有 key 的那家、或者把密钥填上，会话就会自动起来。`
             : '会话还没起来，看看左栏配置里有没有报错。'),
           h('div', { class: 'cta' },
             h('button', { class: 'primary', onclick: () => openTab('config') }, '去配置'),
@@ -413,7 +415,8 @@ function procStep(e) {
   const v = h('div', { class: 'v' });
   const B = e.body || {};
   switch (e.kind) {
-    case 'judged': v.append(`${B.scene}　—　${B.rationale || ''}`); break;
+    // scenes 是一组。上一轮把单值改成数组时漏了这里，于是显示成 undefined。
+    case 'judged': v.append(`${(B.scenes || []).join(' + ') || '无'}　—　${B.rationale || ''}`); break;
     case 'called':
       for (const c of B.calls || []) v.append(h('div', {}, h('code', {}, c.name), ' ', JSON.stringify(c.args)));
       break;
@@ -1060,7 +1063,11 @@ function join(base, name) {
 function renderConfig() {
   const box = $('#config-form'); box.textContent = '';
   const st = S.settings; if (!st) return;
-  const draft = JSON.parse(JSON.stringify(st));
+  // 加/删 provider 要带着改了一半的草稿重画，所以草稿要跨一次重画活下来。
+  // **但它不写回 S.settings** —— S.settings 是「服务端说盘上是什么」，
+  // 让一份没保存的草稿冒充它，任何别处一发送就会把没保存的东西一起写出去。
+  const draft = cfgDraft || JSON.parse(JSON.stringify(st));
+  cfgDraft = null;
 
   const num = (obj, k, label) => {
     const i = h('input', { type: 'number', value: obj[k], oninput: e => obj[k] = +e.target.value });
@@ -1213,9 +1220,12 @@ function renderConfig() {
     '改动会重启当前会话（历史不丢，从库里恢复）。'));
 }
 
+/** 跨一次重画传递的配置草稿。只有 `renderConfig` 读它，读完就清掉。 */
+let cfgDraft = null;
+
 /** 带着一份改过的 draft 重画配置面板。加/删 provider 之后要用它刷新。 */
 function renderConfigFrom(draft) {
-  S.settings = draft;
+  cfgDraft = draft;
   renderConfig();
 }
 
@@ -1421,10 +1431,13 @@ function boot() {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); fire(); }
   });
 
+  // 只发路径。**不发整份 settings** —— 浏览器手上这份是上一次 boot 的快照，
+  // 拿它覆盖磁盘会把用户在别处改过的模型配置一起打回默认。
+  // 空输入直接不发：原来 `|| '.'` 的兜底会把可读目录悄悄改成当前目录。
   $('#root-save').onclick = () => {
-    const next = JSON.parse(JSON.stringify(S.settings));
-    next.tools.roots = [$('#root-path').value.trim() || '.', ...next.tools.roots.slice(1)];
-    send('settings_put', { settings: next });
+    const p = $('#root-path').value.trim();
+    if (!p) return banner('bad', '目录是空的。点「浏览…」挑一个，或者直接把路径粘进去。', 'roots');
+    send('roots_put', { path: p });
   };
 
   // 查找

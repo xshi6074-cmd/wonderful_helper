@@ -194,8 +194,17 @@ test('preset provider lands in the roster with its base_url and key env', () => 
     S.settings = ${JSON.stringify(settings)}; renderConfig();`);
   const nodes = all(f.doc.querySelector('#config-form'));
   nodes.find(e => e.tag === 'button' && e.textContent === '加进花名册').fire('click');
-  assert.equal(f.evalUI("S.settings.providers.deepseek.base_url"), 'https://api.deepseek.com/v1');
-  assert.equal(f.evalUI("S.settings.providers.deepseek.key_env"), 'DEEPSEEK_API_KEY');
+  // 加进的是**草稿**，不是 S.settings —— 后者是「服务端说盘上是什么」，
+  // 让没保存的草稿冒充它，别处一发送就会把没保存的东西一起写出去。
+  assert.equal(f.evalUI("S.settings.providers.deepseek"), undefined, '没保存前不动 S.settings');
+  const after = all(f.doc.querySelector('#config-form'));
+  assert.ok(after.some(e => String(e.textContent).includes('deepseek')), '但表单上已经有了');
+  after.find(e => e.tag === 'button' && e.textContent === '保存并重启会话').fire('click');
+  const put = f.evalUI('sent.at(-1)');
+  assert.equal(put.op, 'settings_put');
+  assert.equal(put.settings.providers.deepseek.base_url, 'https://api.deepseek.com/v1');
+  assert.equal(put.settings.providers.deepseek.key_env, 'DEEPSEEK_API_KEY');
+  assert.equal(put.settings.roles.answer.provider, 'local', '别的角色原样带回去，不被这次添加改掉');
 });
 // 场景是多选：判断段本来就能一次判出几个，用户插手时没道理只准挑一个。
 test('scene picker is multi-select and sends every checked id', () => {
@@ -328,9 +337,20 @@ test('disconnected Enter keeps draft, stop names observed turn, roots keep extra
   f.evalUI(`ws.readyState = 1; S.settings = ${JSON.stringify(settings)};`);
   f.doc.querySelector('#stop').fire('click');
   assert.equal(f.evalUI('sent.at(-1).turn'), 7);
+  // 「应用」**只发路径**。原来它发的是浏览器手上那份完整 settings ——
+  // 而那是上一次 boot 的快照，用户在别处改过模型配置之后再点这里，
+  // 就会把 roles 打回默认，下一次重启报「缺密钥」，看起来像密钥判断错了。
   f.doc.querySelector('#root-path').value = '/changed';
   f.doc.querySelector('#root-save').fire('click');
-  assert.equal(f.evalUI('sent.at(-1).settings.tools.roots[1]'), '/second');
+  assert.equal(f.evalUI('sent.at(-1).op'), 'roots_put');
+  assert.equal(f.evalUI('sent.at(-1).path'), '/changed');
+  assert.equal(f.evalUI('sent.at(-1).settings'), undefined, '不捎带任何别的配置');
+  // 空输入不发。原来的 `|| '.'` 兜底会把可读目录悄悄改成当前目录，
+  // 连点两次就把用户挑好的路径吃掉了。
+  const n = f.evalUI('sent.length');
+  f.doc.querySelector('#root-path').value = '   ';
+  f.doc.querySelector('#root-save').fire('click');
+  assert.equal(f.evalUI('sent.length'), n, '空目录一条都不发');
 });
 test('cyclic graph nodes stay inside the SVG viewport', () => {
   const f = setup();
