@@ -91,7 +91,7 @@ fn client(base: &str) -> HttpClient {
     let m = ModelCfg {
         provider: "stub".into(),
         model: "stub-1".into(),
-        temperature: 0.0,
+        temperature: Some(0.0),
         max_tokens: 256,
     };
     HttpClient::new(&p, &m, "k".into()).unwrap()

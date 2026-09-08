@@ -49,6 +49,7 @@ const S = {
   distill: null,          // 蒸馏草稿的分节结果，等用户勾选写回
   caps: null,             // 协商失败报告。在没换模型之前它一直有效
   focusRole: null,        // 配置面板要展开并滚到哪个角色
+  models: {},             // provider → 从厂商拉回来的在售型号
   banners: [],            // { level, text, key }
 };
 
@@ -157,6 +158,12 @@ function onMsg(m) {
       else banner('bad', `落盘失败（已积压 ${m.pending} 条），对话不受影响：${m.why}`, 'persist');
       break;
     case 'memory_bad': banner('warn', `${m.file} 解析失败，已回退内置：${m.err}`, 'mem' + m.file); break;
+    case 'models':
+      if (m.models?.length) S.models[m.provider] = m.models;
+      if (m.error) banner('warn', `${m.provider} 型号拉不到（继续用内置候选）：${m.error}`, 'models');
+      else banner('info', `${m.provider} 现在有 ${m.models.length} 个型号可选`, 'models');
+      renderConfig();
+      break;
     // 协商试成了：静默更新配置，让面板显示实测出来的调用方式。
     case 'caps':
       S.settings = m.settings; S.saved = JSON.parse(JSON.stringify(m.settings));
@@ -1143,6 +1150,35 @@ function renderConfig() {
     const i = h('input', { type: 'number', value: obj[k], oninput: e => obj[k] = +e.target.value });
     return h('div', { class: 'field' }, h('label', {}, label), i);
   };
+  /** 温度。**留空就一个字都不发**，用服务端自己的默认。
+   *
+   * 不给它一个默认值：各家取值范围不同（Moonshot / GLM 是 [0,1]，OpenAI 是 [0,2]），
+   * deepseek-reasoner 干脆不收这个参数。随手填一个「看起来合理」的数，
+   * 等于替用户在一个他没同意过的取向上做了决定 —— 而这类默认错了不会报错，
+   * 只会让输出悄悄偏掉。上限用实测出来的那个（协商时钳过就记在 caps 里）。 */
+  const temp = (r, role) => {
+    const cap = draft.providers[r.provider]?.caps;
+    const max = cap?.temp_max ?? 2;
+    const takes = cap ? cap.temperature !== false : true;
+    const i = h('input', {
+      type: 'number', step: '0.1', min: '0', max: String(max),
+      placeholder: takes ? '留空 = 服务端默认' : '这个模型不收',
+      disabled: !takes,
+      value: r.temperature === null || r.temperature === undefined ? '' : r.temperature,
+      oninput: (e) => {
+        const v = e.target.value.trim();
+        r.temperature = v === '' ? null : +v;
+      },
+    });
+    return h('div', { class: 'field' },
+      h('label', {}, '温度'),
+      i,
+      h('p', { class: 'hint' }, !takes
+        ? '实测这个模型不接受 temperature，已经不发了。'
+        : role === 'judge'
+          ? '判断段要的是确定性 —— 想稳就填 0。留空则由服务端决定。'
+          : `留空 = 不发这个参数。这家的上限是 ${max}。`));
+  };
   const txt = (obj, k, label) => {
     const i = h('input', { value: obj[k], oninput: e => obj[k] = e.target.value });
     return h('div', { class: 'field' }, h('label', {}, label), i);
@@ -1190,10 +1226,24 @@ function renderConfig() {
   /** 模型名给候选但不锁死 —— 厂商加新模型比这个列表更新快，写死会拦住人。 */
   const modelInput = (r) => {
     const id = 'ml-' + r.provider;
+    // 候选**优先用从厂商拉回来的那份**。内置那份是查证时点的快照，
+    // 一定会过期 —— 上一版里推给用户的 moonshot-v1-8k 早就下线了。
+    const live = S.models[r.provider];
+    const list = live || presetOf(r.provider)?.models || [];
     const dl = h('datalist', { id });
-    for (const m of presetOf(r.provider)?.models || []) dl.append(h('option', { value: m }));
+    for (const m of list) dl.append(h('option', { value: m }));
     const i = h('input', { value: r.model, list: id, oninput: e => r.model = e.target.value });
-    return h('div', { class: 'field' }, h('label', {}, '模型名'), i, dl);
+    return h('div', { class: 'field' },
+      h('label', {}, '模型名',
+        h('button', {
+          class: 'ghost tiny', style: 'margin-left:8px',
+          title: '问这家现在有哪些型号在售。要先填好密钥。',
+          onclick: (e) => { e.preventDefault(); send('models_probe', { provider: r.provider }); },
+        }, live ? '重新拉取' : '拉取型号')),
+      i, dl,
+      h('p', { class: 'hint' }, live
+        ? `${list.length} 个在售型号（刚从 ${r.provider} 拉的）`
+        : '候选是内置的快照，可能已经过期 —— 点「拉取型号」问一下这家现在有什么。'));
   };
   for (const [role, cn] of [['judge', '判断段'], ['answer', '回答段'], ['subagent', '子任务']]) {
     const r = draft.roles[role];
@@ -1204,7 +1254,7 @@ function renderConfig() {
         `${S.caps.verdict}　`,
         h('button', { class: 'ghost', onclick: (e) => { e.preventDefault(); openCaps(); } }, '看完整日志')) : null,
       sel(r, 'provider', 'provider', provs), modelInput(r),
-      h('div', { class: 'two' }, num(r, 'temperature', '温度'), num(r, 'max_tokens', 'max tokens')),
+      h('div', { class: 'two' }, temp(r, role), num(r, 'max_tokens', 'max tokens')),
     ].filter(Boolean));
     if (broken || S.focusRole === role) {
       b.open = true;

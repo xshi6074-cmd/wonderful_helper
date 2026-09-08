@@ -503,3 +503,5 @@ code.cc{flex:0 0 auto;font-family:var(--mono);font-size:11px;padding:1px 6px;bor
 .caps-steps .raw{margin:5px 0 0;padding:6px 8px;border-radius:6px;background:var(--sunk);
   font-family:var(--mono);font-size:11px;line-height:1.5;white-space:pre-wrap;color:var(--muted)}
 details.block.bad > summary{color:var(--bad)}
+
+button.tiny{font-size:10.5px;padding:1px 7px;vertical-align:middle}

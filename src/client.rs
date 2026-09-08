@@ -42,7 +42,7 @@ pub struct HttpClient {
     model: String,
     provider: String,
     role: &'static str,
-    temperature: f32,
+    temperature: Option<f32>,
     max_tokens: u32,
     /// 当前这套发法。协商成功会就地改它，并通过 `sink` 报给上层落盘。
     caps: std::sync::Mutex<Caps>,
@@ -705,7 +705,7 @@ pub fn parse_sse(api: Api, blocks: &[&str]) -> Vec<StreamEvent> {
     out
 }
 
-fn clip(s: &str, n: usize) -> String {
+pub fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return s.to_string();
     }

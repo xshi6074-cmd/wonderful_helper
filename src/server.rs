@@ -763,6 +763,24 @@ async fn handle(app: &Arc<App>, v: Value) {
         // 不回任何文件内容。
         "browse" => app.push(browse(app, v["path"].as_str().unwrap_or(""))),
 
+        // 拉这个 provider 当前在售的型号。
+        //
+        // **不靠写死的列表。** 内置那份是查证时点的快照，一定会过期 ——
+        // 上一版里 moonshot-v1-8k 已经下线、deepseek-chat 已经废弃，
+        // 而界面还在把它们当候选推给用户。厂商自己的 /models 才是事实。
+        "models_probe" => {
+            let name = v["provider"].as_str().unwrap_or("").to_string();
+            let settings = app.settings.read().await.clone();
+            let secrets = app.secrets.read().await.clone();
+            let Some(p) = settings.providers.get(&name).cloned() else {
+                return app.err(&format!("没有叫 {name} 的 provider"));
+            };
+            let Some((key, _)) = secrets.resolve(&name, &p, &real_env) else {
+                return app.err(&format!("{name} 还没有密钥，填了才能拉型号"));
+            };
+            app.push(fetch_models(&name, &p, key).await);
+        }
+
         "probe_web" => {
             let settings = app.settings.read().await.clone();
             let secrets = app.secrets.read().await.clone();
@@ -790,6 +808,58 @@ async fn handle(app: &Arc<App>, v: Value) {
         "memory_get" => app.push(json!({ "t": "memory", "files": memory_files(app) })),
         "sync" => app.reboot().await,
         _ => {}
+    }
+}
+
+/// `GET {base}/models`。两家的响应形状不同，都收。
+///
+/// 失败不当错误处理 —— 拉不到就继续用内置候选，用户照样能自己打型号名。
+/// 型号名本来就是自由文本，这里只是省一次翻文档。
+async fn fetch_models(name: &str, p: &crate::config::ProviderCfg, key: String) -> Value {
+    let url = format!("{}/models", p.base_url.trim_end_matches('/'));
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap_or_default();
+    let req = match p.api {
+        crate::config::Api::Anthropic => http
+            .get(&url)
+            .header("x-api-key", &key)
+            .header("anthropic-version", "2023-06-01"),
+        crate::config::Api::OpenAiCompat => http.get(&url).bearer_auth(&key),
+    };
+    let out = match req.send().await {
+        Err(e) => Err(format!("拉不到：{e}")),
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status();
+            let body = r.text().await.unwrap_or_default();
+            Err(format!("{} {}", code.as_u16(), crate::client::clip(&body, 200)))
+        }
+        Ok(r) => match r.json::<Value>().await {
+            Err(e) => Err(format!("响应不是 JSON：{e}")),
+            Ok(v) => {
+                let mut ids: Vec<String> = v["data"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|m| m["id"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ids.sort();
+                ids.dedup();
+                Ok(ids)
+            }
+        },
+    };
+    match out {
+        Ok(ids) if !ids.is_empty() => {
+            json!({ "t": "models", "provider": name, "models": ids })
+        }
+        Ok(_) => json!({ "t": "models", "provider": name, "models": [],
+                         "error": "这家没有返回型号列表，继续用内置候选" }),
+        Err(e) => json!({ "t": "models", "provider": name, "models": [], "error": e }),
     }
 }
 

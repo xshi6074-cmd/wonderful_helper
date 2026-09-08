@@ -346,11 +346,19 @@ impl Caps {
 
     /// 这套发法拼进请求体里的那几个字段。`anthropic` 决定 thinking 与
     /// tool_choice 的写法 —— 两家形状不同。
-    pub fn apply(&self, body: &mut Value, anthropic: bool, temperature: f32, max_tokens: u32) {
+    pub fn apply(
+        &self,
+        body: &mut Value,
+        anthropic: bool,
+        temperature: Option<f32>,
+        max_tokens: u32,
+    ) {
         let o = body.as_object_mut().expect("请求体是对象");
         o.insert(self.max_tokens_field.clone(), json!(max_tokens));
-        if self.temperature {
-            o.insert("temperature".into(), json!(self.clamp(temperature)));
+        // 两个条件都要满足才发：用户填了值，而且这个模型收这个参数。
+        // 用户没填就一个字都不发 —— 那正是「用服务端默认」的意思。
+        if let Some(t) = temperature.filter(|_| self.temperature) {
+            o.insert("temperature".into(), json!(self.clamp(t)));
         }
         match &self.thinking {
             Thinking::Untouched => {}
@@ -439,7 +447,7 @@ mod tests {
         assert_eq!(s.cap, Cap::ThinkingOff);
         assert_eq!(c.thinking, Thinking::Effort("low".into()));
         let mut body = json!({});
-        c.apply(&mut body, false, 0.0, 100);
+        c.apply(&mut body, false, Some(0.0), 100);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "low");
     }
@@ -480,9 +488,14 @@ mod tests {
             .unwrap();
         assert_eq!(s.cap, Cap::Temperature);
         let mut body = json!({});
-        c.apply(&mut body, false, 0.7, 100);
+        c.apply(&mut body, false, Some(0.7), 100);
         assert!(body.get("temperature").is_none(), "★ 不收就一个字都不发");
         assert_eq!(body["max_tokens"], 100);
+        // 模型收，但用户没填 ⇒ 同样一个字都不发，用服务端默认。
+        // **不替用户猜一个「看起来合理」的值** —— 猜错了不报错，只是输出悄悄偏。
+        let mut body = json!({});
+        Caps::default().apply(&mut body, false, None, 100);
+        assert!(body.get("temperature").is_none(), "★ 没填就不发");
     }
 
     #[test]
@@ -491,7 +504,7 @@ mod tests {
         c.next("Unsupported parameter: 'max_tokens' is not supported with this model")
             .unwrap();
         let mut body = json!({});
-        c.apply(&mut body, false, 0.0, 42);
+        c.apply(&mut body, false, Some(0.0), 42);
         assert_eq!(body["max_completion_tokens"], 42);
         assert!(body.get("max_tokens").is_none());
 

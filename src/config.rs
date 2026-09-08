@@ -71,8 +71,11 @@ pub enum Api {
 /// base_url 和密钥变量名是**同一份事实**：`Settings::default()` 要用，UI 的
 /// 「添加 provider」也要用。抄两份迟早对不上，而症状是「照着界面填完连不上」。
 ///
-/// `models` 只是给输入框的候选，字段本身仍然是自由文本 —— 厂商加新模型的速度
-/// 比这个列表更新的速度快，写死会拦住用户。
+/// `models` 只是**拉不到时的兜底**。真正的候选来自 `GET {base}/models`
+/// （见 server 的 `models_probe`）—— 写死的列表一定会过期：这份里原来写的
+/// `moonshot-v1-8k` 在 2026-08-31 下线、`deepseek-chat` 在 2026-07-24 废弃、
+/// `glm-4-plus` 更早，而界面还在把它们当候选推给用户。
+/// 列表里的东西是查证时点的快照，不是事实。
 pub struct Preset {
     pub name: &'static str,
     pub label: &'static str,
@@ -96,17 +99,19 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         name: "deepseek", label: "DeepSeek", api: Api::OpenAiCompat,
         base_url: "https://api.deepseek.com/v1", key_env: "DEEPSEEK_API_KEY",
-        models: &["deepseek-chat", "deepseek-reasoner"],
+        // deepseek-chat / deepseek-reasoner 已于 2026-07-24 废弃
+        models: &["deepseek-v4-flash", "deepseek-v4-pro"],
     },
     Preset {
         name: "zhipu", label: "智谱 GLM", api: Api::OpenAiCompat,
         base_url: "https://open.bigmodel.cn/api/paas/v4", key_env: "ZHIPUAI_API_KEY",
-        models: &["glm-4-plus", "glm-4-air", "glm-4-flash"],
+        models: &["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.7", "glm-4.6"],
     },
     Preset {
         name: "moonshot", label: "月之暗面 Kimi", api: Api::OpenAiCompat,
         base_url: "https://api.moonshot.cn/v1", key_env: "MOONSHOT_API_KEY",
-        models: &["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+        // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 下线
+        models: &["kimi-k3", "kimi-k2.6", "kimi-k2.7-code"],
     },
     Preset {
         // 自建 / vLLM / Ollama / LM Studio 都走这条。地址是最常见的那个默认端口。
@@ -166,7 +171,16 @@ pub struct ModelCfg {
     /// [`Settings::providers`] 里的键。
     pub provider: String,
     pub model: String,
-    pub temperature: f32,
+    /// 采样温度。**`None` = 一个字都不发，用服务端自己的默认。**
+    ///
+    /// 不给默认值是有意的：各家的取值范围不一样（Moonshot / GLM 是 [0,1]，
+    /// OpenAI 是 [0,2]），deepseek-reasoner 干脆不收这个参数。我随手填一个
+    /// 「看起来合理」的数，就是替用户在一个他没同意过的取向上做了决定 ——
+    /// 而这类默认值错了不会报错，只会让输出悄悄偏掉。
+    ///
+    /// 老的 config.json 里写着一个数字，照样解析成 `Some(n)`，不用迁移。
+    #[serde(default)]
+    pub temperature: Option<f32>,
     pub max_tokens: u32,
 }
 
@@ -244,20 +258,20 @@ impl Default for Settings {
                 judge: ModelCfg {
                     provider: "anthropic".into(),
                     model: "claude-haiku-4-5-20251001".into(),
-                    temperature: 0.0,
+                    temperature: None,
                     max_tokens: 2048,
                 },
                 answer: ModelCfg {
                     provider: "anthropic".into(),
                     model: "claude-opus-5".into(),
-                    temperature: 0.7,
+                    temperature: None,
                     max_tokens: 8192,
                 },
                 // subagent 吃仓库/论文这类大块上下文，要能力也要便宜
                 subagent: ModelCfg {
                     provider: "anthropic".into(),
                     model: "claude-sonnet-5".into(),
-                    temperature: 0.2,
+                    temperature: None,
                     max_tokens: 8192,
                 },
             },
@@ -330,7 +344,7 @@ impl Settings {
             if let Some(v) = env(&format!("PREMORTEM_{k}_TEMPERATURE")) {
                 match v.parse() {
                     Ok(n) => {
-                        s.roles.of_mut(r).temperature = n;
+                        s.roles.of_mut(r).temperature = Some(n);
                         src = Src::Env;
                     }
                     Err(_) => s
@@ -394,11 +408,14 @@ impl Settings {
             let key = role_key(r).to_lowercase();
             let m = self.roles.of(r);
             out.push_str(&format!(
-                "  {:9} {} / {}  (temp {:.1}, max {})  ← {}\n",
+                "  {:9} {} / {}  (temp {}, max {})  ← {}\n",
                 key,
                 m.provider,
                 m.model,
-                m.temperature,
+                match m.temperature {
+                    Some(t) => format!("{t:.1}"),
+                    None => "服务端默认".into(),
+                },
                 m.max_tokens,
                 src_of(&format!("roles.{key}"))
             ));
