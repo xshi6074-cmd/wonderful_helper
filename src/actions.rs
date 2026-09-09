@@ -99,6 +99,7 @@ impl Tool for RecordGraph {
          按当前问题选择粒度。架构层表现真实组件和包含关系；关键路径进一步展开接口、算子、监督及状态更新。纯排列、执行阶段和视觉分组不能冒充真实模块包含关系。一个矩形不能同时含混地代表特征、执行模块和参数集合；必要时拆开并说明语义。边应交代何种依赖，不能让所有关系都靠无标签实线表达。\n\n\
          attrs 按 schema 使用键值对数组，而非 JSON 对象。只使用渲染器已支持的视觉字段，不能通过任意属性承诺显示效果。长解释进入正文或笔记，图中保留识别结构和关键选择所需信息。\n\n\
          source 表示证据来源，不等于实现状态或用户批准。代码事实引用实际读过的 repo 位置；论文事实引用实际读过的 paper 位置；助手假设使用 guess。模型不得写 source=user。\n\n\
+         图上的 label 与边标签**只写纯文本**。渲染器不解析 Markdown，也不解析 LaTeX：写 `$h_0(x)$`、`**加粗**`、`\\le`、`^{k}` 只会把这些符号原样显示出来，把一个本来清楚的名字变成一串噪声。数学请用可直接读的写法（h0(x)、F0 前 k 层、alpha=0.5），公式与推导写进 body 或 record_note。\n\n\
          当上游接口、状态时序或目标改变，检查直接相关的消费者、边、验证和解释是否仍成立；无法立即复核的明确标记。不要用整图重建代替局部 patch，也不要删除后重建来绕开手工确认保护。只有成功返回的修改才能报告为已保存。"
     }
 
@@ -118,7 +119,7 @@ impl Tool for RecordGraph {
                         },
                         "id": { "type": "string", "description": "node/edge：新建必须填 $别名（如 $goal / $e1），不可自造稳定 ID；修改已有对象才填当前图中真实 id（如 n12_0 / e12_1）" },
                         "kind": { "type": "string", "description": "由 op 决定，不能混用。op=node：data/module/op/loss/metric/ablation/baseline/gate/note；op=edge：flow/feeds/supervises/compares/depends/snapshot/copies。flow 是边类型，不是节点类型；未知值会安全回退" },
-                        "label": { "type": "string", "description": "图上标题，可正常换行，不要重复 kind" },
+                        "label": { "type": "string", "description": "图上标题。**纯文本**，不要 Markdown 或 LaTeX（$..$、**、\\frac 都不会被渲染，只会原样显示）。可正常换行，不要重复 kind" },
                         "body": { "type": "string", "description": "点击后才看的完整细节、依据与实现说明" },
                         "parent": { "type": ["string", "null"], "description": "真实包含关系：归到哪个节点下面并画成 subgraph；null = 提到顶层。不要用它代替普通阅读分区" },
                         "attrs": { "type": "array", "description": "[[键, 值]]，值给 null 表示删。summary=节点内短说明；visual.emphasis=primary|secondary|muted；visual.shape=rect|rounded|pill|cylinder|diamond|hexagon|subroutine|circle；visual.tone=indigo|blue|teal|amber|rose|slate；visual.text=sm|md|lg；有子节点的容器可用 visual.container=module|section",

@@ -40,6 +40,12 @@ pub struct GraphRenderPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphBinding {
     pub marker: String,
+    /// 这个元素在 mermaid 源码里的标识符（`pmn_...` / `pme_...`）。
+    ///
+    /// marker 是靠 `class X marker` 语句挂上去的，而 **mermaid 不把 class 语句
+    /// 作用到 subgraph 的 `.cluster` 上** —— 分组因此永远匹配不到，界面上就是
+    /// 一条「无法映射 group」。前端拿这个 id 做兜底查找，不改动原有的匹配路径。
+    pub dom_id: String,
     pub kind: GraphBindingKind,
     pub id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -151,6 +157,7 @@ pub fn graph_render(g: &Graph, style: &GraphStyle) -> Option<GraphRenderPayload>
         }
         bindings.push(GraphBinding {
             marker,
+            dom_id: eid.clone(),
             kind: GraphBindingKind::Edge,
             id: e.id.0.clone(),
             classes,
@@ -304,6 +311,7 @@ fn emit_node(
         }
         bindings.push(GraphBinding {
             marker,
+            dom_id: nid.clone(),
             kind: GraphBindingKind::Node,
             id: n.id.0.clone(),
             classes: vec![],
@@ -344,6 +352,7 @@ fn emit_node(
     }
     bindings.push(GraphBinding {
         marker,
+        dom_id: nid.clone(),
         kind: GraphBindingKind::Group,
         id: n.id.0.clone(),
         classes: vec![],

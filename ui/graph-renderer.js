@@ -181,6 +181,15 @@ function bind(svg, bindings, state, renderId) {
     const matches = [...svg.querySelectorAll(
       `.${binding.marker}, [data-id="${binding.marker}"], [id="${renderId}-${binding.marker}"]`,
     )];
+    // marker 是靠 `class X marker` 挂上去的，而 mermaid 不把 class 语句作用到
+    // subgraph 的 .cluster 上 —— 分组于是永远匹配不到。这里按元素在 mermaid
+    // 源码里的标识符再找一次；**只在上面一无所获时才走**，原有匹配路径不变。
+    if (!matches.length && binding.dom_id) {
+      const d = binding.dom_id;
+      matches.push(...svg.querySelectorAll(
+        `[id="${d}"], [id^="${d}-"], [id*="-${d}-"], [id$="-${d}"], [data-id="${d}"], [data-look="${d}"]`,
+      ));
+    }
     if (!matches.length) {
       missing.push(binding);
       continue;
