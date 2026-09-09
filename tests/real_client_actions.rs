@@ -43,7 +43,7 @@ async fn chat(State(seen): State<Seen>, body: String) -> impl IntoResponse {
                     "id": "j1", "type": "function",
                     "function": {
                         "name": "record_judgement",
-                        "arguments": "{\"scenes\":[\"trace_code\",\"cheap_first\"],\"rationale\":\"他要改模块，而且预算对不上\"}"
+                        "arguments": "{\"scenes\":[\"trace_code\",\"cost_budget\"],\"rationale\":\"他要改模块，而且预算对不上\"}"
                     }
                 }]}}],
                 "usage": { "prompt_tokens": 100, "completion_tokens": 20 }
@@ -109,7 +109,7 @@ async fn judge_asks_for_a_scene_without_naming_the_tool() {
         })
         .await
         .expect("判断段应当成功");
-    assert_eq!(out.scenes, vec!["trace_code".to_string(), "cheap_first".to_string()]);
+    assert_eq!(out.scenes, vec!["trace_code".to_string(), "cost_budget".to_string()]);
     assert_eq!(out.usage.prompt, 100);
 
     let body = seen.lock().unwrap()[0].clone();

@@ -77,6 +77,15 @@ struct PlaybookFile {
     scene: Vec<Scene>,
 }
 
+/// 蒸馏草稿里的场景级 diff。它故意没有 default_tools，防止模型借更新场景
+/// 顺手改掉整库的能力边界。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaybookPatch {
+    #[serde(default)]
+    scene: Vec<Scene>,
+}
+
 /// 场景目录。可插拔的纯文本配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Playbook {
@@ -119,26 +128,20 @@ impl Playbook {
         v
     }
 
-    /// 把一组 id 解析成场景，认不出的丢掉并回报。**顺序按 playbook 的 id 序**，
-    /// 所以 prompt 里场景的先后不受模型给出的顺序影响，缓存行为稳定。
+    /// 把一组 id 解析成场景，认不出的丢掉并回报。
+    /// 顺序保留 judge 给出的影响优先级；不能让 BTreeMap 的字母序冒充重要性。
     pub fn resolve(&self, ids: &[SceneId]) -> (Vec<Scene>, Vec<SceneId>) {
         let mut unknown = Vec::new();
-        let mut want: Vec<&SceneId> = Vec::new();
+        let mut out = Vec::new();
         for id in ids {
-            if self.scenes.contains_key(id) {
-                if !want.contains(&id) {
-                    want.push(id);
+            if let Some(scene) = self.scenes.get(id) {
+                if !out.iter().any(|seen: &Scene| seen.id == scene.id) {
+                    out.push(scene.clone());
                 }
             } else if !unknown.contains(id) {
                 unknown.push(id.clone());
             }
         }
-        let out = self
-            .scenes
-            .values()
-            .filter(|s| want.iter().any(|w| **w == s.id))
-            .cloned()
-            .collect();
         (out, unknown)
     }
 
@@ -146,8 +149,18 @@ impl Playbook {
     pub fn from_toml_str(s: &str) -> Result<Self, String> {
         let raw: PlaybookFile = toml::from_str(s).map_err(|e| e.to_string())?;
         let mut scenes = BTreeMap::new();
-        for sc in raw.scene {
-            scenes.insert(sc.id.clone(), sc);
+        for mut sc in raw.scene {
+            let id = sc.id.trim().to_string();
+            if id.is_empty() {
+                return Err("场景 id 不能为空".into());
+            }
+            if sc.label.trim().is_empty() || sc.when.trim().is_empty() {
+                return Err(format!("场景 {id} 的 label/when 不能为空"));
+            }
+            sc.id = id.clone();
+            if scenes.insert(id.clone(), sc).is_some() {
+                return Err(format!("场景 id = {id:?} 重复"));
+            }
         }
         if !scenes.contains_key("none") {
             return Err("playbook 必须包含 id = \"none\" 的场景（无特殊处理时的回退）".into());
@@ -176,111 +189,38 @@ impl Playbook {
         format!("{header}{body}")
     }
 
-    /// 内置目录，对应设计文档第三节「2 · 协作动作」列的那几种。
-    ///
-    /// 这不是「默认值」而是 **bootstrap 案例**：验收方案里的「冷启动可用性」
-    /// 要求没有个人积累时首次打开即可用。
-    pub fn builtin() -> Self {
-        let mut scenes = BTreeMap::new();
-        let mut add = |id: &str, label: &str, when: &str, guidance: &str, tools: &[&str]| {
-            scenes.insert(
-                id.to_string(),
-                Scene {
-                    id: id.to_string(),
-                    label: label.to_string(),
-                    when: when.to_string(),
-                    guidance: guidance.to_string(),
-                    tools: tools.iter().map(|s| s.to_string()).collect(),
-                },
-            );
-        };
-
-        add(
-            "none",
-            "不做特殊干预",
-            "用户的话是闲聊、确认、或已经很明确的具体请求",
-            "正常回答。不要为了显得尽职而额外提问。",
-            &[],
-        );
-        add(
-            "clarify_goal",
-            "澄清目标",
-            "用户描述的 claim 模糊，或者要验证的东西和要改的东西对不上",
-            "用户的目标还没落定。建议先把「要验证什么」问清楚再往下。\
-             新手答不上开放式问题，如果要问，尽量带上候选项（用 ask_user 工具）。\
-             不确定的部分不要替用户补全。",
-            &["ask_user"],
-        );
-        add(
-            "teach_background",
-            "补充领域背景",
-            "用户储备记录显示这个知识域他明确没有储备，或者他自陈不熟",
-            "先把机制讲通，再把判断交回给用户。讲解要落到他这个仓库/这个实验上，\
-             不要泛泛介绍概念。讲完可以问一句他是否要按这个理解继续。",
-            &[],
-        );
-        add(
-            "trace_code",
-            "追踪代码链路",
-            "用户要改某个模块，但对话里看不出他确认过这个模块的输出被谁消费",
-            "建议先把相关的调用链路走一遍再谈改法 —— repo_tree 看结构、fs_grep 找引用、\
-             fs_read 读具体位置。读到什么就用 record_graph 补到图上，source 填 \
-             {\"repo\": \"路径:行号\"}。读不到的不要猜，要猜就标 source=\"guess\"（会画成虚线）。",
-            &["fs_read", "fs_grep", "fs_find", "repo_tree"],
-        );
-        add(
-            "check_assumption",
-            "检查假设",
-            "设计里有互相矛盾的字段，或者指标测不出 claim 说的那个东西",
-            "指出你看到的矛盾，说清楚是哪两处对不上。措辞用「我看到这根线」而不是\
-             「你这里有问题」—— 校对式，不是质问式。命中与否代价不对称。",
-            &["ask_user"],
-        );
-        add(
-            "diverge_design",
-            "发散设计",
-            "只有一个方案却要下结论，或者对照组明显不足以支撑 claim",
-            "对照空间还没铺开。建议把可能的对照/消融列出来再收敛，\
-             列的时候说明每一条能排除什么可能性。不用追求穷尽。\
-             铺出来的对照臂用 record_graph 画成 ablation / baseline 节点，\
-             用户要在图上直接删改的就是它们。",
-            &[],
-        );
-        add(
-            "cheap_first",
-            "优先低成本试验",
-            "算力/数据/时间的量级和方案对不上",
-            "建议先做能最快证伪的那个最小实验。给出它要花多少、能排除什么。\
-             如果预算根本不够，直接说清缺口，不要假装可行。",
-            &[],
-        );
-        add(
-            "stop_and_implement",
-            "停止讨论进入实现",
-            "该定的都定了，再讨论边际收益很低",
-            "该收尾了。产出给下游编码 agent 的 brief：要验证的 claim / 要改的具体位置 / \
-             必须保持不变的东西 / 对照清单 / 怎么算验收通过。\
-             写 brief 之前先用 record_note 把验收口径落下来（open 里应该清空得差不多了）。\
-             **是否真的进入实现由用户拍板，你只给 brief，不要替他宣布开始。**",
-            &[],
-        );
-
-        Playbook {
-            scenes,
-            // 默认工具集：**这些名字必须在 Registry 里真的存在**。
-            //
-            // 两个动作工具永远在：模型能不能把推断写下来，不该是个可选项。
-            // 读类文件工具也永远在：它们不依赖任何外部服务，跟场景无关。
-            // 联网 fetch 不在这里 —— 它按配置注册，由 mode 决定要不要给
-            // （见 prompts.toml 的 [mode.*].tools）。
-            default_tools: vec![
-                "record_graph".into(),
-                "record_note".into(),
-                "fs_read".into(),
-                "fs_grep".into(),
-                "fs_find".into(),
-                "repo_tree".into(),
-            ],
+    /// 把只含新增/更新 `[[scene]]` 块的草稿按 id 合并到当前场景库。
+    /// 未出现在 diff 里的场景和 default_tools 都保持原样。
+    pub fn merge_toml(current: &str, delta: &str) -> Result<String, String> {
+        let mut base = Self::from_toml_str(current)?;
+        let patch: PlaybookPatch = toml::from_str(delta)
+            .map_err(|e| format!("场景 diff 不是合法 TOML：{e}"))?;
+        if patch.scene.is_empty() {
+            return Err("场景 diff 里没有 [[scene]] 块".into());
         }
+        let mut seen = Vec::new();
+        for mut scene in patch.scene {
+            let id = scene.id.trim().to_string();
+            if id.is_empty() {
+                return Err("场景 id 不能为空".into());
+            }
+            if seen.iter().any(|known: &String| known == &id) {
+                return Err(format!("场景 diff 里 id = {id:?} 重复"));
+            }
+            if scene.label.trim().is_empty() || scene.when.trim().is_empty() {
+                return Err(format!("场景 {id} 的 label/when 不能为空"));
+            }
+            scene.id = id.clone();
+            seen.push(id.clone());
+            base.scenes.insert(id, scene);
+        }
+        Ok(base.to_toml_string())
+    }
+
+    /// 仓库里的 `memory/playbook.toml` 同时是项目默认场景库和冷启动模板。
+    /// 单一来源可防止删了磁盘场景却仍从 Rust 内置版本回落出来。
+    pub fn builtin() -> Self {
+        Self::from_toml_str(include_str!("../memory/playbook.toml"))
+            .expect("内置 memory/playbook.toml 必须是合法场景库")
     }
 }

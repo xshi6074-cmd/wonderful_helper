@@ -299,9 +299,10 @@ fn fanout(e: UiEvent) -> Option<Value> {
                 "file": s.file,
                 "mode": match s.mode {
                     crate::memory::WriteMode::Replace => "replace",
-                    crate::memory::WriteMode::Append => "append",
+                    crate::memory::WriteMode::Merge => "merge",
                 },
                 "text": s.text,
+                "base_revision": s.base_revision,
             })).collect::<Vec<_>>(),
         }),
         UiEvent::ContextFootprint { total, cacheable, events } => json!({
@@ -940,7 +941,7 @@ fn scenes_json(pb: &crate::scene::Playbook) -> Value {
 ///
 /// # 为什么写之前要校验
 ///
-/// `playbook.toml` 是追加写：追进去的东西不是合法 TOML 的话，整份场景库就废了，
+/// `playbook.toml` 是按场景 ID 合并：草稿或合并结果不是合法 TOML 的话，整份场景库就废了，
 /// 而那种失效要到**下一轮**才以「场景全没了、回退到内置目录」的形式冒出来 ——
 /// 隔着一次交互的错最难查。案例文件同理：frontmatter 不对就整条读不出来，
 /// 而且是静默的（`load_cases` 里 `parse_case` 返回 None 就跳过）。
@@ -952,10 +953,109 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
     let mut done: Vec<String> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
 
+    // 先做跨节预检再写任何文件。尤其是案例可以依赖同一份草稿里新增的场景，
+    // 不能按 UI 排列顺序逐节校验；同一目标出现两次也不能写到一半才冲突。
+    let mut targets = std::collections::BTreeSet::new();
     for s in arr {
+        let file = s["file"].as_str().unwrap_or("");
+        if !targets.insert(file.to_string()) {
+            errs.push(format!("{file}：同一份草稿里目标文件重复"));
+        }
+    }
+    if !errs.is_empty() {
+        return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+    }
+
+    // 版本、目标与空内容也整批预检。否则前两节已经覆盖，第三节才发现用户在审阅
+    // 期间改过文件，会得到一半新一半旧的长期记忆。
+    for s in arr {
+        let file = s["file"].as_str().unwrap_or("");
+        if crate::memory::write_mode_for(file).is_none() || !mem_allowed(file) {
+            errs.push(format!("{file}：不是允许写入的持久层文件"));
+            continue;
+        }
+        if s["text"].as_str().is_none_or(|text| text.trim().is_empty()) {
+            errs.push(format!("{file}：内容是空的"));
+            continue;
+        }
+        let Some(expected) = s["base_revision"].as_str() else {
+            errs.push(format!("{file}：草稿缺少源文件版本，请重新蒸馏"));
+            continue;
+        };
+        let current = match std::fs::read_to_string(root.join(file)) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                errs.push(format!("{file}：读取当前文件失败 {e}"));
+                continue;
+            }
+        };
+        if crate::memory::content_revision(current.as_deref()) != expected {
+            errs.push(format!("{file}：审阅期间文件已变化，请重新蒸馏后再合并"));
+        }
+    }
+    if !errs.is_empty() {
+        return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+    }
+
+    let needs_playbook = arr.iter().any(|s| {
+        s["file"].as_str().is_some_and(|file| {
+            file == "playbook.toml" || file.starts_with("cases/")
+        })
+    });
+    if needs_playbook {
+        let current_playbook = match std::fs::read_to_string(root.join("playbook.toml")) {
+            Ok(text) => text,
+            Err(e) => {
+                errs.push(format!("playbook.toml：读取当前场景库失败 {e}"));
+                return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+            }
+        };
+        let prospective_playbook_text = match arr.iter().find(|s| s["file"] == "playbook.toml") {
+            Some(section) => match crate::scene::Playbook::merge_toml(
+                &current_playbook,
+                section["text"].as_str().unwrap_or(""),
+            ) {
+                Ok(text) => text,
+                Err(e) => {
+                    errs.push(format!("playbook.toml：{e}"));
+                    return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+                }
+            },
+            None => current_playbook,
+        };
+        let prospective_playbook = match crate::scene::Playbook::from_toml_str(&prospective_playbook_text) {
+            Ok(playbook) => playbook,
+            Err(e) => {
+                errs.push(format!("playbook.toml：当前或合并后的场景库无效：{e}"));
+                return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+            }
+        };
+        for s in arr.iter().filter(|s| {
+            s["file"].as_str().is_some_and(|file| file.starts_with("cases/"))
+        }) {
+            let file = s["file"].as_str().unwrap_or("");
+            let text = s["text"].as_str().unwrap_or("");
+            if let Err(e) = crate::memory::validate_case_dependencies(file, text, &prospective_playbook) {
+                errs.push(format!("{file}：{e}"));
+            }
+        }
+        if !errs.is_empty() {
+            return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+        }
+    }
+
+    let mut ordered = arr.iter().collect::<Vec<_>>();
+    // 案例若引用同批新增场景，先让场景库落盘，避免中间出现悬空引用。
+    ordered.sort_by_key(|s| if s["file"] == "playbook.toml" { 0 } else { 1 });
+    for s in ordered {
         let file = s["file"].as_str().unwrap_or("").to_string();
         let text = s["text"].as_str().unwrap_or("").to_string();
-        if !mem_allowed(&file) || crate::memory::write_mode_for(&file).is_none() {
+        let Some(mode) = crate::memory::write_mode_for(&file) else {
+            errs.push(format!("{file}：不是允许写入的持久层文件"));
+            continue;
+        };
+        if !mem_allowed(&file) {
             errs.push(format!("{file}：不是允许写入的持久层文件"));
             continue;
         }
@@ -964,12 +1064,35 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
             continue;
         }
         let path = root.join(&file);
-        let append = s["mode"].as_str() == Some("append");
-        let merged = if append {
-            let cur = std::fs::read_to_string(&path).unwrap_or_default();
-            format!("{}\n\n{}\n", cur.trim_end(), text.trim())
-        } else {
-            format!("{}\n", text.trim())
+        let current = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                errs.push(format!("{file}：读取当前文件失败 {e}"));
+                continue;
+            }
+        };
+        let expected = s["base_revision"].as_str().unwrap_or("");
+        let actual = crate::memory::content_revision(current.as_deref());
+        if actual != expected {
+            errs.push(format!("{file}：审阅期间文件已变化，请重新蒸馏后再合并"));
+            continue;
+        }
+        let merged = match mode {
+            crate::memory::WriteMode::Replace => format!("{}\n", text.trim()),
+            crate::memory::WriteMode::Merge => {
+                let Some(current) = current.as_deref() else {
+                    errs.push(format!("{file}：当前场景库不存在，不能应用场景 diff"));
+                    continue;
+                };
+                match crate::scene::Playbook::merge_toml(current, &text) {
+                    Ok(merged) => merged,
+                    Err(e) => {
+                        errs.push(format!("{file}：{e}"));
+                        continue;
+                    }
+                }
+            }
         };
         if let Err(e) = crate::memory::validate(&file, &merged) {
             errs.push(format!("{file}：{e}"));
@@ -985,7 +1108,7 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
     }
 
     app.push(json!({ "t": "memory", "files": memory_files(app) }));
-    // 蒸馏往 playbook 里追加了场景 ⇒ 场景块也得跟着刷。
+    // 蒸馏往 playbook 里合并了场景 ⇒ 场景块也得跟着刷。
     // 不刷的话，界面上要到下次重启才看得到那条新场景 —— 而用户刚刚亲手写入了它。
     if done.iter().any(|f| f == "playbook.toml")
         && let Ok(text) = std::fs::read_to_string(root.join("playbook.toml"))
@@ -1190,6 +1313,47 @@ mod tests {
         for good in ["project.md", "cases/example.md", "draft-12345.md"] {
             assert!(mem_allowed(good), "{good}");
         }
+    }
+
+    #[tokio::test]
+    async fn distill_checks_case_dependencies_against_the_selected_playbook_diff() {
+        let app = fixture().await;
+        let _ = Memory::load_or_bootstrap(&app.dir.join("memory")).await;
+        let playbook_path = app.dir.join("memory/playbook.toml");
+        let current = std::fs::read_to_string(&playbook_path).unwrap();
+        let playbook_revision = crate::memory::content_revision(Some(&current));
+        let missing_revision = crate::memory::content_revision(None);
+        let case = "---\nid = \"new-case\"\ntitle = \"新案例\"\nscenes = [\"new_scene\"]\n---\n正文";
+
+        let rejected = distill_apply(&app, &json!([{
+            "file": "cases/new-case.md",
+            "mode": "replace",
+            "text": case,
+            "base_revision": missing_revision,
+        }]));
+        assert_eq!(rejected["ok"], 0);
+        assert!(rejected["errors"].to_string().contains("不存在的场景"));
+        assert!(!app.dir.join("memory/cases/new-case.md").exists());
+
+        let accepted = distill_apply(&app, &json!([
+            {
+                "file": "cases/new-case.md",
+                "mode": "replace",
+                "text": case,
+                "base_revision": crate::memory::content_revision(None),
+            },
+            {
+                "file": "playbook.toml",
+                "mode": "merge",
+                "text": "[[scene]]\nid = \"new_scene\"\nlabel = \"新场景\"\nwhen = \"出现新条件\"\nguidance = \"核查新条件\"\ntools = []",
+                "base_revision": playbook_revision,
+            },
+        ]));
+        assert_eq!(accepted["ok"], 2, "{accepted}");
+        let updated = std::fs::read_to_string(&playbook_path).unwrap();
+        assert!(crate::scene::Playbook::from_toml_str(&updated).unwrap().get("new_scene").is_some());
+        assert!(app.dir.join("memory/cases/new-case.md").exists());
+        cleanup(app).await;
     }
 
     #[tokio::test]

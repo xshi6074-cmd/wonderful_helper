@@ -147,10 +147,7 @@ impl Tool for FsRead {
     }
 
     fn description(&self) -> &str {
-        "读一个文件，带行号。只读，且只能读授权目录内的文件。\
-         args: {path: 相对或绝对路径, offset?: 起始行号（1 起，默认 1）, limit?: 读多少行}。\
-         文件大时先读前几百行，再按需要挪 offset 继续 —— 不要试图一次读完。\
-         工具抓回来的网页也在这里读，路径形如 workspace/xxx.md。"
+        "读取 path 指定的文本文件，可用从 1 开始的 offset 和可选 limit 分页。需要核对实现时读取定义、调用及配置中足以支撑结论的部分。引用真实路径和位置；被截断或未读部分仍未知。不把文本读取能力说成执行代码或通用 PDF 解析能力。"
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -275,9 +272,7 @@ impl Tool for FsGrep {
     }
 
     fn description(&self) -> &str {
-        "在授权目录里按正则搜内容，返回 路径:行号: 内容。遵守 .gitignore。\
-         args: {pattern: 正则, path?: 从哪个目录开始, glob?: 只搜匹配的文件如 \"*.py\", max?: 最多几条}。\
-         先用它定位，再用 fs_read 读那一段 —— 不要为了找一行内容去通读整个文件。"
+        "用 pattern 检索文本，可用 path、glob、max 限定范围和结果数。检索命中是定位线索；要判断控制流、条件分支或语义，应读取上下文。结果受范围、忽略规则和截断影响，不把未命中当成完整否定证据。"
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -421,9 +416,7 @@ impl Tool for FsFind {
     }
 
     fn description(&self) -> &str {
-        "按文件名模式找文件，遵守 .gitignore。\
-         args: {glob: 如 \"**/*.py\" 或 \"train*.py\", path?: 从哪个目录开始}。\
-         想知道某个东西在哪个文件里用 fs_grep；只想按名字找用这个。"
+        "按 glob 查找文件，可用 path 限定范围。适用于已知文件名、扩展名或目录模式。未命中时检查范围和忽略规则，不直接断言仓库不存在该功能。"
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -501,9 +494,7 @@ impl Tool for RepoTree {
     }
 
     fn description(&self) -> &str {
-        "看一个目录的结构：文件树 + 按扩展名的统计。遵守 .gitignore。\
-         args: {path?: 目录, depth?: 展开几层（默认 3）}。\
-         刚接触一个仓库时先用它，比一个个 fs_find 快得多。"
+        "查看给定目录的结构以定位项目入口。path 可选，depth 可选、默认 3。输出只能证明所列范围；不要把深度限制或忽略规则造成的缺失说成文件不存在。找到目标区域后用检索或读取工具核对实现。"
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -608,10 +599,7 @@ impl Tool for WebFetch {
     }
 
     fn description(&self) -> &str {
-        "抓一个网址，转成正文存到 workspace/，返回开头一段和存放路径。\
-         args: {url: 完整网址, lines?: 先看多少行（默认 80）}。\
-         只允许抓白名单域名。正文全文在返回的路径里，用 fs_read / fs_grep 继续看 —— \
-         不要指望这个工具把整页内容都吐给你。"
+        "获取 url 对应的可访问内容并返回本地保存路径及文本前缀，lines 默认 80。优先使用原始论文、官方文档和作者仓库；需要更多内容时读取返回的本地文本。此工具不是搜索引擎，不保证能访问登录页、动态页面或解析所有 PDF。失败、正文缺失和只取得摘要必须明确说明，不补写未读内容。"
     }
 
     fn schema(&self) -> serde_json::Value {

@@ -233,9 +233,27 @@ impl Tool for AskUser {
     }
 
     fn description(&self) -> &str {
-        "向用户提一个带候选项的问题。args: {question: string, options: [string]}。
-         新手答不上开放式问题，所以只在你能给出具体候选项时用它；想不出候选项就在正文里直接问。
-         问完通常应该结束本轮等用户回答。"
+        "向用户呈现一个会实际改变当前方案的问题和少量可选答案。适用于必须由用户决定的目标/预算/偏好，或需要用户补充而现有资料无法确认的信息。不用于替代仓库查证，不要求用户替助手回答可自行推导的问题，也不为已授权工作重复申请确认。\n\n\
+         参数 question 是完整问题；options 是候选回答的字符串数组。通常提供 2—4 个有实质区别的选项，在选项中简述关键代价或适用条件；可以标出推荐，但不能伪装为用户已选择。开放式原理探索优先直接在回复中提问，除非确实存在有意义的分支选项。\n\n\
+         调用只代表问题已呈现，不代表用户已作答。等待中的问题不能作为已确认决定写入图或笔记。若后续行动依赖回答，记录未决项后结束本轮；有不依赖回答的工作可先完成。收到用户回答后更新对应决策并检查受影响的部分。避免在同一轮反复提出重叠问题。"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string", "minLength": 1 },
+                "options": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "uniqueItems": true,
+                    "items": { "type": "string", "minLength": 1 }
+                }
+            },
+            "required": ["question", "options"],
+            "additionalProperties": false
+        })
     }
 
     fn concurrency(&self) -> Concurrency {
@@ -244,16 +262,10 @@ impl Tool for AskUser {
 
     fn run<'a>(&'a self, call: Call, _token: CancellationToken) -> crate::model::BoxFuture<'a, ToolResult> {
         Box::pin(async move {
-            let q = call.args.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let opts: Vec<String> = call
-                .args
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            if q.is_empty() {
-                return ToolResult::failed(&call, "缺少 question");
-            }
+            let _ = match Self::parse(&call) {
+                Ok(parsed) => parsed,
+                Err(e) => return ToolResult::failed(&call, e),
+            };
             // 注意：这里不阻塞等待用户。阻塞会让 turn 挂在一个人类时间尺度的等待上，
             // 打断、插话、落盘全都得排队。用户的回答走下一轮的正常输入路径。
             //
@@ -261,26 +273,36 @@ impl Tool for AskUser {
             // 所以即使这一轮就此结束、界面刷新、进程重启，那道选择题也还在。
             ToolResult::ok(
                 &call,
-                format!(
-                    "已把问题和 {} 个候选项呈现给用户，等待回复。现在可以结束本轮了。",
-                    opts.len()
-                ),
+                "问题已呈现，尚未收到用户回答。依赖该回答的决策仍未确定。",
             )
         })
     }
 }
 
 impl AskUser {
-    /// 从一次调用里取出问题与选项，供 turn 侧推 UI 事件。
-    pub fn parse(call: &Call) -> Option<(String, Vec<String>)> {
-        let q = call.args.get("question")?.as_str()?.to_string();
-        let opts = call
+    /// 从一次调用里校验并取出问题与选项。只有成功后 turn 才产生 Asked/UI 事件。
+    pub fn parse(call: &Call) -> Result<(String, Vec<String>), String> {
+        let q = call.args.get("question").and_then(|v| v.as_str()).map(str::trim)
+            .filter(|s| !s.is_empty()).ok_or_else(|| "question 必须是非空字符串".to_string())?
+            .to_string();
+        let raw = call
             .args
             .get("options")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        Some((q, opts))
+            .ok_or_else(|| "options 必须是数组".to_string())?;
+        if !(2..=4).contains(&raw.len()) {
+            return Err("options 必须包含 2—4 个候选项".into());
+        }
+        let mut opts = Vec::with_capacity(raw.len());
+        for value in raw {
+            let option = value.as_str().map(str::trim).filter(|s| !s.is_empty())
+                .ok_or_else(|| "options 只能包含非空字符串".to_string())?;
+            if opts.iter().any(|seen| seen == option) {
+                return Err(format!("options 含重复项：{option}"));
+            }
+            opts.push(option.to_string());
+        }
+        Ok((q, opts))
     }
 }
 

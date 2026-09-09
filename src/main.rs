@@ -411,18 +411,23 @@ async fn s01_normal_turn() {
 async fn s02_scene_injected() {
     head("S02", "场景选定后真的灌进 prompt");
     let m = MockModel::new()
-        .on_judge(judge_of("check_assumption"))
+        .on_judge(judge_of("need_ablation"))
         .on_answer(chunks(&["嗯"]));
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("直接上大实验", SendMode::Queue).await;
     r.quiet(1).await;
     let ap = r.model.answer_prompt(0);
     let jp = r.model.judge_prompt(0);
-    let g = Playbook::builtin().get("check_assumption").unwrap().guidance.clone();
+    let g = Playbook::builtin().get("need_ablation").unwrap().guidance.clone();
     ok(ap.contains("本轮场景"), "回答段带场景标题");
     ok(ap.contains(g.lines().next().unwrap_or("")), "回答段带 guidance 正文");
     ok(!jp.contains(g.lines().next().unwrap_or("_x_")), "判断段不含 guidance（两段式省的就是这个）");
     ok(jp.contains("直接上大实验"), "判断段含完整对话");
+    ok(
+        jp.contains("只做场景选择") && !jp.contains("从结果判据逆推完整实验"),
+        "★ 判断段使用独立任务提示词，不混入主助手交付职责",
+    );
+    ok(ap.contains("从结果判据逆推完整实验"), "回答段使用新版主助手提示词");
     r.finish().await;
 }
 
@@ -635,6 +640,11 @@ async fn s09_question_answer() {
     let prompt = r.model.answer_prompt(r.model.answer_calls() - 1);
     ok(prompt.contains("对提问"), "组装 prompt 时写明了这是对提问的回答");
     ok(open_questions(&tl).is_empty(), "扫时间线也认为没有未答提问");
+    let invalid = ask_call("bad", "重复选项？", &["一样", "一样"]);
+    ok(
+        premortem::tools::AskUser::parse(&invalid).is_err(),
+        "★ ask_user 在产生 Asked 之前拒绝重复选项",
+    );
     let s = r.finish().await;
     inv::all(&s.events, &s.ws, &s.cost);
 }
@@ -1982,7 +1992,7 @@ async fn s41_judge_runs_once_per_turn() {
     // 于是判断段跟着跑四次，而判断段吃的是和回答段一样的完整对话 ——
     // 等于把最贵的那段 prompt 发了四遍，换来一个几乎不会变的场景 id。
     let m = MockModel::new()
-        .on_judge(judge_of("check_assumption"))
+        .on_judge(judge_of("need_ablation"))
         .on_answer(vec![StreamEvent::ToolCalls(vec![call("t1", "echo")])])
         .on_answer(vec![StreamEvent::ToolCalls(vec![call("t2", "echo")])])
         .on_ops(&[Op::set("spec.claim", "读完才写的")])
@@ -2000,7 +2010,7 @@ async fn s41_judge_runs_once_per_turn() {
         st.loops, st.tools_run, st.inferred_ops, st.scenes.join("+")
     );
     ok(st.loops == 4, "四圈回答循环");
-    ok(st.scenes == vec!["check_assumption".to_string()], "场景是判断段那一次定下的，全程没变");
+    ok(st.scenes == vec!["need_ablation".to_string()], "场景是判断段那一次定下的，全程没变");
     ok(
         s.events.iter().filter(|e| e.body.tag() == "judged").count() == 1,
         "★ 时间线上只有一条 judged",
@@ -2107,7 +2117,7 @@ async fn s43_tool_names_resolve() {
         }
     }
     ok(bad.is_empty(), &format!("★ 内置场景 × 两个 mode，工具名全部认得（对不上的：{bad:?}）"));
-    for must in ["record_graph", "record_note", "fs_read", "fs_grep", "fs_find", "repo_tree"] {
+    for must in ["record_graph", "record_note", "ask_user", "fs_read", "fs_grep", "fs_find", "repo_tree"] {
         ok(known.contains(must), &format!("{must} 在注册表里"));
     }
 
@@ -2146,7 +2156,14 @@ async fn s43_tool_names_resolve() {
         d(&ex_e, "record_graph") != d(&ex_g, "record_graph"),
         "★ 同一个工具在两个 mode 下的说明不同",
     );
-    ok(d(&ex_g, "record_graph").contains("编码 agent"), "行动 mode 的说明要求图能直接交下去");
+    ok(d(&ex_g, "record_graph").contains("交给编码者"), "行动 mode 的说明要求图能直接交下去");
+    let ask = ex_g.specs.iter().find(|s| s.name == "ask_user").unwrap();
+    ok(
+        ask.schema["properties"]["options"]["minItems"] == 2
+            && ask.schema["properties"]["options"]["maxItems"] == 4
+            && ask.schema["properties"]["options"]["uniqueItems"] == true,
+        "★ ask_user 注册出去的 schema 与 2—4 项、去重约束一致",
+    );
     ok(
         prompts.mode["explore"].note != prompts.mode["go"].note,
         "两个 mode 的 system 段也不同",
@@ -2164,26 +2181,27 @@ async fn s44_distill_sections_apply() {
         "when = \"对照组和实验组用了不同的随机种子\"\nguidance = \"提醒他固定种子\"\n",
         "tools = []\n\n",
         "## cases/seed-drift.md\n---\nid = \"seed-drift\"\ntitle = \"种子漂移\"\n",
-        "scenes = [\"check_assumption\"]\n---\n那次的教训。\n",
+        "scenes = [\"need_ablation\"]\n---\n那次的教训。\n",
     );
     let secs = premortem::memory::parse_draft(draft);
     ok(secs.len() == 4, &format!("切出 4 节（实际 {}）", secs.len()));
     ok(secs[0].file == "project.md" && secs[0].mode == premortem::memory::WriteMode::Replace, "叙述文件是整份替换");
-    ok(secs[2].file == "playbook.toml" && secs[2].mode == premortem::memory::WriteMode::Append, "★ 场景库是追加，不覆盖用户的场景");
+    ok(secs[2].file == "playbook.toml" && secs[2].mode == premortem::memory::WriteMode::Merge, "★ 场景库按 id 合并，不覆盖未列出的场景");
     ok(!secs[0].text.contains("开场白"), "第一个合法标题之前的东西丢掉");
 
-    // 写回：追加到 playbook 之后仍然是合法的场景库
+    // 写回：场景 diff 按 id 合并后仍然是合法的场景库
     let dir = tmpdir("distill");
     let mem = dir.join("memory");
     let _ = Memory::load_or_bootstrap(&mem).await; // 先 bootstrap 出基础文件
     let mut wrote = 0;
     for s in &secs {
         let path = mem.join(&s.file);
-        let merged = if s.mode == premortem::memory::WriteMode::Append {
-            let cur = std::fs::read_to_string(&path).unwrap_or_default();
-            format!("{}\n\n{}\n", cur.trim_end(), s.text.trim())
-        } else {
-            format!("{}\n", s.text.trim())
+        let merged = match s.mode {
+            premortem::memory::WriteMode::Merge => {
+                let cur = std::fs::read_to_string(&path).unwrap_or_default();
+                Playbook::merge_toml(&cur, &s.text).expect("场景 diff 应能合并")
+            }
+            premortem::memory::WriteMode::Replace => format!("{}\n", s.text.trim()),
         };
         ok(premortem::memory::validate(&s.file, &merged).is_ok(), &format!("{} 校验通过", s.file));
         if let Some(p) = path.parent() {
@@ -2195,15 +2213,36 @@ async fn s44_distill_sections_apply() {
     ok(wrote == 4, "四个文件都写了");
 
     let back = Memory::load_or_bootstrap(&mem).await;
-    ok(back.warnings.is_empty(), "★ 写回之后持久层还读得动（追加没把 TOML 弄坏）");
+    ok(back.warnings.is_empty(), "★ 写回之后持久层还读得动（合并没把 TOML 弄坏）");
     ok(back.playbook.get("seed_control").is_some(), "★ 新场景真的进了场景库");
     ok(back.playbook.get("none").is_some(), "原有场景一条没丢");
     ok(back.project.contains("新的项目描述"), "project.md 换成了新的");
     ok(back.cases.iter().any(|c| c.id == "seed-drift"), "★ 新案例读得出来");
 
+    let update = concat!(
+        "[[scene]]\nid = \"seed_control\"\nlabel = \"固定随机性\"\n",
+        "when = \"比较实验的随机性口径不同\"\nguidance = \"核对种子与重复次数\"\n",
+        "tools = []\n",
+    );
+    let current = std::fs::read_to_string(mem.join("playbook.toml")).unwrap();
+    let count_before = Playbook::from_toml_str(&current).unwrap().scenes.len();
+    let updated = Playbook::merge_toml(&current, update).unwrap();
+    let updated_pb = Playbook::from_toml_str(&updated).unwrap();
+    ok(updated_pb.scenes.len() == count_before, "★ 同 ID diff 是替换，不会追加出重复场景");
+    ok(updated_pb.get("seed_control").unwrap().label == "固定随机性", "同 ID 场景内容已更新");
+    ok(updated_pb.default_tools == back.playbook.default_tools, "场景 diff 不能顺手改 default_tools");
+    ok(
+        premortem::memory::validate_case_dependencies(
+            "cases/bad.md",
+            "---\nid = \"bad\"\ntitle = \"坏引用\"\nscenes = [\"missing_scene\"]\n---\n正文",
+            &updated_pb,
+        )
+        .is_err(),
+        "★ 案例引用不存在的场景会在写回前被拦住",
+    );
+
     // 坏内容必须在写之前被拦住 —— 它的症状要到下一轮才以「场景全没了」的形式冒出来
-    let broken = format!("{}\n\n这不是 TOML，只是一段话。\n", std::fs::read_to_string(mem.join("playbook.toml")).unwrap());
-    ok(premortem::memory::validate("playbook.toml", &broken).is_err(), "★ 追加成非法 TOML 被拦住");
+    ok(Playbook::merge_toml(&current, "这不是 TOML，只是一段话。").is_err(), "★ 非法场景 diff 被拦住");
     ok(
         premortem::memory::validate("cases/x.md", "没有 frontmatter 的正文").is_err(),
         "★ 缺 frontmatter 的案例也被拦住（否则它只是静默读不出来）",
@@ -2216,7 +2255,7 @@ async fn s44_distill_sections_apply() {
 
 async fn s45_multiple_scenes() {
     head("S45", "★ 场景是多选：几份 guidance 一起进 prompt，工具与案例取并集");
-    // 一轮里「目标还没说清」和「预算和方案对不上」可以同时成立。
+    // 一轮里「需要从代码核查」和「预算和方案对不上」可以同时成立。
     // 只准判一个的话，另一条的 guidance 就永远注不进去 —— 而那正是它存在的理由。
     let dir = tmpdir("multiscene");
     let mem = dir.join("memory");
@@ -2224,17 +2263,17 @@ async fn s45_multiple_scenes() {
     // 两条案例，各服务一个场景。命中两个场景 ⇒ 两条都该注入。
     std::fs::write(
         mem.join("cases/a.md"),
-        "---\nid = \"a\"\ntitle = \"案例甲\"\nscenes = [\"clarify_goal\"]\n---\n甲的正文。\n",
+        "---\nid = \"a\"\ntitle = \"案例甲\"\nscenes = [\"trace_code\"]\n---\n甲的正文。\n",
     )
     .unwrap();
     std::fs::write(
         mem.join("cases/b.md"),
-        "---\nid = \"b\"\ntitle = \"案例乙\"\nscenes = [\"cheap_first\"]\n---\n乙的正文。\n",
+        "---\nid = \"b\"\ntitle = \"案例乙\"\nscenes = [\"cost_budget\"]\n---\n乙的正文。\n",
     )
     .unwrap();
 
     let m = MockModel::new()
-        .on_judge(judge_all(&["clarify_goal", "cheap_first"]))
+        .on_judge(judge_all(&["trace_code", "cost_budget"]))
         .on_answer(chunks(&["两边都看到了"]));
     let opts = RigOpts { memory_dir: Some(mem.clone()), ..Default::default() };
     let r = Rig::build(m, toolkit::register(Registry::new(), &toolchain(&dir, None).0), opts).await;
@@ -2244,12 +2283,11 @@ async fn s45_multiple_scenes() {
     let ap = r.model.answer_prompt(0);
     let pb = Playbook::builtin();
     let k = |id: &str| pb.get(id).unwrap().guidance.lines().next().unwrap().to_string();
-    ok(ap.contains(&k("clarify_goal")), "★ 第一个场景的 guidance 进了 prompt");
-    ok(ap.contains(&k("cheap_first")), "★ 第二个场景的 guidance 也进了");
+    ok(ap.contains(&k("trace_code")), "★ 第一个场景的 guidance 进了 prompt");
+    ok(ap.contains(&k("cost_budget")), "★ 第二个场景的 guidance 也进了");
     ok(ap.contains("本轮场景 1/2") && ap.contains("本轮场景 2/2"), "两条各自成段，不是糊成一段");
     ok(ap.contains("案例甲") && ap.contains("案例乙"), "★ 案例取并集");
-    // clarify_goal 要 ask_user，cheap_first 不要；并集里必须有
-    ok(ap.contains("ask_user") || r.model.answer_calls() > 0, "工具并集算得出来");
+    ok(r.model.answer_calls() > 0, "多场景回答段正常运行");
 
     let s = r.finish().await;
     let st = stats_of(&s.events).expect("stats");
@@ -2267,18 +2305,18 @@ async fn s46_scene_edges() {
     head("S46", "★ 多场景的边界：上限、去重、认不出的丢掉、老时间线读得回来");
     let pb = Playbook::builtin();
 
-    // 去重 + 顺序按 playbook 的 id 序（所以 prompt 里场景先后与模型给的顺序无关）
+    // 去重 + 保留 judge 给出的影响优先级
     let (rs, unknown) = pb.resolve(&[
-        "cheap_first".into(), "clarify_goal".into(), "cheap_first".into(), "不存在".into(),
+        "cost_budget".into(), "trace_code".into(), "cost_budget".into(), "不存在".into(),
     ]);
     ok(unknown == vec!["不存在".to_string()], "认不出的单独回报，不混进结果");
     let ids: Vec<String> = rs.iter().map(|s| s.id.clone()).collect();
-    ok(ids == vec!["cheap_first".to_string(), "clarify_goal".to_string()], &format!("去重且按 id 序：{ids:?}"));
+    ok(ids == vec!["cost_budget".to_string(), "trace_code".to_string()], &format!("去重且保留影响顺序：{ids:?}"));
 
-    // 工具并集：clarify_goal 要 ask_user，trace_code 要 fs_*，两个一起选就都有
-    let both = pb.resolve(&["clarify_goal".into(), "trace_code".into()]).0;
+    // 工具并集：默认工具与场景工具一起暴露，且不重复
+    let both = pb.resolve(&["paper_reading".into(), "trace_code".into()]).0;
     let tools = pb.exposed_tools(&both, &[]);
-    ok(tools.contains(&"ask_user".to_string()) && tools.contains(&"fs_grep".to_string()),
+    ok(tools.contains(&"web_fetch".to_string()) && tools.contains(&"fs_grep".to_string()),
        "★ 两个场景的工具取并集");
     let mut sorted = tools.clone();
     sorted.sort();
@@ -2297,9 +2335,9 @@ async fn s46_scene_edges() {
     let b: Body = serde_json::from_str(old).expect("★ 老的 judged 事件必须还读得出来");
     ok(matches!(&b, Body::Judged { scenes, .. } if scenes == &["trace_code".to_string()]),
        "★ 单个字符串收成一元数组（否则改完所有历史会话都读不回来）");
-    let old2 = r#"{"kind":"scene_overridden","from":"none","to":"cheap_first"}"#;
+    let old2 = r#"{"kind":"scene_overridden","from":"none","to":"cost_budget"}"#;
     let b2: Body = serde_json::from_str(old2).expect("老的 scene_overridden 也要读得出来");
-    ok(matches!(&b2, Body::SceneOverridden { to, .. } if to == &["cheap_first".to_string()]), "同上");
+    ok(matches!(&b2, Body::SceneOverridden { to, .. } if to == &["cost_budget".to_string()]), "同上");
     // 已废弃的 phase_set 也不能让整条会话读不回来
     let old3 = r#"{"kind":"phase_set","to":"Handoff"}"#;
     ok(serde_json::from_str::<Body>(old3).is_ok(), "★ 删掉的阶段事件仍然反序列化得了（老库能开）");

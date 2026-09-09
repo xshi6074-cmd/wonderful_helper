@@ -323,18 +323,22 @@ impl HttpClient {
 fn judge_tool_spec() -> ToolSpec {
     ToolSpec {
         name: JUDGE_TOOL.into(),
-        description: "记录这一轮的场景判定。必须调用一次，且只调这一个。".into(),
+        description: "提交本轮场景选择。只调用此工具一次，不提交图或笔记操作。scenes 必须来自本轮可用目录，按影响排序，去重后 1—3 个；无适用项为 [\"none\"]，none 不与其他项共存。rationale 用一两句话指出当前可见的触发依据，不输出长篇推理，不将风险信号写成已确认错误。".into(),
         schema: json!({
             "type": "object",
             "properties": {
                 "scenes": {
                     "type": "array",
-                    "items": { "type": "string" },
-                    "description": "命中的场景 id，来自场景目录。可以多个 ——                                     「目标还没说清」和「预算和方案对不上」经常同时成立。                                    最多 3 个，按重要性排序。一个都不匹配就填 [\"none\"]"
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "uniqueItems": true,
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "命中的场景 id，来自场景目录，按当前影响排序；无适用项填 [\"none\"]"
                 },
-                "rationale": { "type": "string", "description": "为什么判成这些场景，一两句" }
+                "rationale": { "type": "string", "minLength": 1, "description": "为什么判成这些场景，一两句" }
             },
-            "required": ["scenes", "rationale"]
+            "required": ["scenes", "rationale"],
+            "additionalProperties": false
         }),
     }
 }
@@ -509,17 +513,40 @@ fn parse_judge(api: Api, v: &Value) -> Result<JudgeOut, ModelError> {
         }
     };
 
-    // 收数组，也收单个字符串 —— 模型偶尔会不看 schema 直接给一个 id，
-    // 为此判整轮失败不划算。
-    let scenes: Vec<String> = match &input["scenes"] {
-        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-        Value::String(s) => vec![s.clone()],
-        _ => match input["scene"].as_str() {
-            Some(s) => vec![s.to_string()],
-            None => vec!["none".to_string()],
-        },
+    let Some(raw) = input["scenes"].as_array() else {
+        return Err(ModelError::Schema("record_judgement.scenes 必须是数组".into()));
     };
-    let rationale = input["rationale"].as_str().unwrap_or("").to_string();
+    let mut scenes = Vec::with_capacity(raw.len());
+    for value in raw {
+        let Some(id) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(ModelError::Schema(
+                "record_judgement.scenes 只能包含非空字符串".into(),
+            ));
+        };
+        if scenes.iter().any(|seen| seen == id) {
+            return Err(ModelError::Schema(format!(
+                "record_judgement.scenes 含重复项 {id}"
+            )));
+        }
+        scenes.push(id.to_string());
+    }
+    if scenes.is_empty() || scenes.len() > crate::turn::MAX_SCENES {
+        return Err(ModelError::Schema(format!(
+            "record_judgement.scenes 必须有 1—{} 项",
+            crate::turn::MAX_SCENES
+        )));
+    }
+    if scenes.iter().any(|id| id == "none") && scenes.len() != 1 {
+        return Err(ModelError::Schema(
+            "record_judgement 的 none 不能与其他场景并列".into(),
+        ));
+    }
+    let rationale = input["rationale"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ModelError::Schema("record_judgement.rationale 必须是非空字符串".into()))?
+        .to_string();
     Ok(JudgeOut { scenes, rationale, usage })
 }
 

@@ -297,38 +297,6 @@ fn has_alias(body: &Body) -> bool {
 /// 不能变成「应用退不出去」。
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// 一键蒸馏的指令。产出是给**下一个新对话**快速入手用的。
-/// 蒸馏指令。
-///
-/// # 为什么标题必须是文件名
-///
-/// 上一版要求的是「## 项目 / ## 合作偏好 / …」这样的人话标题，产物是一整篇
-/// Markdown。要让它生效，用户得自己打开草稿、自己判断哪一段属于哪个文件、
-/// 自己复制粘贴 —— 那不是「一键」。
-///
-/// 现在标题直接就是目标文件名，程序按它切成 [`crate::memory::Section`]，
-/// UI 逐节预览 / 修改 / 勾选，一次写回。切不出来的就退回整篇预览，不丢东西。
-const DISTILL_PROMPT: &str = "把这段会话沉淀成持久记忆的更新草稿。\n\n\
-     输出**必须**用下面这几个二级标题分节，标题就是目标文件名，一个字都不要改。\n\
-     没有内容的小节整节省略，不要留占位。\n\n\
-     ## project.md\n\
-     整份替换后的 project.md。概述 / 当前阶段目标 / 进展（跑通并成立的、试过没成立的，各带方法概述）。\n\
-     上面给了你现在这份的内容，**在它基础上增量更新**，别把已有的东西写丢。\n\n\
-     ## preferences.md\n\
-     整份替换后的 preferences.md。这次交互里显现出来的合作偏好。同样是增量更新。\n\n\
-     ## knowledge.md\n\
-     整份替换后的 knowledge.md。用户在哪些点上有储备 / 没储备 / 看不出来，每条附依据。\n\n\
-     ## playbook.toml\n\
-     **追加**到场景库末尾的内容，必须是合法 TOML 的 [[scene]] 块，字段：\n\
-     id / label / when / guidance / tools。只在这次真的出现了新的易犯错场景时才写这一节。\n\
-     tools 里只能填这一轮实际存在的工具名。\n\n\
-     ## cases/<短横线小写英文 id>.md\n\
-     一条值得留存的参考案例，格式是 TOML frontmatter + 正文：\n\
-     三个减号一行，然后 id / title / scenes 三个字段，再三个减号一行，然后正文。\n\
-     可以有多个这样的小节，每个对应一个文件。没有值得留存的就整节省略。\n\n\
-     只写这段会话里真实发生过的事，不要补全、不要推测。\n\
-     写给一个没参与过这段对话的新会话看：它读完应该能接手这个项目。";
-
 /// 启动 Core。
 pub fn start(deps: CoreDeps) -> Started {
     let (tx, rx) = mpsc::channel(deps.core_capacity);
@@ -1149,30 +1117,64 @@ impl Core {
         let ui = self.ui.clone();
         let events = self.events.clone();
         let ws = self.ws.clone();
+        let tool_names = self.registry.names();
         let back = CoreHandle::new(self.self_tx.clone());
         let stamp = now_ms() / 1000;
 
         tokio::spawn(async move {
             // 蒸馏也重读持久层：用户可能刚改过，蒸馏该基于他改后的版本增量。
             let mem = Memory::load_or_bootstrap(&dir).await;
-            let mut msgs =
-                vec![Message::system(DISTILL_PROMPT), Message::system(mem.prompt_block())];
+            // 模型的工具工作区未必是本仓库。把真实持久层原文直接灌进任务输入，
+            // 尤其是完整 playbook；模型输出只保留场景级 diff，避免让用户审整份文件。
+            let sources = mem.distill_sources(&dir).await;
+            let source_block = sources
+                .iter()
+                .map(|(file, text)| format!("===== {file} =====\n{text}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let mut msgs = vec![
+                Message::system(mem.prompts.distill.trim()),
+                Message::system(format!(
+                    "实际注册的工具目录：{}\n允许写回：project.md/preferences.md/knowledge.md 整份替换；playbook.toml 按场景 id 合并；cases/*.md 同名替换。\n\n当前持久记忆原文：\n{}",
+                    tool_names.join("、"),
+                    source_block
+                )),
+            ];
             msgs.push(Message::system(format!(
-                "本次会话的推断结果：\n{}",
+                "本次会话当前工作记忆与推断图：\n{}",
                 serde_json::to_string_pretty(&ws).unwrap_or_default()
             )));
+            let changes = crate::event::change_log(&events, None);
+            if !changes.is_empty() {
+                msgs.push(Message::system(format!(
+                    "本次会话的结构化变更事件（按真实序号）：\n{changes}"
+                )));
+            }
             // `assemble_full` 而不是 `assemble`：后者会跳过被折叠的区间、只留摘要，
             // 而长会话里最该被沉淀的恰恰是早期那段。原文一直在时间线上。
             msgs.extend(crate::event::assemble_full(&events));
             match complete(client.as_ref(), msgs, CancellationToken::new()).await {
                 Ok((text, usage)) => {
                     back.cost_out(Role::Subagent, usage).await;
+                    if text.trim().is_empty() {
+                        let _ = ui.send(UiEvent::Distilled {
+                            path: String::new(),
+                            sections: vec![],
+                            error: None,
+                        });
+                        return;
+                    }
                     let p = crate::memory::draft_path(&dir, stamp);
                     let (path, mut error) = match tokio::fs::write(&p, &text).await {
                         Ok(()) => (p.display().to_string(), None),
                         Err(e) => (String::new(), Some(format!("草稿写入失败：{e}"))),
                     };
-                    let sections = crate::memory::parse_draft(&text);
+                    let mut sections = crate::memory::parse_draft(&text);
+                    for section in &mut sections {
+                        section.base_revision = Some(crate::memory::content_revision(
+                            sources.get(&section.file).map(String::as_str),
+                        ));
+                    }
                     if sections.is_empty() && error.is_none() {
                         error = Some(
                             "模型没有按文件名分节，只能整篇看。草稿全文在上面那个路径里。"

@@ -55,6 +55,8 @@ const S = {
 
 let graphApi = globalThis.__graphRenderer || null;
 let graphApiPromise = null;
+let graphZoom = 1;
+let graphFit = true;
 function graphRenderer() {
   if (graphApi) return Promise.resolve(graphApi);
   if (!graphApiPromise) graphApiPromise = import('/graph-renderer.js').then(m => (graphApi = m));
@@ -153,6 +155,7 @@ function onMsg(m) {
       dropBanner('distill-run');
       if (m.error) banner('bad', m.error, 'distill');
       if (S.distill.sections.length) openDistill();
+      else if (!m.error) banner('info', '本次没有可写回的长期记忆更新', 'distill');
       break;
     case 'applied':
       if (m.errors && m.errors.length) banner('bad', m.errors.join('；'), 'distill');
@@ -617,12 +620,15 @@ function drawGraph(g, payload = S.snap?.graph_render) {
     .catch(e => setGraphStatus('#graph-status', { phase: 'error', error: `图组件加载失败：${e.message || e}` }));
 }
 
-function graphContext(renderId, statusSelector, force = false) {
+function graphContext(renderId, statusSelector, force = false, afterReady = null) {
   return {
     renderId, force, sessionId: S.session,
     currentSession: () => S.session,
     onSelect: selectGraphObject,
-    onState: state => setGraphStatus(statusSelector, state),
+    onState: state => {
+      setGraphStatus(statusSelector, state);
+      if (state?.phase === 'ready') afterReady?.();
+    },
   };
 }
 
@@ -665,6 +671,7 @@ function openGraphCanvas() {
   if (!S.snap?.graph_render) return;
   const over = $('#graph-over');
   over.hidden = false;
+  graphFit = true;
   $('#graph-layout').value = S.snap.graph_render.layout || 'elk';
   $('pre', $('#graph-over-src')).textContent = S.snap.graph_render.source;
   renderLargeGraph(true);
@@ -677,8 +684,50 @@ function renderLargeGraph(force = false) {
   $('#graph-layout').value = payload.layout || 'elk';
   $('pre', $('#graph-over-src')).textContent = payload.source;
   graphRenderer().then(api => api.renderGraph(
-    $('#graph-large'), payload, graphContext('graph-expanded', '#graph-over-status', force),
+    $('#graph-large'), payload, graphContext(
+      'graph-expanded', '#graph-over-status', force, () => applyLargeGraphZoom(api),
+    ),
   )).catch(e => setGraphStatus('#graph-over-status', { phase: 'error', error: `图组件加载失败：${e.message || e}` }));
+}
+
+function showGraphZoom(value) {
+  graphZoom = value || 1;
+  const label = $('#graph-zoom-label');
+  if (label) label.textContent = `${Math.round(graphZoom * 100)}%`;
+}
+
+function applyLargeGraphZoom(api) {
+  const host = $('#graph-large');
+  const stage = host?.parentElement;
+  const value = graphFit ? api.fitGraph?.(host, stage) : api.setGraphZoom?.(host, graphZoom);
+  if (value) showGraphZoom(value);
+}
+
+function setLargeGraphZoom(value, event = null) {
+  graphFit = false;
+  graphRenderer().then(api => {
+    const host = $('#graph-large');
+    const stage = host?.parentElement;
+    const before = graphZoom || 1;
+    const rect = stage?.getBoundingClientRect?.();
+    const localX = event && rect ? event.clientX - rect.left : (stage?.clientWidth || 0) / 2;
+    const localY = event && rect ? event.clientY - rect.top : (stage?.clientHeight || 0) / 2;
+    const contentX = (stage?.scrollLeft || 0) + localX;
+    const contentY = (stage?.scrollTop || 0) + localY;
+    const actual = api.setGraphZoom?.(host, value);
+    if (!actual) return;
+    showGraphZoom(actual);
+    if (stage) {
+      const ratio = actual / before;
+      stage.scrollLeft = contentX * ratio - localX;
+      stage.scrollTop = contentY * ratio - localY;
+    }
+  });
+}
+
+function fitLargeGraph() {
+  graphFit = true;
+  graphRenderer().then(api => applyLargeGraphZoom(api));
 }
 
 function closeGraphCanvas() {
@@ -1081,7 +1130,7 @@ function openScenePicker() {
 
 const DI_MODE = {
   replace: ['整份替换', 'rep', '会覆盖这个文件现在的全部内容'],
-  append: ['追加', 'app', '接在文件末尾，原有内容不动'],
+  merge: ['场景级 diff', 'app', '按场景 ID 新增或替换；没有显示的场景保持不动'],
 };
 
 function openDistill() {
@@ -1121,7 +1170,9 @@ function applyDistill() {
   const d = S.distill; if (!d) return;
   const picked = d.sections.filter(s => s.on !== false && s.text.trim());
   if (!picked.length) return banner('bad', '一节都没勾，没有可写的', 'distill');
-  send('distill_apply', { sections: picked.map(s => ({ file: s.file, mode: s.mode, text: s.text })) });
+  send('distill_apply', { sections: picked.map(s => ({
+    file: s.file, mode: s.mode, text: s.text, base_revision: s.base_revision,
+  })) });
 }
 
 
@@ -1497,7 +1548,7 @@ function renderConfigFrom(draft) {
  * 列「系统提示词」他一眼就知道该点哪个。文件名仍然显示在旁边 ——
  * 它是真实存在的东西，藏起来只会让「我自己去改这个文件」变难。 */
 const MEM_NAME = {
-  'prompts.toml': ['系统提示词', '注入模型的全部提示词：角色定位、用户字段约束、折叠指令、两个 mode 各自的说明与工具、推断图的形状词表。'],
+  'prompts.toml': ['系统提示词', '注入模型的全部提示词：主助手、场景判断、折叠与蒸馏角色，两个 mode 各自的说明与工具，以及推断图形状词表。'],
   'project.md': ['项目记忆', '项目概述、阶段目标、进展（成了的和没成的）。新对话靠它快速入手。'],
   'preferences.md': ['合作偏好', '你希望它怎么跟你配合：讲多细、怎么提问、什么时候该打断你。'],
   'knowledge.md': ['知识评估', '你在各知识域的掌握程度。它决定模型是直接问你，还是先把机制讲通。'],
@@ -1670,6 +1721,16 @@ function boot() {
   $('#graph-over-close').onclick = closeGraphCanvas;
   $('#graph-over').onclick = (e) => { if (e.target.id === 'graph-over') closeGraphCanvas(); };
   $('#graph-retry').onclick = () => renderLargeGraph(true);
+  $('#graph-zoom-out').onclick = () => setLargeGraphZoom(graphZoom - 0.1);
+  $('#graph-zoom-in').onclick = () => setLargeGraphZoom(graphZoom + 0.1);
+  $('#graph-zoom-label').onclick = () => setLargeGraphZoom(1);
+  $('#graph-fit').onclick = fitLargeGraph;
+  const graphStage = $('#graph-large').parentElement;
+  graphStage?.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    setLargeGraphZoom(graphZoom + (e.deltaY < 0 ? 0.1 : -0.1), e);
+  }, { passive: false });
   $('#graph-layout').onchange = (e) => {
     const value = e.target.value;
     send('edit', { ops: [{ op: 'render', key: 'layout', value }] });

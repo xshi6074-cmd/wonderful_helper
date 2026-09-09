@@ -135,7 +135,7 @@ pub const MAX_SCENES: usize = 3;
 
 /// 拼 prompt 用的上下文。**每次都从当前视图现拼。**
 fn ctx_of(v: &TurnView, memory: &Memory, mode_note: &str) -> Context {
-    Context::build(&v.ws, v.turn_start, memory, assemble(&v.events), mode_note)
+    Context::build(&v.ws, v.turn_start, memory, assemble(&v.events), v.mode, mode_note)
 }
 
 pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
@@ -181,6 +181,12 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
         {
             let mut ask =
                 vec![Message::system(fold_instruction(&memory.prompts.fold, &probe.inference))];
+            let changes = crate::event::change_log(&v0.events, Some((from, to)));
+            if !changes.is_empty() {
+                ask.push(Message::system(format!(
+                    "待压缩区间内的结构化变更事件（按真实序号）：\n{changes}"
+                )));
+            }
             ask.extend(msgs);
             let fut = complete(ctx.models.subagent.as_ref(), ask, ctx.token.child_token());
             match guarded(&ctx.token, fut).await {
@@ -249,24 +255,46 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
 
         // 场景：用户手动选过 ⇒ 以他的为准。**并且真的注入这些场景的材料** ——
         // 只换标签不换 prompt，等于用户选了半天模型什么都没感觉到。
-        let mut ids: Vec<SceneId> = match &scene_override {
+        let requested: Vec<SceneId> = match &scene_override {
             Some(s) => {
                 stats.scene_overridden = true;
                 s.clone()
             }
             None => judge.scenes.clone(),
         };
-        ids.retain(|id| !mode.disabled_scenes().contains(&id.as_str()));
-        let (resolved, unknown) = memory.playbook.resolve(&ids);
-        if !unknown.is_empty() {
-            // 模型给了不认识的 id ⇒ 丢掉，不报错、不打扰用户，但记进指标
-            stats.scene_unknown = true;
+        // 先按 judge 给出的影响顺序去重，再做目录与模式校验，最后截到上限。
+        // 不能先 resolve 成 BTreeMap 顺序，也不能让 none 与真实场景并列。
+        let mut ranked = Vec::new();
+        let mut rejected = Vec::new();
+        for id in requested {
+            let id = id.trim().to_string();
+            if id.is_empty() || ranked.contains(&id) {
+                rejected.push(if id.is_empty() { "（空 id）".into() } else { id });
+                continue;
+            }
+            if mode.disabled_scenes().contains(&id.as_str()) {
+                rejected.push(format!("{id}（当前模式禁用）"));
+                continue;
+            }
+            ranked.push(id);
         }
-        // 一组场景 = 一组 guidance 全都进 prompt，所以要有上限：
-        // 判断段判出五个场景时，回答段的 prompt 会被 guidance 淹掉，
-        // 而那时候「什么都强调」等于「什么都没强调」。
+        if ranked.len() > 1 && ranked.iter().any(|id| id == "none") {
+            ranked.retain(|id| id != "none");
+            rejected.push("none（不能与其他场景并列）".into());
+        }
+        if ranked.len() > MAX_SCENES {
+            rejected.extend(ranked.drain(MAX_SCENES..).map(|id| format!("{id}（超过上限）")));
+        }
+        let (resolved, unknown) = memory.playbook.resolve(&ranked);
+        if !unknown.is_empty() || !rejected.is_empty() {
+            stats.scene_unknown = !unknown.is_empty();
+            let mut bad = rejected;
+            bad.extend(unknown.iter().map(|id| format!("{id}（目录中不存在）")));
+            ctx.core.emit(ctx.id, Emit::Noted {
+                text: format!("[场景判定已校验] 以下项未采用：{}", bad.join("、")),
+            }).await;
+        }
         let mut ids: Vec<SceneId> = resolved.iter().map(|s| s.id.clone()).collect();
-        ids.truncate(MAX_SCENES);
         // 一个都不剩 ⇒ 回退到 none。playbook 保证它存在。
         if ids.is_empty() {
             ids.push("none".into());
@@ -398,8 +426,7 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                         // 模型选择用选择题提问 ⇒ 提问本身是持久实体，落一条 Asked。
                         // 界面刷新、turn 结束、进程重启，那道题都还在。
                         for c in cs.iter().filter(|c| c.name == ASK_USER) {
-                            if let Some((question, options)) = AskUser::parse(c) {
-                                stats.asked_user += 1;
+                            if let Ok((question, options)) = AskUser::parse(c) {
                                 ctx.core.emit(ctx.id, Emit::Asked {
                                     call_id: c.id.clone(), question, options }).await;
                             }

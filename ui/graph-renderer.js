@@ -56,6 +56,42 @@ export function disposeGraph(host) {
   host.replaceChildren();
 }
 
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 3;
+
+/** 缩放已渲染的 SVG。改真实 width/height，让滚动区域随倍率变化，不用会裁切的 transform。 */
+export function setGraphZoom(host, value) {
+  const svg = host?.querySelector?.('.mermaid-graph');
+  if (!svg) return null;
+  const [baseWidth, baseHeight] = svgSize(svg);
+  if (!(baseWidth > 0 && baseHeight > 0)) return null;
+  const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value) || 1));
+  svg.style.width = `${Math.round(baseWidth * zoom)}px`;
+  svg.style.height = `${Math.round(baseHeight * zoom)}px`;
+  svg.dataset.pmZoom = String(zoom);
+  return zoom;
+}
+
+/** 让整图适配大画布当前可视区域，返回实际倍率。 */
+export function fitGraph(host, viewport = host?.parentElement) {
+  const svg = host?.querySelector?.('.mermaid-graph');
+  if (!svg || !viewport) return null;
+  const [baseWidth, baseHeight] = svgSize(svg);
+  const width = Math.max(0, Number(viewport.clientWidth) - 56);
+  const height = Math.max(0, Number(viewport.clientHeight) - 56);
+  if (!(baseWidth > 0 && baseHeight > 0 && width > 0 && height > 0)) return null;
+  return setGraphZoom(host, Math.min(width / baseWidth, height / baseHeight, 1));
+}
+
+function svgSize(svg) {
+  const box = svg.viewBox?.baseVal;
+  if (box?.width > 0 && box?.height > 0) return [box.width, box.height];
+  const parts = String(svg.getAttribute?.('viewBox') || '').trim().split(/\s+/).map(Number);
+  if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) return [parts[2], parts[3]];
+  const rect = svg.getBoundingClientRect?.();
+  return [Number(rect?.width) || 0, Number(rect?.height) || 0];
+}
+
 async function pump(host, state) {
   state.running = true;
   try {

@@ -41,6 +41,7 @@
 use crate::scene::Playbook;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path as FsPath, PathBuf};
 
 const PROJECT: &str = "project.md";
@@ -56,7 +57,7 @@ const CASES: &str = "cases";
 /// ---
 /// id = "reproduce-before-stacking"
 /// title = "旧结论未复现就叠加"
-/// scenes = ["check_assumption"]
+/// scenes = ["need_ablation"]
 /// ---
 /// 正文……
 /// ```
@@ -113,8 +114,14 @@ pub struct Prompts {
     pub role: String,
     /// 「改用户填过的字段之前先问」—— 删掉硬锁之后这条约束的落点。
     pub user_field: String,
+    /// 场景判定角色的独立任务说明。判断段不再复用主助手的交付提示词。
+    #[serde(default)]
+    pub judge: String,
     /// 折叠早期对话时给摘要模型的指令。
     pub fold: String,
+    /// 一键蒸馏角色的独立任务说明。
+    #[serde(default)]
+    pub distill: String,
     /// 两个 mode 各自的提示词与工具。键是 `explore` / `go`。
     #[serde(default)]
     pub mode: BTreeMap<String, ModePrompt>,
@@ -206,29 +213,15 @@ impl GraphStyle {
 
 impl Default for Prompts {
     fn default() -> Self {
-        Prompts {
-            role: "你是实验设计的研究助理。你不主导流程：是否进入实现由用户拍板，\
-                   你可以在正文里建议收尾，但没有推进权，也不能因为「我觉得还没准备好」\
-                   拦住用户。你的工作是把一个模糊的想法收敛成能交给编码 agent 的实验设计。\
-                   推断图围绕当前问题选择粒度：重点模块展开到接口与必要算子，区分真实包含、\
-                   阅读分区、数据流、监督和参数快照，标注关键输入输出、训练状态与未知项；\
-                   主干和辅助支路要有层级。不要输出坐标或规划连线转折点。"
-                .into(),
-            user_field: "推断图里标了 [用户设定] 的字段是用户自己填的。\
-                         你可以提出不同意见，但**改动它之前先在正文里问一句**，不要直接覆盖。\
-                         标了 [模型推断] 的可以直接更新。"
-                .into(),
-            fold: "把下面这段早期对话压成摘要，供后续对话继续使用。\n\
-                   务必保住：口径与用户的原话约束、已经放弃的路线与放弃的理由、\
-                   已经问过的问题、明确排除的可能性。\n\
-                   这些正是推断图里没有、但后面会被引用的东西。叙述过程可以大幅压缩。"
-                .into(),
-            mode: builtin_modes(),
-            mode_explore: String::new(),
-            mode_go: String::new(),
-            graph: GraphStyle::default(),
-        }
+        builtin_prompts()
     }
+}
+
+/// 仓库里的 `memory/prompts.toml` 同时是项目默认配置和冷启动模板。
+/// 只保留这一份正文，避免修改项目提示词后忘记同步一套 Rust 字符串。
+fn builtin_prompts() -> Prompts {
+    toml::from_str(include_str!("../memory/prompts.toml"))
+        .expect("内置 memory/prompts.toml 必须是合法 Prompts TOML")
 }
 
 /// 持久层的全部内容。
@@ -276,7 +269,7 @@ impl Memory {
         };
 
         let prompts = match tokio::fs::read_to_string(dir.join(PROMPTS)).await {
-            Ok(s) => toml::from_str::<Prompts>(&s).unwrap_or_else(|e| {
+            Ok(s) => toml::from_str::<Prompts>(&s).map(fill_prompt_defaults).unwrap_or_else(|e| {
                 warnings.push((PROMPTS.into(), e.to_string()));
                 Prompts::default()
             }),
@@ -330,6 +323,38 @@ impl Memory {
             .join("\n\n")
     }
 
+    /// 蒸馏模型不能假设当前工具工作区就是本仓库，所以把允许更新的持久层原文
+    /// 直接作为输入提供。优先读取磁盘原文以保留用户格式；读取失败才用已加载内容兜底。
+    pub async fn distill_sources(&self, dir: &FsPath) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        for (name, fallback) in [
+            (PROJECT, self.project.as_str()),
+            (PREFERENCES, self.preferences.as_str()),
+            (KNOWLEDGE, self.knowledge.as_str()),
+        ] {
+            let text = tokio::fs::read_to_string(dir.join(name)).await
+                .unwrap_or_else(|_| fallback.to_string());
+            out.insert(name.to_string(), text);
+        }
+        let playbook = tokio::fs::read_to_string(dir.join(PLAYBOOK)).await
+            .unwrap_or_else(|_| self.playbook.to_toml_string());
+        out.insert(PLAYBOOK.to_string(), playbook);
+
+        if let Ok(mut entries) = tokio::fs::read_dir(dir.join(CASES)).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                    out.insert(format!("cases/{name}"), text);
+                }
+            }
+        }
+        out
+    }
+
     /// 这个 mode 的全套提示词，缺项按「文件 → 旧字段 → 内置」逐级兜底。
     ///
     /// 逐项兜底而不是整份兜底：用户只想改一句 note，不该因此把工具清单清空。
@@ -351,11 +376,24 @@ impl Memory {
         if m.tools.is_empty() {
             m.tools = builtin.get(key).map(|d| d.tools.clone()).unwrap_or_default();
         }
-        if m.tool_notes.is_empty() {
-            m.tool_notes = builtin.get(key).map(|d| d.tool_notes.clone()).unwrap_or_default();
+        if let Some(default) = builtin.get(key) {
+            for (tool, note) in &default.tool_notes {
+                m.tool_notes.entry(tool.clone()).or_insert_with(|| note.clone());
+            }
         }
         m
     }
+}
+
+fn fill_prompt_defaults(mut prompts: Prompts) -> Prompts {
+    let default = builtin_prompts();
+    if prompts.judge.trim().is_empty() {
+        prompts.judge = default.judge;
+    }
+    if prompts.distill.trim().is_empty() {
+        prompts.distill = default.distill;
+    }
+    prompts
 }
 
 fn trim_or<'a>(s: &'a str, fallback: &'a str) -> &'a str {
@@ -411,54 +449,7 @@ pub fn draft_path(dir: &FsPath, stamp: u64) -> PathBuf {
 /// 措辞是**想法级**的，等着被重写 —— 提示词本来就该在实测里改，
 /// 而改它只要动这个文件，不用重编译。
 pub fn builtin_modes() -> BTreeMap<String, ModePrompt> {
-    let mut m = BTreeMap::new();
-    m.insert(
-        "explore".to_string(),
-        ModePrompt {
-            note: "当前是探索 mode。用户还在摸方向：可以展开讲、可以开放式追问、\
-                   可以把不确定的地方直接摆出来。抽取资料时关注动机、领域背景、术语定义。"
-                .into(),
-            // 两个 mode 都只暴露按址抓取；搜索能力暂不注册。
-            tools: ["web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
-            tool_notes: [
-                ("record_graph",
-                 "探索期：先把大结构摆出来就行，节点可以只有 label。拿不准就 source=\"guess\"，\
-                  它会画成虚线 —— 虚线本身是给用户看的信息，别为了图好看假装确定。\
-                  parent 只表达真实包含；阅读分区用 visual.container=section。"),
-                ("record_note",
-                 "探索期：重点记用户的原话约束，和你还没搞清楚的问题（写进 open）。"),
-                ("ask_user",
-                 "探索期可以多问，但一次只问一个真正卡住你的点。"),
-            ]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-        },
-    );
-    m.insert(
-        "go".to_string(),
-        ModePrompt {
-            note: "当前是行动 mode。用户要往前推进：回答直接一些，不要倒回去讲基础。\
-                   抽取资料时关注方法、超参、实现细节。"
-                .into(),
-            tools: ["web_fetch", "ask_user"].iter().map(|s| s.to_string()).collect(),
-            tool_notes: [
-                ("record_graph",
-                 "行动期：图要能直接交给编码 agent。节点写具体的模块名 / 算子名 / 指标名，\
-                  别停在「编码器」这种泛称；消融臂和对照组要画出来。区分数据流、监督和参数快照，\
-                  主干用 visual.emphasis=primary，辅助支路用 secondary 或 muted。"),
-                ("record_note",
-                 "行动期：把验收口径写死 —— 指标怎么算、什么算通过、哪些必须保持不变。\
-                  open 里应该只剩真正待定的，定了的就删掉。"),
-                ("ask_user",
-                 "行动期少问，能自己查的先查。"),
-            ]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
-        },
-    );
-    m
+    builtin_prompts().mode
 }
 
 // ───────────────────────── 蒸馏草稿 ─────────────────────────
@@ -479,6 +470,9 @@ pub struct Section {
     pub file: String,
     pub mode: WriteMode,
     pub text: String,
+    /// 模型生成草稿时看到的源文件版本。写回前比较，避免覆盖审阅期间的并发编辑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -486,15 +480,15 @@ pub struct Section {
 pub enum WriteMode {
     /// 整份替换。三个叙述性文件走这条：模型手里有现有内容，写的是更新后的整份。
     Replace,
-    /// 追加。`playbook.toml` 走这条 —— 新场景是加一条，不是把用户的场景库覆盖掉。
-    Append,
+    /// 按场景 id 合并。草稿只展示新增/更新的完整场景块，未输出的场景不动。
+    Merge,
 }
 
 /// 这个文件名是不是合法的蒸馏目标，以及该怎么写。
 pub fn write_mode_for(file: &str) -> Option<WriteMode> {
     match file {
         PROJECT | PREFERENCES | KNOWLEDGE => Some(WriteMode::Replace),
-        PLAYBOOK => Some(WriteMode::Append),
+        PLAYBOOK => Some(WriteMode::Merge),
         // 一个 cases 文件就是一条案例，同名即更新它
         f if f.starts_with("cases/") && f.ends_with(".md") && f.matches('/').count() == 1 => {
             Some(WriteMode::Replace)
@@ -516,7 +510,12 @@ pub fn parse_draft(text: &str) -> Vec<Section> {
             .map(str::trim)
             .and_then(|t| write_mode_for(t).map(|m| (t.to_string(), m)));
         match target {
-            Some((file, mode)) => out.push(Section { file, mode, text: String::new() }),
+            Some((file, mode)) => out.push(Section {
+                file,
+                mode,
+                text: String::new(),
+                base_revision: None,
+            }),
             None => {
                 if let Some(s) = out.last_mut() {
                     s.text.push_str(line);
@@ -547,34 +546,59 @@ pub fn validate(file: &str, merged: &str) -> Result<(), String> {
     }
 }
 
+/// 案例引用的是合并后的场景库，而不是只检查 frontmatter 能否解析。
+/// 供蒸馏写回的预检使用，避免案例先落盘、下一轮才发现引用了不存在的场景。
+pub fn validate_case_dependencies(
+    file: &str,
+    content: &str,
+    playbook: &Playbook,
+) -> Result<(), String> {
+    if !file.starts_with("cases/") {
+        return Ok(());
+    }
+    let case = parse_case(content).ok_or_else(|| {
+        "案例要以 TOML frontmatter 开头：--- 换行 id/title/scenes 换行 --- 换行 正文"
+            .to_string()
+    })?;
+    let missing = case
+        .scenes
+        .iter()
+        .filter(|id| playbook.get(id).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("案例引用了合并后仍不存在的场景：{}", missing.join("、")))
+    }
+}
+
+/// 审阅草稿期间的并发修改检测。只在本进程内比较，不把它当内容身份或安全哈希。
+pub fn content_revision(content: Option<&str>) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match content {
+        Some(text) => {
+            "present".hash(&mut h);
+            text.hash(&mut h);
+        }
+        None => "missing".hash(&mut h),
+    }
+    format!("{:016x}", h.finish())
+}
+
 // ────────────────────────── bootstrap ──────────────────────────
 //
 // 这些是首次运行写进文件的初始内容，之后归用户所有。
 // 措辞刻意写成「等着被填」的样子，让用户一打开就知道这里该写什么。
 
 fn bootstrap_project() -> String {
-    "# 项目\n\n\
-     ## 概述\n（这个项目在做什么、验证什么大方向。写给一个刚接手的新对话看。）\n\n\
-     ## 当前阶段目标\n（这一阶段要拿到的结论是什么。）\n\n\
-     ## 进展\n\
-     ### 已经跑通并成立的\n（方法概述 + 结论。）\n\n\
-     ### 试过但没成立的\n（方法概述 + 为什么没成立。这一栏比上一栏值钱。）\n"
-        .into()
+    "# 项目记忆\n\n尚无已确认的项目记录。新增项目时按项目分节，保留概述与依据、阶段目标、当前有效设计、实际进展、尝试及结果、待决事项和下一步。\n\n设计已选、代码已改、检查通过、实验支持分别记录。结果未知或原因未证实时明确标注；保留被替代路线中仍有价值的理由。\n".into()
 }
 
 fn bootstrap_preferences() -> String {
-    "# 合作偏好\n\n\
-     - 讲解详略：（更想要结论，还是更想要推导过程）\n\
-     - 提问方式：（能接受开放式问题，还是需要带候选项）\n\
-     - 什么时候希望被打断：（比如「方案明显跑偏时立刻说」）\n\
-     - 不希望 agent 做的事：（比如「别替我改实验参数」）\n"
-        .into()
+    "# 合作偏好\n\n尚无已确认的长期偏好。根据明确要求或实际反馈记录讲解、提问、结构化材料、分工、拒绝事项、交流方式和固定流程，并注明适用范围与依据。\n\n单次拒绝不扩大为永久禁令；当前明确要求优先于旧偏好；没有反馈不代表接受。\n".into()
 }
 
 fn bootstrap_knowledge() -> String {
-    "# 知识与经验评估\n\n\
-     每条形如：`领域 / 具体点 — 掌握程度 — 依据`。掌握程度用三档：\n\
-     **有储备**（可以直接问他）、**没储备**（先讲通机制再把判断交回）、**不清楚**（先问清楚这一点本身）。\n\n\
-     - 例：持续学习 / BWT 与 forgetting measure — 不清楚 — 尚未在对话中出现\n"
-        .into()
+    "# 知识版图\n\n尚无足够证据判断具体知识点的掌握情况。记录领域与知识点、内容/讲解范围、来源、用户反馈、可支持的掌握证据和可接续的问题。\n\n讲过、表示理解、能解释、能应用和存在局部误解分别记录。未知保持未知，不根据身份、沉默或一次错误判断整体能力。\n".into()
 }

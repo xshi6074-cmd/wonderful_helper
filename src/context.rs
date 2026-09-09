@@ -44,6 +44,8 @@ pub fn toks(s: &str) -> u32 {
 pub struct Context {
     /// ① 规则。来自持久层的 `prompts.toml`，用户可改。
     pub system: String,
+    /// 场景判断段自己的任务说明；不混入主助手的交付指令。
+    pub judge_system: String,
     /// ② 持久层：项目 / 偏好 / 知识评估。
     pub memory: String,
     /// ③ 场景目录（只有 id 与触发条件，不含 guidance）。
@@ -60,6 +62,7 @@ impl Context {
         turn_start: Seq,
         memory: &Memory,
         history: Vec<Message>,
+        mode: crate::model::Mode,
         mode_note: &str,
     ) -> Context {
         let p = &memory.prompts;
@@ -69,6 +72,14 @@ impl Context {
         system.push_str(p.user_field.trim());
         system.push_str("\n\n");
         system.push_str(mode_note.trim());
+        let judge_system = format!(
+            "{}\n\n当前模式：{}。只做场景选择，不回答用户问题。",
+            p.judge.trim(),
+            match mode {
+                crate::model::Mode::Explore => "探索模式",
+                crate::model::Mode::Go => "行动模式",
+            }
+        );
 
         // 图在最前：拓扑是这段 metadata 里信息密度最高的东西，而且后面的图外推断
         // 要靠它才知道自己挂在哪儿。两种画法（程序画 / 模型画）在这里都收敛成源码。
@@ -104,6 +115,7 @@ impl Context {
 
         Context {
             system,
+            judge_system,
             memory: memory.prompt_block(),
             catalog: memory.playbook.catalog(),
             inference,
@@ -111,7 +123,7 @@ impl Context {
         }
     }
 
-    fn shared(&self) -> Vec<Message> {
+    fn answer_shared(&self) -> Vec<Message> {
         vec![
             Message::system(&self.system),
             Message::system(&self.memory),
@@ -122,7 +134,12 @@ impl Context {
 
     /// 判断段：共享层 + 完整对话，**不含任何场景的 guidance 与案例**。
     pub fn for_judge(&self) -> Vec<Message> {
-        let mut v = self.shared();
+        let mut v = vec![
+            Message::system(&self.judge_system),
+            Message::system(&self.memory),
+            Message::system(&self.catalog),
+            Message::system(&self.inference),
+        ];
         v.extend(self.history.iter().cloned());
         v
     }
@@ -133,9 +150,9 @@ impl Context {
     /// 等于用户换了半天场景模型什么都没感觉到。
     ///
     /// 一组场景各出一条 system 消息，而不是拼成一大段：它们是并列的约束，
-    /// 拼在一起模型容易只认第一条。顺序按 playbook 的 id 序，所以稳定。
+    /// 拼在一起模型容易只认第一条。顺序保留判断段给出的当前影响优先级。
     pub fn for_answer(&self, scenes: &[Scene], cases: &str, retrieved: &[Message]) -> Vec<Message> {
-        let mut v = self.shared();
+        let mut v = self.answer_shared();
         let live: Vec<&Scene> =
             scenes.iter().filter(|s| !s.guidance.trim().is_empty()).collect();
         for (i, scene) in live.iter().enumerate() {
@@ -273,5 +290,9 @@ pub fn split_at_recent(events: &[Event], k_turns: usize) -> usize {
 /// 它才会去保住图上没有、但后面会被引用的那些东西 ——
 /// 口径与原话约束、放弃的路线与理由、已问过的问题、明确排除的可能性。
 pub fn fold_instruction(tmpl: &str, inference: &str) -> String {
-    format!("{}\n\n当前推断图（这里已经有的不要在摘要里重复）：\n{}", tmpl.trim(), inference)
+    format!(
+        "{}\n\n当前图与工作记忆：\n{}\n\n避免重复静态结构；仍要保留关键决定理由、变更、来源边界、用户原意及与当前图冲突的信息。",
+        tmpl.trim(),
+        inference
+    )
 }

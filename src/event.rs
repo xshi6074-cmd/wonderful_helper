@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// 收一个字符串或一组字符串，都给成 `Vec`。
 ///
 /// 场景从「一个」改成「一组」时用它兜住老时间线：库里存的是
-/// `"scene": "clarify_goal"`，新代码要的是 `["clarify_goal"]`。
+/// `"scene": "trace_code"`，新代码要的是 `["trace_code"]`。
 /// 没有它，改完之后所有历史会话都读不回来。
 fn one_or_many<'de, D>(d: D) -> Result<Vec<SceneId>, D::Error>
 where
@@ -296,6 +296,28 @@ pub fn assemble_full(events: &[Event]) -> Vec<Message> {
         .filter(|e| !matches!(e.body, Body::Folded { .. }))
         .filter_map(|e| e.body.as_message(e.seq, e.corr))
         .collect()
+}
+
+/// 给 compact / distill 的结构化变更记录。最终 Workspace 只能说明“现在是什么”，
+/// 不能说明谁在什么时候改了什么；这里只选会影响决定与纠错的事件，不塞 phase/cost 心跳。
+pub fn change_log(events: &[Event], range: Option<(Seq, Seq)>) -> String {
+    events
+        .iter()
+        .filter(|event| range.is_none_or(|(from, to)| event.seq >= from && event.seq <= to))
+        .filter(|event| matches!(
+            event.body,
+            Body::Edited { .. }
+                | Body::Inferred { .. }
+                | Body::SceneOverridden { .. }
+                | Body::Judged { .. }
+        ))
+        .filter_map(|event| {
+            serde_json::to_string(&event.body).ok().map(|body| {
+                format!("#{} turn={} {}", event.seq.0, event.turn.map(|t| t.0.to_string()).unwrap_or_else(|| "outside".into()), body)
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn assemble(events: &[Event]) -> Vec<Message> {

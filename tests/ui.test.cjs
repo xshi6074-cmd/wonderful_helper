@@ -73,6 +73,8 @@ function setup() {
   const graphRenderer = {
     renderGraph(host, payload, context) { graphCalls.push({host, payload, context}); context.onState?.({phase:'ready',warnings:[]}); },
     disposeGraph(host) { host.replaceChildren(); },
+    setGraphZoom(host, value) { graphCalls.push({kind:'zoom', host, value}); return value; },
+    fitGraph(host, viewport) { graphCalls.push({kind:'fit', host, viewport}); return 0.75; },
   };
   const ctx = vm.createContext({ document: doc, Node: Element, window: { innerHeight: 900 },
     __graphRenderer: graphRenderer, addEventListener() {}, setTimeout() {}, clearTimeout() {}, console });
@@ -138,8 +140,8 @@ test('config editor saves valid JSON and refuses malformed', () => {
 test('distill sections are previewed, editable, and only the checked ones are written', () => {
   const f = setup();
   f.evalUI(`onMsg({ t:'distilled', path:'/w/memory/draft-1.md', sections:[
-      { file:'project.md', mode:'replace', text:'新的项目描述' },
-      { file:'playbook.toml', mode:'append', text:'[[scene]]\\nid = "x"' },
+      { file:'project.md', mode:'replace', text:'新的项目描述', base_revision:'project-rev' },
+      { file:'playbook.toml', mode:'merge', text:'[[scene]]\\nid = "x"', base_revision:'abc123' },
     ]});`);
   assert.equal(f.evalUI('S.distill.sections.length'), 2);
   assert.equal(f.doc.querySelector('#over').hidden, false, '草稿自己弹出来，不用去别处找');
@@ -163,12 +165,19 @@ test('distill sections are previewed, editable, and only the checked ones are wr
   assert.equal(msg.sections[0].file, 'project.md');
   assert.equal(msg.sections[0].text, '我改过的项目描述', '写回的是屏幕上那份，不是模型原文');
   assert.equal(msg.sections[0].mode, 'replace');
+  assert.equal(msg.sections[0].base_revision, 'project-rev');
 
   // 一节都不勾就什么都不发 —— 静默写空文件是最糟的一种
   f.evalUI(`S.distill.sections.forEach(s => s.on = false);`);
   const before = f.evalUI('sent.length');
   f.evalUI('applyDistill()');
   assert.equal(f.evalUI('sent.length'), before);
+});
+test('empty distill output is shown as no update and opens no review sheet', () => {
+  const f = setup();
+  f.evalUI(`onMsg({ t:'distilled', path:'', sections:[], error:null });`);
+  assert.notEqual(f.doc.querySelector('#over').hidden, false);
+  assert.ok(f.evalUI(`S.banners.some(b => b.text.includes('没有可写回'))`));
 });
 // 持久层列的是**给人看的名字**（「系统提示词」而不是 prompts.toml），
 // 正文开遮罩改 —— 侧栏里塞不下一篇 prompts.toml。
@@ -229,9 +238,9 @@ test('scene picker is multi-select and sends every checked id', () => {
   const f = setup();
   f.evalUI(`S.playbook = [
       {id:'none',label:'不做特殊干预',when:'闲聊'},
-      {id:'clarify_goal',label:'澄清目标',when:'claim 模糊'},
-      {id:'cheap_first',label:'优先低成本',when:'预算对不上'}];
-    S.scenes = ['clarify_goal'];`);
+      {id:'trace_code',label:'从代码核对事实',when:'实现尚未读取'},
+      {id:'cost_budget',label:'成本与可行性',when:'预算对不上'}];
+    S.scenes = ['trace_code'];`);
   f.evalUI('openScenePicker()');
   const body = all(f.doc.querySelector('.sheet-body'));
   const boxes = body.filter(e => e.attrs.type === 'checkbox');
@@ -241,16 +250,16 @@ test('scene picker is multi-select and sends every checked id', () => {
   body.find(e => e.tag === 'button' && e.textContent === '用这些').fire('click');
   const msg = f.evalUI('sent.at(-1)');
   assert.equal(msg.op, 'scene');
-  assert.equal([...msg.to].sort().join(','), 'cheap_first,clarify_goal');
+  assert.equal([...msg.to].sort().join(','), 'cost_budget,trace_code');
 });
 
 // 顶栏显示的是这一组场景，不是一个。
 test('topbar shows every live scene', () => {
   const f = setup();
-  f.evalUI(`S.playbook = [{id:'clarify_goal',label:'澄清目标'},{id:'cheap_first',label:'优先低成本'}];
-    S.scenes = ['clarify_goal','cheap_first']; renderTop();`);
+  f.evalUI(`S.playbook = [{id:'trace_code',label:'从代码核对事实'},{id:'cost_budget',label:'成本与可行性'}];
+    S.scenes = ['trace_code','cost_budget']; renderTop();`);
   const t = f.doc.querySelector('#scene-chip').textContent;
-  assert.ok(t.includes('澄清目标') && t.includes('优先低成本'), t);
+  assert.ok(t.includes('从代码核对事实') && t.includes('成本与可行性'), t);
 });
 
 // 对话可改名 / 可删；当前这条不给删 —— 删了界面就挂在一个已经不存在的会话上。
@@ -421,6 +430,19 @@ test('graph payload is handed to the renderer instead of being laid out in app.j
   assert.equal(f.graphCalls.length, 1);
   assert.equal(f.graphCalls[0].payload.layout, 'elk');
   assert.equal(f.graphCalls[0].context.renderId, 'graph-side');
+});
+test('expanded graph exposes explicit zoom and fit operations', async () => {
+  const f = setup();
+  f.evalUI(`setLargeGraphZoom(1.4);`);
+  await new Promise(resolve => setImmediate(resolve));
+  const zoom = f.graphCalls.find(c => c.kind === 'zoom');
+  assert.equal(zoom.value, 1.4);
+  assert.equal(f.doc.querySelector('#graph-zoom-label').textContent, '140%');
+
+  f.evalUI(`fitLargeGraph();`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.graphCalls.some(c => c.kind === 'fit'));
+  assert.equal(f.doc.querySelector('#graph-zoom-label').textContent, '75%');
 });
 
 test('node editor preserves draft, patches changed fields only, and exposes same-field conflicts', () => {
