@@ -106,10 +106,15 @@ impl App {
                 if p.caps.as_ref() == Some(&caps) {
                     continue;
                 }
-                p.caps = Some(caps);
+                p.caps = Some(caps.clone());
                 let snapshot = s.clone();
                 drop(s);
-                if let Err(e) = snapshot.save(&bg.dir) {
+                // 只写这个 provider 的 caps 那一段。整份写回会把用户刚在
+                // 编辑器里手改的别的字段一起盖掉 —— 协商是后台跑的，
+                // 它没资格决定文件里其它地方长什么样。
+                let path = format!("providers.{provider}.caps");
+                let val = serde_json::to_value(&caps).unwrap_or(Value::Null);
+                if let Err(e) = Settings::patch_file(&bg.dir, &[(path, val)]) {
                     eprintln!("[caps] 协商结果写不进 config.json：{e}");
                     continue;
                 }
@@ -701,20 +706,23 @@ async fn handle(app: &Arc<App>, v: Value) {
             if path.is_empty() {
                 return app.err("目录不能为空");
             }
-            let mut next = Settings::load(&app.dir, &real_env);
-            let mut roots = next.tools.roots.clone();
-            if roots.is_empty() {
-                roots.push(path.clone());
-            } else {
-                roots[0] = path.clone();
+            app.apply_changes(vec![("tools.roots.0".into(), json!(path))]).await;
+        }
+
+        // 界面上改了哪几个字段，就只落哪几个字段。
+        //
+        // **UI 与手改 config.json 效力等同**：界面不拿自己那份快照去覆盖整个文件，
+        // 所以用户在编辑器里手改的东西不会被界面上一次看到的旧值冲掉，反过来也一样。
+        "settings_patch" => {
+            let Some(obj) = v["changes"].as_object() else {
+                return app.err("没有要改的字段");
+            };
+            if obj.is_empty() {
+                return; // 什么都没改，不必重启会话
             }
-            next.tools.roots = roots;
-            if let Err(e) = next.save(&app.dir) {
-                return app.err(&format!("写 config.json 失败：{e}"));
-            }
-            *app.settings.write().await = Settings::load(&app.dir, &real_env);
-            app.restart().await;
-            app.reboot().await;
+            let changes: Vec<(String, Value)> =
+                obj.iter().map(|(k, val)| (k.clone(), val.clone())).collect();
+            app.apply_changes(changes).await;
         }
         "secret_put" => {
             let provider = v["provider"].as_str().unwrap_or("").to_string();
@@ -1059,6 +1067,19 @@ fn draft_allowed(f: &str) -> bool {
 }
 
 impl App {
+    /// 落一批字段级改动，然后重启会话。
+    ///
+    /// 走 [`Settings::patch_file`] 而不是「整份写回」：后者会把并发改动和
+    /// 读不出来的字段一起抹平，见那个函数上的说明。
+    async fn apply_changes(self: &Arc<Self>, changes: Vec<(String, Value)>) {
+        if let Err(e) = Settings::patch_file(&self.dir, &changes) {
+            return self.err(&e);
+        }
+        *self.settings.write().await = Settings::load(&self.dir, &real_env);
+        self.restart().await;
+        self.reboot().await;
+    }
+
     async fn restart(self: &Arc<Self>) {
         let session = self.live.lock().await.as_ref().map(|l| l.session.clone());
         if let Err(e) = self.open(session).await {
@@ -1223,6 +1244,34 @@ mod tests {
         handle(&app, json!({ "op": "roots_put", "path": "   " })).await;
         let again = Settings::load(&app.dir, &real_env);
         assert_eq!(again.tools.roots[0], target.display().to_string(), "★ 空路径不把目录改回去");
+
+        // ── 反方向：改模型配置不能把目录打回去 ──
+        // 这两条合起来才是那个 bug 的全貌：界面上每处保存都写整份文件时，
+        // 谁后点谁赢，另一边被浏览器上一次看到的快照默默覆盖。
+        handle(&app, json!({
+            "op": "settings_patch",
+            "changes": { "roles.answer.model": "changed-model" }
+        })).await;
+        let third = Settings::load(&app.dir, &real_env);
+        assert_eq!(third.roles.answer.model, "changed-model");
+        assert_eq!(third.tools.roots[0], target.display().to_string(), "★ 目录没被打回默认");
+        assert_eq!(third.tools.roots[1], "/second");
+        assert_eq!(third.roles.judge.provider, "openai", "没点名的字段一个都不动");
+
+        // 手改了 config.json 里界面根本不认识的东西，也要留着
+        {
+            let raw = std::fs::read_to_string(app.dir.join("config.json")).unwrap();
+            let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            v["我手写的字段"] = json!("别动我");
+            std::fs::write(app.dir.join("config.json"), v.to_string()).unwrap();
+        }
+        handle(&app, json!({
+            "op": "settings_patch", "changes": { "roles.answer.max_tokens": 4096 }
+        })).await;
+        let raw = std::fs::read_to_string(app.dir.join("config.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["我手写的字段"], "别动我", "★ 认不出的字段原样保留");
+        assert_eq!(v["roles"]["answer"]["max_tokens"], 4096);
         cleanup(app).await;
     }
 

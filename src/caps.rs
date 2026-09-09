@@ -129,7 +129,22 @@ pub struct Step {
     pub detail: String,
 }
 
-/// thinking 怎么处理。
+/// 这一次请求想不想要思考链。
+///
+/// **工具调用优先于 thinking。** 需要强制工具调用的请求（判断段）一律关思考：
+/// 多数服务在 thinking 开着时会拒绝或悄悄把 `tool_choice` 降级成 auto，
+/// 而判断段拿不到工具调用就等于没有场景判定。其余请求（回答段、折叠、蒸馏）
+/// 让它好好想 —— 关思考是判断段的需要，不是全局策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Think {
+    /// 为了拿到工具调用而关掉。关不掉的型号退到最低思考量。
+    OffForTools,
+    /// 开着。
+    On,
+}
+
+/// thinking **能不能**关、怎么关。这是 provider 的属性，
+/// 和「这一次想不想关」（[`Think`]）是两回事。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Thinking {
@@ -352,6 +367,7 @@ impl Caps {
         anthropic: bool,
         temperature: Option<f32>,
         max_tokens: u32,
+        want: Think,
     ) {
         let o = body.as_object_mut().expect("请求体是对象");
         o.insert(self.max_tokens_field.clone(), json!(max_tokens));
@@ -360,17 +376,32 @@ impl Caps {
         if let Some(t) = temperature.filter(|_| self.temperature) {
             o.insert("temperature".into(), json!(self.clamp(t)));
         }
-        match &self.thinking {
-            Thinking::Untouched => {}
-            Thinking::Disabled => {
-                o.insert("thinking".into(), json!({ "type": "disabled" }));
-            }
-            Thinking::Effort(level) => {
+        // 这家根本不认 thinking 字段 ⇒ 一个字都不发，不管这次想不想要。
+        if self.thinking == Thinking::Untouched {
+            let _ = anthropic;
+            return;
+        }
+        match want {
+            // 要强制工具调用 ⇒ 关思考。**工具调用优先级高于 thinking**：
+            // 多数服务在 thinking 开着时会拒绝或悄悄降级 tool_choice，
+            // 而判断段没有工具调用就等于没有场景判定 —— 那比少一段思考链贵得多。
+            Think::OffForTools => match &self.thinking {
+                // 这个型号关不掉（GLM-5.3 / kimi-k2.7-code）⇒ 退而求其次，
+                // 开着但把思考量压到最低。
+                Thinking::Effort(level) => {
+                    o.insert("thinking".into(), json!({ "type": "enabled" }));
+                    o.insert("reasoning_effort".into(), json!(level));
+                }
+                _ => {
+                    o.insert("thinking".into(), json!({ "type": "disabled" }));
+                }
+            },
+            // 不强制工具调用的请求 ⇒ 让它好好想。关思考是判断段的需要，
+            // 不是全局策略。
+            Think::On => {
                 o.insert("thinking".into(), json!({ "type": "enabled" }));
-                o.insert("reasoning_effort".into(), json!(level));
             }
         }
-        let _ = anthropic;
     }
 
     /// 判断段的 `tool_choice`。`None` = 这一档不发这个字段。
@@ -447,7 +478,7 @@ mod tests {
         assert_eq!(s.cap, Cap::ThinkingOff);
         assert_eq!(c.thinking, Thinking::Effort("low".into()));
         let mut body = json!({});
-        c.apply(&mut body, false, Some(0.0), 100);
+        c.apply(&mut body, false, Some(0.0), 100, Think::OffForTools);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "low");
     }
@@ -488,13 +519,13 @@ mod tests {
             .unwrap();
         assert_eq!(s.cap, Cap::Temperature);
         let mut body = json!({});
-        c.apply(&mut body, false, Some(0.7), 100);
+        c.apply(&mut body, false, Some(0.7), 100, Think::OffForTools);
         assert!(body.get("temperature").is_none(), "★ 不收就一个字都不发");
         assert_eq!(body["max_tokens"], 100);
         // 模型收，但用户没填 ⇒ 同样一个字都不发，用服务端默认。
         // **不替用户猜一个「看起来合理」的值** —— 猜错了不报错，只是输出悄悄偏。
         let mut body = json!({});
-        Caps::default().apply(&mut body, false, None, 100);
+        Caps::default().apply(&mut body, false, None, 100, Think::OffForTools);
         assert!(body.get("temperature").is_none(), "★ 没填就不发");
     }
 
@@ -504,7 +535,7 @@ mod tests {
         c.next("Unsupported parameter: 'max_tokens' is not supported with this model")
             .unwrap();
         let mut body = json!({});
-        c.apply(&mut body, false, Some(0.0), 42);
+        c.apply(&mut body, false, Some(0.0), 42, Think::OffForTools);
         assert_eq!(body["max_completion_tokens"], 42);
         assert!(body.get("max_tokens").is_none());
 
@@ -513,6 +544,53 @@ mod tests {
     }
 
     /// 认不出来的错误不能假装有下一档 —— 那会变成无限重试。
+    /// 工具调用优先于 thinking，但**只在需要强制工具调用的那次请求上**。
+    /// 关思考是判断段的需要，不是全局策略 —— 回答段还是要它好好想。
+    #[test]
+    fn thinking_is_off_only_where_tools_must_be_forced() {
+        let c = Caps::default();
+        let mut judge = json!({});
+        c.apply(&mut judge, false, None, 100, Think::OffForTools);
+        assert_eq!(judge["thinking"]["type"], "disabled");
+
+        let mut answer = json!({});
+        c.apply(&mut answer, false, None, 100, Think::On);
+        assert_eq!(answer["thinking"]["type"], "enabled", "★ 不强制工具的请求开思考");
+
+        // 关不掉的型号（GLM-5.3 / kimi-k2.7-code）：退到最低思考量，
+        // 而不是放弃工具调用。
+        let mut c2 = Caps::default();
+        c2.next("This model always engages in thinking and cannot be disabled").unwrap();
+        let mut b = json!({});
+        c2.apply(&mut b, false, None, 100, Think::OffForTools);
+        assert_eq!(b["thinking"]["type"], "enabled");
+        assert_eq!(b["reasoning_effort"], "low", "★ 关不掉就压到最低，不是不管了");
+
+        // 这家根本没有 thinking 字段（OpenAI）⇒ 一个字都不发
+        let c3 = Caps { thinking: Thinking::Untouched, ..Caps::default() };
+        let mut b = json!({});
+        c3.apply(&mut b, false, None, 100, Think::On);
+        assert!(b.get("thinking").is_none(), "★ 不认这个字段就别发，发了是 400");
+    }
+
+    /// 五家的种子都得是能直接用的一档。
+    #[test]
+    fn every_preset_seeds_a_usable_caps() {
+        for p in crate::config::presets() {
+            let c = &p.caps;
+            assert_eq!(c.forced, Forced::Any, "{} 该从强制工具调用起步", p.name);
+            assert!(!c.max_tokens_field.is_empty(), "{} 的 max_tokens 字段名不能是空", p.name);
+            // 查证过的上限：Anthropic / Moonshot / 智谱是 1，OpenAI / DeepSeek 是 2
+            if let Some(m) = c.temp_max {
+                assert!((0.0..=2.0).contains(&m), "{} 的 temp_max 不合理：{m}", p.name);
+            }
+            // OpenAI 没有 thinking 字段，发了会被当未知参数
+            if p.name == "openai" {
+                assert_eq!(c.thinking, Thinking::Untouched);
+            }
+        }
+    }
+
     #[test]
     fn unknown_error_stops_the_ladder() {
         let mut c = Caps::default();

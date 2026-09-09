@@ -82,44 +82,122 @@ pub struct Preset {
     pub api: Api,
     pub base_url: &'static str,
     pub key_env: &'static str,
+    /// 建这个 provider 时写进 config.json 的调用方式**种子**。
+    ///
+    /// # 它只是个初值，不是运行时读的表
+    ///
+    /// 一旦写进 `config.json`，之后所有请求读的都是那份配置 ——
+    /// 用户随时能手改，协商撞墙时也会就地改它。代码里这份只在
+    /// 「第一次把这家加进花名册」时用一次。
+    ///
+    /// 值来自各家文档（2026-09 查）。查不到的按 OpenAI 兼容的通例给，
+    /// 错了协商会当场纠正 —— 所以这里宁可给最严的一档。
+    pub caps: crate::caps::Caps,
     pub models: &'static [&'static str],
 }
 
-pub const PRESETS: &[Preset] = &[
+/// 内置的几家。**是函数不是 const**：种子里的 `Caps` 带 String 字段，
+/// const 上下文构造不出来。反正它只在「加进花名册」时调一次。
+pub fn presets() -> Vec<Preset> {
+    vec![
     Preset {
         name: "anthropic", label: "Anthropic", api: Api::Anthropic,
         base_url: "https://api.anthropic.com", key_env: "ANTHROPIC_API_KEY",
         models: &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+            // Anthropic：tool_choice = auto/any/tool/none；temperature 0–1。
+            // **开着 thinking 时不能指名某个工具**，所以判断段这边先关 thinking、
+            // 用 any（不点名）—— 两条限制同时避开。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Disabled,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: Some(1.0),
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
     Preset {
         name: "openai", label: "OpenAI", api: Api::OpenAiCompat,
         base_url: "https://api.openai.com/v1", key_env: "OPENAI_API_KEY",
         models: &["gpt-4o", "gpt-4o-mini", "o3-mini"],
+            // OpenAI：tool_choice = none/auto/required/命名；temperature 0–2。
+            // 没有 thinking 字段，发了会被当成未知参数，所以不碰。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Untouched,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: Some(2.0),
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
     Preset {
         name: "deepseek", label: "DeepSeek", api: Api::OpenAiCompat,
         base_url: "https://api.deepseek.com/v1", key_env: "DEEPSEEK_API_KEY",
         // deepseek-chat / deepseek-reasoner 已于 2026-07-24 废弃
         models: &["deepseek-v4-flash", "deepseek-v4-pro"],
+            // DeepSeek：四种 tool_choice 全支持；temperature 0–2、默认 1；
+            // thinking = {type: enabled|disabled}，默认 enabled。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Disabled,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: Some(2.0),
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
     Preset {
         name: "zhipu", label: "智谱 GLM", api: Api::OpenAiCompat,
         base_url: "https://open.bigmodel.cn/api/paas/v4", key_env: "ZHIPUAI_API_KEY",
         models: &["glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-4.7", "glm-4.6"],
+            // 智谱：temperature 0–1、默认 1；thinking = {type: enabled|disabled}，
+            // 但 GLM-5.3 起不允许 disabled（400 / 1210），得改成
+            // enabled + reasoning_effort=low —— 协商会自动走那一档。
+            // tool_choice 的取值我没拿到官方原文，按 OpenAI 兼容通例给 required。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Disabled,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: Some(1.0),
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
     Preset {
         name: "moonshot", label: "月之暗面 Kimi", api: Api::OpenAiCompat,
         base_url: "https://api.moonshot.cn/v1", key_env: "MOONSHOT_API_KEY",
         // moonshot-v1 系列与 kimi-k2.5 已于 2026-08-31 下线
         models: &["kimi-k3", "kimi-k2.6", "kimi-k2.7-code"],
+            // Moonshot：tool_choice 四种全支持；temperature 上限 1（不是 OpenAI 的 2）；
+            // thinking = {type: enabled|disabled}，但 k2.7-code 关不掉 ——
+            // 那种型号上协商会退到 enabled + reasoning_effort。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Disabled,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: Some(1.0),
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
     Preset {
         // 自建 / vLLM / Ollama / LM Studio 都走这条。地址是最常见的那个默认端口。
         name: "custom", label: "自定义（OpenAI 兼容）", api: Api::OpenAiCompat,
         base_url: "http://localhost:8000/v1", key_env: "CUSTOM_API_KEY",
         models: &[],
+            // 自建：什么都不知道，给最严的一档，让协商去试。
+            caps: crate::caps::Caps {
+                thinking: crate::caps::Thinking::Untouched,
+                forced: crate::caps::Forced::Any,
+                temperature: true,
+                temp_max: None,
+                max_tokens_field: "max_tokens".into(),
+                stream_usage: true,
+            },
     },
-];
+    ]
+}
 
 impl Preset {
     pub fn cfg(&self) -> ProviderCfg {
@@ -127,9 +205,9 @@ impl Preset {
             api: self.api,
             base_url: self.base_url.into(),
             key_env: self.key_env.into(),
-            // 预设不预判调用方式：第一次撞墙时现协商，结果才写进来。
-            // 写死在预设里就是那张会过期的能力表。
-            caps: None,
+            // 种子写进去。**它落进 config.json 之后就是普通配置项** ——
+            // 用户改得动，协商也会就地改它。代码里这份只用这一次。
+            caps: Some(self.caps.clone()),
         }
     }
 }
@@ -137,13 +215,14 @@ impl Preset {
 /// 给 UI 的预设清单。
 pub fn presets_json() -> serde_json::Value {
     serde_json::Value::Array(
-        PRESETS
+        presets()
             .iter()
             .map(|p| {
                 serde_json::json!({
                     "name": p.name, "label": p.label,
                     "api": match p.api { Api::Anthropic => "anthropic", Api::OpenAiCompat => "open_ai_compat" },
                     "base_url": p.base_url, "key_env": p.key_env, "models": p.models,
+                    "caps": serde_json::to_value(&p.caps).unwrap_or(serde_json::Value::Null),
                 })
             })
             .collect(),
@@ -246,7 +325,7 @@ impl Default for Settings {
     fn default() -> Self {
         // 花名册直接从预设生成。`custom` 不进默认 —— 它是「添加 provider」
         // 时的模板，摆在默认里只会多一条永远连不上的条目。
-        let providers: BTreeMap<String, ProviderCfg> = PRESETS
+        let providers: BTreeMap<String, ProviderCfg> = presets()
             .iter()
             .filter(|p| p.name != "custom")
             .map(|p| (p.name.to_string(), p.cfg()))
@@ -385,6 +464,52 @@ impl Settings {
     }
 
     /// 写回 `config.json`。**先写临时文件再 rename** —— 用户编辑器可能正开着它。
+    /// **只改指定的那几个字段**，别的原样留在盘上。
+    ///
+    /// # 为什么不能「读出来 → 改 → 整份写回」
+    ///
+    /// 两个原因，都实际发生过：
+    ///
+    /// 1. **并发覆盖。** 界面上每一处保存都写整份文件时，浏览器手上那份
+    ///    是上一次 boot 的快照 —— 用户在配置页改了模型、再去输入区点一下
+    ///    「应用目录」，roles 就被快照里的旧值盖回去；反过来点保存，
+    ///    `tools.roots` 又被盖回去。谁后点谁赢，另一边默默丢掉。
+    /// 2. **解析失败会变成清空。** [`Settings::load`] 读不动文件时回退到默认值
+    ///    并只留一条 warning；这时候再 `save()`，就把默认值（roles 全指向
+    ///    anthropic、roots 变成 `.`）**写到了用户的文件上**。
+    ///
+    /// 所以这里走**原始 JSON**：读进来是什么就是什么，只动点名的那几个键，
+    /// 认不出的字段原样保留。写之前反序列化一遍做校验 —— 改坏了当场拒绝，
+    /// 而不是等下一次启动时回退到默认。
+    ///
+    /// `changes` 的键是点分路径，如 `roles.judge.provider`、`tools.roots`。
+    /// 数字段名当数组下标用（`tools.roots.0`）。
+    pub fn patch_file(
+        dir: &Path,
+        changes: &[(String, serde_json::Value)],
+    ) -> Result<(), String> {
+        let path = dir.join(CONFIG_FILE);
+        let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+            Ok(t) => serde_json::from_str(&t)
+                .map_err(|e| format!("{CONFIG_FILE} 现在就读不出来，没敢动它：{e}"))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::to_value(Settings::default()).map_err(|e| e.to_string())?
+            }
+            Err(e) => return Err(format!("{CONFIG_FILE} 读不了：{e}")),
+        };
+        for (k, v) in changes {
+            put_path(&mut root, k, v.clone())?;
+        }
+        // 自己写出来的东西自己先读一遍。改坏了在这里拒绝，
+        // 而不是留给下一次启动去「回退到默认」。
+        serde_json::from_value::<Settings>(root.clone())
+            .map_err(|e| format!("改完之后不是合法配置，没保存：{e}"))?;
+        let text =
+            serde_json::to_string_pretty(&root).map_err(|e| format!("序列化失败：{e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+        atomic_write(&path, text.as_bytes(), false).map_err(|e| format!("写入失败：{e}"))
+    }
+
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self)
@@ -589,6 +714,51 @@ impl Secrets {
         }
         self.keys.get(name).map(|k| (k.clone(), Src::File))
     }
+}
+
+/// 按点分路径写一个值。中间缺的层自动补成对象；数字段名当数组下标。
+///
+/// 越界的下标当追加处理 —— `tools.roots.0` 在空数组上就是「加第一条」。
+fn put_path(root: &mut serde_json::Value, path: &str, val: serde_json::Value) -> Result<(), String> {
+    let parts: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Err("空路径".into());
+    }
+    let mut cur = root;
+    for (i, seg) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        if let Ok(idx) = seg.parse::<usize>()
+            && cur.is_array()
+        {
+            let arr = cur.as_array_mut().expect("刚判过是数组");
+            if idx >= arr.len() {
+                if last {
+                    arr.push(val);
+                    return Ok(());
+                }
+                arr.push(serde_json::json!({}));
+                let n = arr.len() - 1;
+                cur = &mut arr[n];
+                continue;
+            }
+            if last {
+                arr[idx] = val;
+                return Ok(());
+            }
+            cur = &mut arr[idx];
+            continue;
+        }
+        if !cur.is_object() {
+            *cur = serde_json::json!({});
+        }
+        let obj = cur.as_object_mut().expect("刚补成对象");
+        if last {
+            obj.insert((*seg).to_string(), val);
+            return Ok(());
+        }
+        cur = obj.entry((*seg).to_string()).or_insert_with(|| serde_json::json!({}));
+    }
+    Ok(())
 }
 
 /// 先写 `.tmp` 再 rename。中途断电最多留下一个临时文件，不会留下半个配置。

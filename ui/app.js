@@ -1340,7 +1340,14 @@ function renderConfig() {
 
   box.append(h('button', {
     class: 'primary wide', style: 'margin-top:10px',
-    onclick: () => send('settings_put', { settings: draft }),
+    onclick: () => {
+      // **只发改动过的字段。** 整份发上去会拿浏览器这份快照覆盖磁盘 ——
+      // 用户刚在编辑器里手改的、或者别处刚落的东西就被冲掉了。
+      // 界面和手改 config.json 是同一份真相，谁也不该盖谁。
+      const changes = diffSettings(S.saved || {}, draft);
+      if (!Object.keys(changes).length) return banner('info', '没有改动', 'cfg');
+      send('settings_patch', { changes });
+    },
   }, '保存并重启会话'));
   box.append(h('button', {
     class: 'wide', style: 'margin-top:6px',
@@ -1349,6 +1356,27 @@ function renderConfig() {
   }, '✎ 直接改 config.json'));
   box.append(h('p', { class: 'hint', style: 'margin-top:8px' },
     '改动会重启当前会话（历史不丢，从库里恢复）。'));
+}
+
+/** 算出 `next` 相对 `base` 改了哪些叶子字段，键是点分路径。
+ *
+ * 数组整条算一个叶子：`tools.roots` 变了就整份发过去，不去逐项 diff ——
+ * 一个「删掉第 2 条」用下标表达出来，遇到并发改动会错位，整份替换不会。
+ *
+ * 只报改过的。没碰的字段一个都不发，磁盘上是什么就还是什么。 */
+function diffSettings(base, next, prefix = '', out = {}) {
+  for (const k of Object.keys(next)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    const a = base?.[k], b = next[k];
+    const plain = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    if (plain(b) && plain(a)) diffSettings(a, b, path, out);
+    else if (JSON.stringify(a) !== JSON.stringify(b)) out[path] = b;
+  }
+  // 被删掉的键（比如移除一个 provider）也要说出来，否则它只在界面上消失
+  for (const k of Object.keys(base || {})) {
+    if (!(k in next)) out[prefix ? `${prefix}.${k}` : k] = null;
+  }
+  return out;
 }
 
 /** 跨一次重画传递的配置草稿。只有 `renderConfig` 读它，读完就清掉。 */

@@ -21,7 +21,7 @@
 //! 映射过去就是连着几条 user。不合并的话 API 直接 400，而错误信息只说
 //! "messages: roles must alternate"，第一次遇到会查很久。所以有一遍合并。
 
-use crate::caps::{Cap, Caps, Outcome, Report, Step};
+use crate::caps::{Cap, Caps, Outcome, Report, Step, Think};
 use crate::config::{Api, ModelCfg, ProviderCfg};
 use crate::model::{
     AnswerReq, BoxFuture, BoxStream, Call, JudgeOut, JudgeReq, Message, ModelClient, ModelError,
@@ -244,7 +244,7 @@ impl HttpClient {
                 "tools": [openai_tool(&tool)],
             }),
         };
-        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens);
+        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens, Think::OffForTools);
         if let Some(tc) = caps.tool_choice(anthropic, JUDGE_TOOL) {
             b["tool_choice"] = tc;
         }
@@ -294,12 +294,8 @@ impl HttpClient {
                 "stream": true,
             }),
         };
-        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens);
-        // 回答段要模型好好想，所以**不关 thinking** —— 关它是判断段的需要
-        // （thinking 会顶掉强制工具调用），不是全局策略。
-        if b.get("thinking").is_some_and(|t| t["type"] == "disabled") {
-            b.as_object_mut().unwrap().remove("thinking");
-        }
+        // 回答段不强制工具调用，所以让它好好想。
+        caps.apply(&mut b, anthropic, self.temperature, self.max_tokens, Think::On);
         if !caps.stream_usage {
             // 拿不到就只能估算
         } else if !anthropic {

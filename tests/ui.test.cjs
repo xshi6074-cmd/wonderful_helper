@@ -83,19 +83,30 @@ const settings = {
   tools: {roots:['/first','/second'],net:false,allow_hosts:[],deny_hosts:[],deny_names:[],exec_allow:[],max_bytes:200,max_lines:20,max_matches:10,max_depth:4,max_line_len:100,max_entries:20,max_file_bytes:1000},
 };
 function form() {
-  const f = setup(); f.evalUI(`S.settings = ${JSON.stringify(settings)}; renderConfig();`);
+  const f = setup();
+  // S.saved 是「服务端说盘上是什么」，diff 的基准就是它
+  f.evalUI(`S.settings = ${JSON.stringify(settings)}; S.saved = ${JSON.stringify(settings)}; renderConfig();`);
   const nodes = all(f.doc.querySelector('#config-form'));
   return {...f, nodes, save:nodes.find(e => e.tag === 'button' && e.textContent === '保存并重启会话')};
 }
-test('role and permission form edits reach settings_put', () => {
+// 保存**只发改动过的字段**。整份发上去会拿浏览器这份快照覆盖磁盘 ——
+// 用户刚在编辑器里手改的、或者别处刚落的东西就被冲掉了。这条正是
+// 「应用目录把模型配置打回 anthropic」和「模型配置把目录打回 .」的病根。
+test('saving sends only the changed fields, never the whole file', () => {
   const f = form();
   const model = f.nodes.find(e => e.tag === 'input' && e.value === 'answer');
   model.value = 'new-model'; model.fire('input');
   const net = f.nodes.find(e => e.attrs.type === 'checkbox');
   net.checked = true; net.fire('change');
   f.save.fire('click');
-  assert.equal(f.evalUI('sent.at(-1).settings.roles.answer.model'), 'new-model');
-  assert.equal(f.evalUI('sent.at(-1).settings.tools.net'), true);
+  const msg = f.evalUI('sent.at(-1)');
+  assert.equal(msg.op, 'settings_patch');
+  assert.equal(msg.changes['roles.answer.model'], 'new-model');
+  assert.equal(msg.changes['tools.net'], true);
+  assert.equal(msg.settings, undefined, '不发整份配置');
+  assert.equal(msg.changes['tools.roots'], undefined, '没碰的字段一个都不发');
+  assert.equal(msg.changes['roles.judge.provider'], undefined);
+  assert.equal(Object.keys(msg.changes).length, 2, Object.keys(msg.changes).join(','));
 });
 test('config only exposes built-in fetch controls', () => {
   const f = form();
@@ -191,7 +202,7 @@ test('preset provider lands in the roster with its base_url and key env', () => 
   const f = setup();
   f.evalUI(`S.presets = [{name:'deepseek',label:'DeepSeek',api:'open_ai_compat',
       base_url:'https://api.deepseek.com/v1',key_env:'DEEPSEEK_API_KEY',models:['deepseek-chat']}];
-    S.settings = ${JSON.stringify(settings)}; renderConfig();`);
+    S.settings = ${JSON.stringify(settings)}; S.saved = ${JSON.stringify(settings)}; renderConfig();`);
   const nodes = all(f.doc.querySelector('#config-form'));
   nodes.find(e => e.tag === 'button' && e.textContent === '加进花名册').fire('click');
   // 加进的是**草稿**，不是 S.settings —— 后者是「服务端说盘上是什么」，
@@ -201,10 +212,10 @@ test('preset provider lands in the roster with its base_url and key env', () => 
   assert.ok(after.some(e => String(e.textContent).includes('deepseek')), '但表单上已经有了');
   after.find(e => e.tag === 'button' && e.textContent === '保存并重启会话').fire('click');
   const put = f.evalUI('sent.at(-1)');
-  assert.equal(put.op, 'settings_put');
-  assert.equal(put.settings.providers.deepseek.base_url, 'https://api.deepseek.com/v1');
-  assert.equal(put.settings.providers.deepseek.key_env, 'DEEPSEEK_API_KEY');
-  assert.equal(put.settings.roles.answer.provider, 'local', '别的角色原样带回去，不被这次添加改掉');
+  assert.equal(put.op, 'settings_patch');
+  assert.equal(put.changes['providers.deepseek'].base_url, 'https://api.deepseek.com/v1');
+  assert.equal(put.changes['providers.deepseek'].key_env, 'DEEPSEEK_API_KEY');
+  assert.equal(Object.keys(put.changes).length, 1, '只多了一个 provider，别的一个字都不动');
 });
 // 场景是多选：判断段本来就能一次判出几个，用户插手时没道理只准挑一个。
 test('scene picker is multi-select and sends every checked id', () => {
