@@ -204,7 +204,9 @@ impl Applied {
                 .collect::<Vec<_>>().join("\n");
             parts.push(format!(
                 "下面这些改动因别名、id、端点或来源声明无效而没有生效：\n{items}\n\
-                 请根据当前推断图里的真实 id 修正；source=\"user\" 只能由用户本人选择，模型提交会被丢弃。"
+                 列表里的 `flow/` 是内部路径前缀，不是 kind；例如 `flow/goal1` 表示 id `goal1` 无效。\n\
+                 新建 node/edge 的 id 必须用 `$alias`，只有修改已有对象才能用当前图里的真实 id；edge 的 from/to 也必须引用真实节点 id 或同批 `$alias`。\n\
+                 source=\"user\" 只能由用户本人选择，模型提交会被丢弃。"
             ));
         }
         if !self.conflicts.is_empty() {

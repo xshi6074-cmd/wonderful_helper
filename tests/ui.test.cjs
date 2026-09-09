@@ -433,6 +433,9 @@ test('graph payload is handed to the renderer instead of being laid out in app.j
 });
 test('expanded graph exposes explicit zoom and fit operations', async () => {
   const f = setup();
+  assert.match(fs.readFileSync('ui/app.css', 'utf8'),
+    /#graph-large \.mermaid-graph\{[^}]*min-width:0/,
+    '大画布不能用 intrinsic min-width 顶住缩小');
   f.evalUI(`setLargeGraphZoom(1.4);`);
   await new Promise(resolve => setImmediate(resolve));
   const zoom = f.graphCalls.find(c => c.kind === 'zoom');

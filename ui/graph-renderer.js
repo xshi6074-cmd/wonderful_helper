@@ -56,7 +56,7 @@ export function disposeGraph(host) {
   host.replaceChildren();
 }
 
-const MIN_ZOOM = 0.25;
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3;
 
 /** 缩放已渲染的 SVG。改真实 width/height，让滚动区域随倍率变化，不用会裁切的 transform。 */
@@ -66,6 +66,10 @@ export function setGraphZoom(host, value) {
   const [baseWidth, baseHeight] = svgSize(svg);
   if (!(baseWidth > 0 && baseHeight > 0)) return null;
   const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value) || 1));
+  // Mermaid/CSS 可能留下 intrinsic min-width；清掉它，否则百分比变了但图缩不下去。
+  svg.style.minWidth = '0';
+  svg.style.maxWidth = 'none';
+  svg.style.flex = 'none';
   svg.style.width = `${Math.round(baseWidth * zoom)}px`;
   svg.style.height = `${Math.round(baseHeight * zoom)}px`;
   svg.dataset.pmZoom = String(zoom);

@@ -2392,6 +2392,9 @@ async fn s47_action_recovery_and_provenance() {
     let invalid_prompt = r.model.answer_prompt(3);
     ok(invalid_prompt.contains("别名、id、端点或来源声明无效"),
        "resolve 丢弃回喂真实原因");
+    ok(invalid_prompt.contains("`flow/` 是内部路径前缀")
+        && invalid_prompt.contains("新建 node/edge 的 id 必须用 `$alias`"),
+       "★ 无效路径不会再被模型误读成 kind=flow，并给出可执行修法");
     ok(!invalid_prompt.contains("用户在这一轮里刚编辑过"),
        "★ 没有 edited 事件时绝不谎称用户刚改过");
     let source_prompt = r.model.answer_prompt(4);

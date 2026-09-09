@@ -94,11 +94,11 @@ impl Tool for RecordGraph {
     }
 
     fn description(&self) -> &str {
-        "维护当前设计的结构化图。图用于展示真实组件、包含关系、数据/控制/监督关系和关键接口，也可以展示明确标为未决的设计候选。不要只记录已经完全确定的最终方案；但不得把候选、推断或待验证效果画成实现事实。\n\n\
-         使用现有操作协议 node、edge、drop、render、sketch、view，遵守各自 schema。新增实体可以使用 $alias；后续 patch 优先使用已知稳定 ID。只引用当前图或成功工具结果中已确认的 ID/alias，不引用失败操作中未创建的实体。一次修改尽量局部进行，保留无关对象和手工确认内容。\n\n\
+        "维护当前设计的架构图。拉出完整的模型骨架，（即使用户idea只涉及改动模块，相关梯度传播的其它网络也可能作为网络的一部分）参考：同时展示数据/控制/监督关系和关键接口，鼓励展示明确标为未决的模块和细节。\n\n\
+         使用现有操作协议 node、edge、drop、render、sketch、view，遵守各自 schema。新增 node/edge 的 id 必须写成 $alias（例如 $goal、$e1），不能自行编造 goal1、e1 之类的稳定 ID；后续 patch 才使用工具成功返回或当前图中已有的稳定 ID。只引用当前图或成功工具结果中已确认的 ID/alias，不引用失败操作中未创建的实体。一次修改尽量局部进行，保留无关对象和手工确认内容。\n\n\
          按当前问题选择粒度。架构层表现真实组件和包含关系；关键路径进一步展开接口、算子、监督及状态更新。纯排列、执行阶段和视觉分组不能冒充真实模块包含关系。一个矩形不能同时含混地代表特征、执行模块和参数集合；必要时拆开并说明语义。边应交代何种依赖，不能让所有关系都靠无标签实线表达。\n\n\
-         attrs 按 schema 使用键值对数组，而非 JSON 对象。只使用渲染器已支持的视觉字段；更丰富的形状、颜色、字号与布局策略需由程序实现，不能通过任意属性承诺显示效果。长解释进入正文或笔记，图中保留识别结构和关键选择所需信息。\n\n\
-         source 表示证据来源，不等于实现状态或用户批准。代码事实引用实际读过的 repo 位置；论文事实引用实际读过的 paper 位置；助手假设使用 guess。模型不得写 source=user。用户要求由助手转记时，在正文/笔记标明用户原意，不冒充用户手工编辑事件。保留事实、候选设计、已选但未实现、待验证效果的区别。\n\n\
+         attrs 按 schema 使用键值对数组，而非 JSON 对象。只使用渲染器已支持的视觉字段，不能通过任意属性承诺显示效果。长解释进入正文或笔记，图中保留识别结构和关键选择所需信息。\n\n\
+         source 表示证据来源，不等于实现状态或用户批准。代码事实引用实际读过的 repo 位置；论文事实引用实际读过的 paper 位置；助手假设使用 guess。模型不得写 source=user。\n\n\
          当上游接口、状态时序或目标改变，检查直接相关的消费者、边、验证和解释是否仍成立；无法立即复核的明确标记。不要用整图重建代替局部 patch，也不要删除后重建来绕开手工确认保护。只有成功返回的修改才能报告为已保存。"
     }
 
@@ -116,8 +116,8 @@ impl Tool for RecordGraph {
                             "enum": ["node", "edge", "drop", "render", "sketch", "view"],
                             "description": "node=建/改节点 edge=建/改边 drop=删 render=改整图渲染选项 sketch=改成你自己写的源码 view=切换用哪一份"
                         },
-                        "id": { "type": "string", "description": "node/edge：新建填 $别名，改已有填它的 id（如 n12_0 / e12_1）" },
-                        "kind": { "type": "string", "description": "节点：data/module/op/loss/metric/ablation/baseline/gate/note；边：flow/feeds/supervises/compares/depends/snapshot/copies。也可以自己造词，未知值安全回退" },
+                        "id": { "type": "string", "description": "node/edge：新建必须填 $别名（如 $goal / $e1），不可自造稳定 ID；修改已有对象才填当前图中真实 id（如 n12_0 / e12_1）" },
+                        "kind": { "type": "string", "description": "由 op 决定，不能混用。op=node：data/module/op/loss/metric/ablation/baseline/gate/note；op=edge：flow/feeds/supervises/compares/depends/snapshot/copies。flow 是边类型，不是节点类型；未知值会安全回退" },
                         "label": { "type": "string", "description": "图上标题，可正常换行，不要重复 kind" },
                         "body": { "type": "string", "description": "点击后才看的完整细节、依据与实现说明" },
                         "parent": { "type": ["string", "null"], "description": "真实包含关系：归到哪个节点下面并画成 subgraph；null = 提到顶层。不要用它代替普通阅读分区" },
