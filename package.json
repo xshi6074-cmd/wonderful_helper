@@ -1,0 +1,14 @@
+{
+  "name": "premortem-ui-assets",
+  "private": true,
+  "scripts": {
+    "build:graph": "esbuild ui/mermaid-entry.js --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=ui/vendor/mermaid.bundle.js"
+  },
+  "dependencies": {
+    "@mermaid-js/layout-elk": "0.2.2",
+    "mermaid": "11.16.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9"
+  }
+}

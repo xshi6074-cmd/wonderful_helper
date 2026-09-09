@@ -13,6 +13,8 @@ class Element {
   set textContent(v) { this.text = String(v); this.children = []; }
   get textContent() { return (this.text || '') + this.children.map(c => c.textContent).join(''); }
   append(...children) { for (const c of children) { if (c) { this.children.push(c); c.parent = this; } } }
+  replaceChildren(...children) { this.text = ''; this.children = []; this.append(...children); }
+  remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); }
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'value') this.value = v; }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
   // 子树查询：`$(sel, root)` 这种带根的查找要走到这里。只认 #id / .class / tag，
@@ -50,6 +52,7 @@ class Element {
 }
 function setup() {
   const elements = new Map();
+  const graphCalls = [];
   const doc = {
     querySelector(s) { if (!elements.has(s)) elements.set(s, new Element()); return elements.get(s); },
     // 真实 DOM 里 #modal 内部就有 .sheet-body；替身里让它们连上，
@@ -67,13 +70,17 @@ function setup() {
     body: new Element(), documentElement: new Element(),
   };
   doc._link();
+  const graphRenderer = {
+    renderGraph(host, payload, context) { graphCalls.push({host, payload, context}); context.onState?.({phase:'ready',warnings:[]}); },
+    disposeGraph(host) { host.replaceChildren(); },
+  };
   const ctx = vm.createContext({ document: doc, Node: Element, window: { innerHeight: 900 },
-    addEventListener() {}, setTimeout() {}, clearTimeout() {}, console });
+    __graphRenderer: graphRenderer, addEventListener() {}, setTimeout() {}, clearTimeout() {}, console });
   const source = fs.readFileSync('ui/app.js', 'utf8').replace(/boot\(\);\s*$/, '');
   vm.runInContext(source, ctx);
   const evalUI = s => vm.runInContext(s, ctx);
   evalUI(`globalThis.sent = []; ws = {readyState:1, send: s => sent.push(JSON.parse(s))};`);
-  return { doc, evalUI, ctx, elements };
+  return { doc, evalUI, ctx, elements, graphCalls };
 }
 function all(e) { return [e, ...e.children.flatMap(all)]; }
 const settings = {
@@ -406,11 +413,39 @@ test('disconnected Enter keeps draft, stop names observed turn, roots keep extra
   f.doc.querySelector('#root-save').fire('click');
   assert.equal(f.evalUI('sent.length'), n, '空目录一条都不发');
 });
-test('cyclic graph nodes stay inside the SVG viewport', () => {
+test('graph payload is handed to the renderer instead of being laid out in app.js', async () => {
   const f = setup();
-  f.evalUI(`drawGraph({nodes:{a:{label:'A'},b:{label:'B'}},edges:{ab:{from:'a',to:'b'},ba:{from:'b',to:'a'}}});`);
-  const svg = f.doc.querySelector('#graph').children[0];
-  for (const rect of all(svg).filter(e => e.tag === 'rect')) {
-    assert.ok(Number(rect.attrs.y) + Number(rect.attrs.height) <= Number(svg.attrs.height));
-  }
+  f.evalUI(`S.session='s'; S.snap={graph_render:{source:'flowchart TD',layout:'elk',bindings:[]},
+    ws:{flow:{view:'built',nodes:{a:{id:'a',label:'A'}},edges:{}}}}; drawGraph(S.snap.ws.flow,S.snap.graph_render);`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.graphCalls.length, 1);
+  assert.equal(f.graphCalls[0].payload.layout, 'elk');
+  assert.equal(f.graphCalls[0].context.renderId, 'graph-side');
+});
+
+test('node editor preserves draft, patches changed fields only, and exposes same-field conflicts', () => {
+  const f = setup();
+  f.evalUI(`S.session='s'; S.snap={ws:{flow:{nodes:{a:{id:'a',label:'A',kind:'module',body:'old'}},edges:{}}}};
+    editNode('a',S.snap.ws.flow.nodes.a);`);
+  let fields = all(f.doc.querySelector('.sheet-body')).filter(e => e.tag === 'input' || e.tag === 'textarea');
+  fields[0].value = '草稿';
+  // 图刷新只换快照，不得回填或关闭正在编辑的表单。
+  f.evalUI(`S.snap.ws.flow.nodes.a={id:'a',label:'A',kind:'loss',body:'new body'};`);
+  assert.equal(fields[0].value, '草稿');
+  const apply = all(f.doc.querySelector('.sheet-body')).find(e => e.tag === 'button' && e.textContent === '应用');
+  apply.fire('click');
+  const msg = f.evalUI('sent.at(-1)');
+  assert.deepEqual(Object.keys(msg.ops[0]).sort(), ['id','label','op']);
+  assert.equal(msg.ops[0].label, '草稿');
+
+  // 同一字段变化时先停在冲突界面，展示当前值和草稿，再由用户决定覆盖。
+  f.evalUI(`sent=[]; S.snap.ws.flow.nodes.a={id:'a',label:'当前值',kind:'loss',body:'new body'};
+    editNode('a',{id:'a',label:'旧值',kind:'loss',body:'new body'});`);
+  fields = all(f.doc.querySelector('.sheet-body')).filter(e => e.tag === 'input' || e.tag === 'textarea');
+  fields[0].value = '我的草稿';
+  all(f.doc.querySelector('.sheet-body')).find(e => e.tag === 'button' && e.textContent === '应用').fire('click');
+  assert.equal(f.evalUI('sent.length'), 0);
+  assert.match(f.doc.querySelector('.sheet-body').textContent, /当前值.*我的草稿/);
+  all(f.doc.querySelector('.sheet-body')).find(e => e.tag === 'button' && e.textContent === '仍用我的草稿覆盖').fire('click');
+  assert.equal(f.evalUI('sent[0].ops[0].label'), '我的草稿');
 });

@@ -53,6 +53,14 @@ const S = {
   banners: [],            // { level, text, key }
 };
 
+let graphApi = globalThis.__graphRenderer || null;
+let graphApiPromise = null;
+function graphRenderer() {
+  if (graphApi) return Promise.resolve(graphApi);
+  if (!graphApiPromise) graphApiPromise = import('/graph-renderer.js').then(m => (graphApi = m));
+  return graphApiPromise;
+}
+
 // ───────────────────────── 连接 ─────────────────────────
 
 let ws = null, retry = 0;
@@ -80,6 +88,7 @@ function send(op, extra = {}) {
 function onMsg(m) {
   switch (m.t) {
     case 'boot':
+      if (S.session && S.session !== m.session) closeGraphCanvas();
       S.session = m.session; S.sessions = m.sessions; S.settings = m.settings;
       S.keys = m.keys; S.warnings = m.warnings || []; S.tools = m.tools || [];
       S.web = m.web; S.metrics = m.metrics; S.memory = m.memory || [];
@@ -514,18 +523,20 @@ function renderAsk() {
 
 function isGuess(prov) {
   const s = prov?.source;
-  return !s || s === 'Guess';
+  return !s || s === 'guess';
 }
 
 function renderRight() {
   const ws = S.snap?.ws;
   const g = ws?.flow;
-  drawGraph(g);
-  $('#graph-hint').textContent = g?.view === 'sketch' ? '（模型自己画的，不能点选）' : '';
+  drawGraph(g, S.snap?.graph_render);
+  $('#graph-hint').textContent = g?.view === 'sketch' ? '（自由 sketch，只读）' : '';
   const src = $('#graph-src');
   const mer = S.snap?.mermaid;
   src.hidden = !mer;
   if (mer) $('pre', src).textContent = mer;
+  $('#graph-open').hidden = !S.snap?.graph_render;
+  if (!$('#graph-over').hidden) renderLargeGraph();
 
   const fl = $('#fields'); fl.textContent = '';
   const fields = Object.entries(ws?.fields || {});
@@ -590,104 +601,101 @@ function moveItem(from, to, i) {
   ] });
 }
 
-/** 分层布局 + SVG。**故意不引 mermaid**：节点要能点选编辑，就得是我们自己画的。 */
-function drawGraph(g) {
-  const box = $('#graph'); box.textContent = '';
-  const nodes = g?.nodes || {}, edges = g?.edges || {};
-  const ids = Object.keys(nodes);
+/** Mermaid 只消费后端派生的 payload；`g` 只用于空态和点击后的当前对象查找。 */
+function drawGraph(g, payload = S.snap?.graph_render) {
+  const box = $('#graph');
+  const ids = Object.keys(g?.nodes || {});
   $('.legend').hidden = !ids.length;
-  if (!ids.length) {
-    box.append(h('div', { class: 'empty' }, g?.sketch ? '模型画的图见下方源码' : '还没有推断图'));
+  if (!payload) {
+    graphRenderer().then(api => api.disposeGraph(box));
+    box.textContent = '';
+    box.append(h('div', { class: 'empty' }, g?.sketch ? '自由 sketch 仅提供源码，只读' : '还没有推断图'));
+    setGraphStatus('#graph-status', null);
     return;
   }
-  const groupOf = {}, isGroup = {};
-  for (const id of ids) { const p = nodes[id].parent; if (p) { isGroup[p] = true; groupOf[id] = p; } }
-  const flat = ids.filter(id => !isGroup[id]);
+  graphRenderer().then(api => api.renderGraph(box, payload, graphContext('graph-side', '#graph-status')))
+    .catch(e => setGraphStatus('#graph-status', { phase: 'error', error: `图组件加载失败：${e.message || e}` }));
+}
 
-  // 层号 = 从任一根出发的最长路径。有环也不会死循环（跑固定轮数）。
-  const layer = {}; flat.forEach(id => layer[id] = 0);
-  const es = Object.values(edges).filter(e => layer[e.from] !== undefined && layer[e.to] !== undefined);
-  for (let i = 0; i < flat.length; i++) {
-    let moved = false;
-    for (const e of es) if (layer[e.to] < layer[e.from] + 1) { layer[e.to] = layer[e.from] + 1; moved = true; }
-    if (!moved) break;
-  }
-  const rows = {};
-  for (const id of flat) (rows[layer[id]] ||= []).push(id);
-  Object.values(rows).forEach(r => r.sort());
-
-  const W = 148, H = 38, GX = 22, GY = 34, PAD = 14;
-  const pos = {};
-  let maxCols = 1;
-  for (const [L, r] of Object.entries(rows)) {
-    maxCols = Math.max(maxCols, r.length);
-    r.forEach((id, i) => { pos[id] = { x: PAD + i * (W + GX), y: PAD + (+L) * (H + GY) }; });
-  }
-  const width = PAD * 2 + maxCols * W + (maxCols - 1) * GX;
-  const height = PAD * 2 + H + Math.max(0, ...Object.keys(rows).map(Number)) * (H + GY);
-
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('width', width); svg.setAttribute('height', height);
-  const mk = (t, a, parent = svg) => {
-    const e = document.createElementNS(NS, t);
-    for (const [k, v] of Object.entries(a)) e.setAttribute(k, v);
-    parent.append(e); return e;
+function graphContext(renderId, statusSelector, force = false) {
+  return {
+    renderId, force, sessionId: S.session,
+    currentSession: () => S.session,
+    onSelect: selectGraphObject,
+    onState: state => setGraphStatus(statusSelector, state),
   };
+}
 
-  // 分组：围住它的子节点
-  for (const gid of Object.keys(isGroup)) {
-    const kids = ids.filter(i => groupOf[i] === gid).map(i => pos[i]).filter(Boolean);
-    if (!kids.length) continue;
-    const x0 = Math.min(...kids.map(p => p.x)) - 8, y0 = Math.min(...kids.map(p => p.y)) - 18;
-    const x1 = Math.max(...kids.map(p => p.x)) + W + 8, y1 = Math.max(...kids.map(p => p.y)) + H + 8;
-    const gg = mk('g', { class: 'g' });
-    mk('rect', { x: x0, y: y0, width: x1 - x0, height: y1 - y0, rx: 8 }, gg);
-    const t = mk('text', { x: x0 + 6, y: y0 + 12 }, gg);
-    t.textContent = nodes[gid].label || gid;
+function selectGraphObject(kind, id) {
+  const flow = S.snap?.ws?.flow;
+  if (!flow) return;
+  if (kind === 'edge') {
+    const edge = flow.edges?.[id];
+    if (!edge) return banner('warn', '这条边已删除，请查看最新图', 'graph-stale');
+    editEdge(id, edge);
+    return;
   }
+  const node = flow.nodes?.[id];
+  if (!node) return banner('warn', '这个节点已删除，请查看最新图', 'graph-stale');
+  editNode(id, node);
+}
 
-  const anchor = (id) => {
-    if (pos[id]) return { cx: pos[id].x + W / 2, top: pos[id].y, bot: pos[id].y + H };
-    const kids = ids.filter(i => groupOf[i] === id).map(i => pos[i]).filter(Boolean);
-    if (!kids.length) return null;
-    const x0 = Math.min(...kids.map(p => p.x)), x1 = Math.max(...kids.map(p => p.x)) + W;
-    const y0 = Math.min(...kids.map(p => p.y)) - 18, y1 = Math.max(...kids.map(p => p.y)) + H;
-    return { cx: (x0 + x1) / 2, top: y0, bot: y1 };
-  };
-
-  for (const e of Object.values(edges)) {
-    const a = anchor(e.from), b = anchor(e.to);
-    if (!a || !b) continue;
-    const dy = Math.max(12, (b.top - a.bot) / 2);
-    const d = `M${a.cx},${a.bot} C${a.cx},${a.bot + dy} ${b.cx},${b.top - dy} ${b.cx},${b.top}`;
-    mk('path', { d, class: 'e' + (isGuess(e.prov) ? ' guess' : '') });
-    if (e.label) {
-      const t = mk('text', { x: (a.cx + b.cx) / 2 + 4, y: (a.bot + b.top) / 2, class: 'elabel' });
-      t.textContent = e.label;
-    }
+function setGraphStatus(selector, state) {
+  const el = $(selector);
+  if (!el) return;
+  el.textContent = '';
+  el.className = 'graph-status';
+  if (!state || state.phase === 'ready' && !(state.warnings || []).length) {
+    el.hidden = true;
+    return;
   }
-
-  for (const id of flat) {
-    const n = nodes[id], p = pos[id];
-    const cls = 'n' + (isGuess(n.prov) ? ' guess' : '') +
-      (n.prov?.origin === 'User' ? ' user' : '') + (S.fresh.has(id) ? ' fresh' : '');
-    const gg = mk('g', { class: cls });
-    gg.addEventListener('click', () => editNode(id, n));
-    const title = document.createElementNS(NS, 'title');
-    title.textContent = `${id} · ${n.kind}\n${n.body || ''}`;
-    gg.append(title);
-    mk('rect', { x: p.x, y: p.y, width: W, height: H, rx: 6 }, gg);
-    const label = (n.label || id);
-    const t1 = mk('text', { x: p.x + W / 2, y: p.y + (n.kind ? 16 : 23), 'text-anchor': 'middle' }, gg);
-    t1.textContent = label.length > 20 ? label.slice(0, 19) + '…' : label;
-    if (n.kind) {
-      const t2 = mk('text', { x: p.x + W / 2, y: p.y + 29, 'text-anchor': 'middle', class: 'elabel' }, gg);
-      t2.textContent = n.kind;
-    }
+  el.hidden = false;
+  if (state.phase === 'rendering') {
+    el.classList.add('working'); el.textContent = `${state.layout.toUpperCase()} 正在排版…`;
+  } else if (state.phase === 'error') {
+    el.classList.add('bad'); el.textContent = state.error;
+  } else {
+    el.classList.add('warn');
+    el.append(h('span', {}, (state.warnings || []).join('；')),
+      ...(state.missing?.length ? [h('button', { onclick: openGraphIndex }, '按 ID 查找')] : []));
   }
-  box.append(svg);
+}
+
+function openGraphCanvas() {
+  if (!S.snap?.graph_render) return;
+  const over = $('#graph-over');
+  over.hidden = false;
+  $('#graph-layout').value = S.snap.graph_render.layout || 'elk';
+  $('pre', $('#graph-over-src')).textContent = S.snap.graph_render.source;
+  renderLargeGraph(true);
+}
+
+function renderLargeGraph(force = false) {
+  const payload = S.snap?.graph_render;
+  if (!payload) return closeGraphCanvas();
+  $('#graph-over-meta').textContent = ` · ${Object.keys(S.snap?.ws?.flow?.nodes || {}).length} 个节点`;
+  $('#graph-layout').value = payload.layout || 'elk';
+  $('pre', $('#graph-over-src')).textContent = payload.source;
+  graphRenderer().then(api => api.renderGraph(
+    $('#graph-large'), payload, graphContext('graph-expanded', '#graph-over-status', force),
+  )).catch(e => setGraphStatus('#graph-over-status', { phase: 'error', error: `图组件加载失败：${e.message || e}` }));
+}
+
+function closeGraphCanvas() {
+  const over = $('#graph-over');
+  if (!over) return;
+  over.hidden = true;
+  graphRenderer().then(api => api.disposeGraph($('#graph-large')));
+}
+
+function openGraphIndex() {
+  const flow = S.snap?.ws?.flow;
+  if (!flow) return;
+  const rows = [
+    ...Object.values(flow.nodes || {}).map(n => h('button', { onclick: () => editNode(n.id, n) }, `${n.id} · ${n.label || '未命名节点'}`)),
+    ...Object.values(flow.edges || {}).map(e => h('button', { onclick: () => editEdge(e.id, e) }, `${e.id} · ${e.label || `${e.from} → ${e.to}`}`)),
+  ];
+  modal('按稳定 ID 查找', [h('div', { class: 'graph-index' }, ...rows)], () => {}, '关闭');
 }
 
 // ───────────────────────── 编辑弹层 ─────────────────────────
@@ -697,7 +705,7 @@ function modal(title, bodyNodes, onOk, okLabel = '应用') {
   body.textContent = '';
   body.append(h('h3', {}, title), ...bodyNodes,
     h('div', { class: 'acts', style: 'display:flex;gap:8px;margin-top:14px' },
-      h('button', { class: 'primary', onclick: () => { onOk(); close(); } }, okLabel),
+      h('button', { class: 'primary', onclick: () => { if (onOk() !== false) close(); } }, okLabel),
       h('button', { onclick: close }, '取消')));
   m.hidden = false;
   function close() { m.hidden = true; }
@@ -705,21 +713,92 @@ function modal(title, bodyNodes, onOk, okLabel = '应用') {
 }
 
 function editNode(id, n) {
+  const session = S.session;
+  const initial = { label: n.label || '', kind: n.kind || '', body: n.body || '' };
   const label = h('input', { value: n.label || '' });
   const kind = h('input', { value: n.kind || '' });
   const body = h('textarea', { rows: 4 }); body.value = n.body || '';
   modal(`节点 ${id}`, [
     h('div', { class: 'field' }, h('label', {}, '标题'), label),
-    h('div', { class: 'field' }, h('label', {}, '类型（形状由 memory/prompts.toml 的 graph.shape 决定）'), kind),
+    h('div', { class: 'field' }, h('label', {}, '类型'), kind),
     h('div', { class: 'field' }, h('label', {}, '细节'), body),
-    h('p', { class: 'hint' }, '改完之后，模型在本轮里不能再动这个节点。'),
+    h('p', { class: 'hint' }, '只提交你实际改过的字段；图重绘不会清空这里的草稿。'),
     h('button', {
       class: 'danger', style: 'margin-top:4px',
-      onclick: () => { send('edit', { ops: [{ op: 'drop', id: { node: id } }] }); $('#modal').hidden = true; },
+      onclick: () => dropGraphObject('node', id, session),
     }, '删除这个节点'),
-  ], () => send('edit', {
-    ops: [{ op: 'node', id, label: label.value, kind: kind.value, body: body.value }],
-  }));
+  ], () => submitGraphEdit('node', id, session, initial, { label, kind, body }));
+}
+
+function editEdge(id, e) {
+  const session = S.session;
+  const initial = { label: e.label || '', kind: e.kind || '' };
+  const label = h('input', { value: initial.label });
+  const kind = h('input', { value: initial.kind });
+  modal(`边 ${id}`, [
+    h('p', { class: 'hint' }, `${e.from} → ${e.to}`),
+    h('div', { class: 'field' }, h('label', {}, '说明'), label),
+    h('div', { class: 'field' }, h('label', {}, '关系类型'), kind),
+    h('button', { class: 'danger', style: 'margin-top:4px', onclick: () => dropGraphObject('edge', id, session) }, '删除这条边'),
+  ], () => submitGraphEdit('edge', id, session, initial, { label, kind }));
+}
+
+function submitGraphEdit(type, id, session, initial, inputs, force = false) {
+  const current = type === 'node'
+    ? S.snap?.ws?.flow?.nodes?.[id]
+    : S.snap?.ws?.flow?.edges?.[id];
+  if (session !== S.session) return graphEditProblem('会话已经切换；草稿仍保留，请复制后关闭。');
+  if (!current) return graphEditProblem(type === 'node' ? '这个节点已删除，不能从旧图创建幽灵节点。' : '这条边已删除，不能从旧图恢复。');
+
+  const patch = { op: type, id };
+  const changed = [];
+  for (const [field, input] of Object.entries(inputs)) {
+    if (input.value === initial[field]) continue;
+    patch[field] = input.value;
+    changed.push(field);
+  }
+  if (!changed.length) return true;
+
+  const conflicts = changed.filter(field => (current[field] || '') !== initial[field]);
+  if (conflicts.length && !force) {
+    showGraphConflicts(conflicts, current, inputs,
+      () => submitGraphEdit(type, id, session, initial, inputs, true));
+    return false;
+  }
+  send('edit', { ops: [patch] });
+  return true;
+}
+
+function showGraphConflicts(fields, current, inputs, overwrite) {
+  const body = $('.sheet-body', $('#modal'));
+  $('.graph-conflict', body)?.remove();
+  const names = { label: '标题/说明', kind: '类型', body: '细节' };
+  const panel = h('div', { class: 'graph-conflict' },
+    h('b', {}, '同一字段在编辑期间已变化'),
+    ...fields.map(field => h('div', { class: 'conflict-row' },
+      h('span', {}, names[field] || field),
+      h('div', {}, h('small', {}, '当前值'), h('code', {}, current[field] || '（空）')),
+      h('div', {}, h('small', {}, '你的草稿'), h('code', {}, inputs[field].value || '（空）')))),
+    h('div', { class: 'acts' },
+      h('button', { class: 'danger', onclick: () => { if (overwrite()) $('#modal').hidden = true; } }, '仍用我的草稿覆盖'),
+      h('button', { onclick: () => panel.remove() }, '返回修改')));
+  body.append(panel);
+}
+
+function graphEditProblem(text) {
+  const body = $('.sheet-body', $('#modal'));
+  $('.graph-conflict', body)?.remove();
+  body.append(h('div', { class: 'graph-conflict bad' }, text));
+  return false;
+}
+
+function dropGraphObject(type, id, session) {
+  const current = type === 'node'
+    ? S.snap?.ws?.flow?.nodes?.[id]
+    : S.snap?.ws?.flow?.edges?.[id];
+  if (session !== S.session || !current) return graphEditProblem('对象或会话已经变化，删除未提交。');
+  send('edit', { ops: [{ op: 'drop', id: { [type]: id } }] });
+  $('#modal').hidden = true;
 }
 
 function editField(path, f) {
@@ -1584,6 +1663,17 @@ function boot() {
   };
   $('#new-chat').onclick = () => send('open', { session: '' });
   $('#graph-refresh').onclick = () => send('snap');
+  $('#graph-open').onclick = (e) => { e.stopPropagation(); openGraphCanvas(); };
+  $('#graph-preview').onclick = (e) => {
+    if (!e.target.closest?.('[data-pm-id]') && S.snap?.graph_render) openGraphCanvas();
+  };
+  $('#graph-over-close').onclick = closeGraphCanvas;
+  $('#graph-over').onclick = (e) => { if (e.target.id === 'graph-over') closeGraphCanvas(); };
+  $('#graph-retry').onclick = () => renderLargeGraph(true);
+  $('#graph-layout').onchange = (e) => {
+    const value = e.target.value;
+    send('edit', { ops: [{ op: 'render', key: 'layout', value }] });
+  };
   $('#stop').onclick = () => { if (S.turn !== null) send('interrupt', { turn: S.turn }); };
 
   $$('#right-seg button').forEach(b => b.onclick = () => switchRight(b.dataset.rt));
@@ -1641,6 +1731,7 @@ function boot() {
     if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFind(); }
     if ((e.ctrlKey || e.metaKey) && e.key === 'b') { e.preventDefault(); $('#left-hide').click(); }
     if (e.key === 'Escape' && !$('#modal').hidden) { $('#modal').hidden = true; return; }
+    if (e.key === 'Escape' && !$('#graph-over').hidden) { closeGraphCanvas(); return; }
     if (e.key === 'Escape' && !$('#over').hidden) closeOver();
   });
 

@@ -110,7 +110,11 @@
 
     <div class="pane" data-rp="infer">
       <h4>实验流程图 <span class="hint" id="graph-hint"></span></h4>
-      <div id="graph"></div>
+      <div id="graph-preview" title="点击空白处展开大画布">
+        <div id="graph"></div>
+        <button id="graph-open" class="graph-open" hidden>点击预览 · 展开画布</button>
+      </div>
+      <div id="graph-status" class="graph-status" hidden></div>
       <div class="legend">
         <i>有依据</i><i class="guess">模型猜的</i><i class="user">你定的</i>
       </div>
@@ -139,6 +143,30 @@
 
 <!-- 节点编辑弹层（小改动用它） -->
 <div id="modal" hidden><div class="sheet"><div class="sheet-body"></div></div></div>
+
+<!-- 推断图的大画布。侧栏只做预览；这里重新 render，绝不复制侧栏 SVG。 -->
+<div id="graph-over" hidden>
+  <section class="graph-panel" role="dialog" aria-modal="true" aria-labelledby="graph-over-title">
+    <header class="graph-panel-head">
+      <div>
+        <b id="graph-over-title">实验流程图</b>
+        <span class="hint" id="graph-over-meta"></span>
+      </div>
+      <span class="spacer"></span>
+      <label class="graph-layout">布局
+        <select id="graph-layout">
+          <option value="elk">ELK</option>
+          <option value="dagre">Dagre</option>
+        </select>
+      </label>
+      <button id="graph-retry" class="ghost">重试</button>
+      <button id="graph-over-close" class="icon" title="关闭 (Esc)">✕</button>
+    </header>
+    <div id="graph-over-status" class="graph-status" hidden></div>
+    <div class="graph-stage"><div id="graph-large"></div></div>
+    <details id="graph-over-src"><summary>查看 Mermaid 源码</summary><pre></pre></details>
+  </section>
+</div>
 
 <!-- ───────── 编辑遮罩 ─────────
      改文件、改场景、审阅蒸馏草稿都用它。这些都是**编辑时才需要一下**的东西：

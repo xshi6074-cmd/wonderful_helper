@@ -262,7 +262,7 @@ impl Tool for AskUser {
             ToolResult::ok(
                 &call,
                 format!(
-                    "已把问题和 {} 个候选项呈现给用户，等他回复。现在可以结束本轮了。",
+                    "已把问题和 {} 个候选项呈现给用户，等待回复。现在可以结束本轮了。",
                     opts.len()
                 ),
             )

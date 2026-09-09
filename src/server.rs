@@ -49,6 +49,8 @@ use tokio_util::sync::CancellationToken;
 const INDEX: &str = include_str!("../ui/index.html");
 const APP_JS: &str = include_str!("../ui/app.js");
 const APP_CSS: &str = include_str!("../ui/app.css");
+const GRAPH_RENDERER_JS: &str = include_str!("../ui/graph-renderer.js");
+const MERMAID_BUNDLE_JS: &str = include_str!("../ui/vendor/mermaid.bundle.js");
 
 pub struct App {
     dir: PathBuf,
@@ -132,6 +134,8 @@ impl App {
             .route("/", get(|| async { no_cache("text/html; charset=utf-8", INDEX) }))
             .route("/app.js", get(|| async { js(APP_JS) }))
             .route("/app.css", get(|| async { css(APP_CSS) }))
+            .route("/graph-renderer.js", get(|| async { js(GRAPH_RENDERER_JS) }))
+            .route("/vendor/mermaid.bundle.js", get(|| async { js(MERMAID_BUNDLE_JS) }))
             .route("/ws", get(ws_upgrade))
             .with_state(self.clone())
     }
@@ -451,6 +455,7 @@ fn snap_json(s: &crate::msg::Snap, style: &crate::memory::GraphStyle) -> Value {
         })).collect::<Vec<_>>(),
         "ws": serde_json::to_value(&s.ws).unwrap_or(Value::Null),
         "mermaid": render::source(&s.ws.flow, style).map(|(_, src)| src),
+        "graph_render": render::graph_render(&s.ws.flow, style),
     })
 }
 

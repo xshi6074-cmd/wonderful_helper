@@ -100,6 +100,10 @@ impl Tool for RecordGraph {
          不要每轮把整张图重发一遍（所有字段都是 patch，不给就是不改）。\n\
          新建元素时 id 填 `$别名`（如 `$enc`），同一轮后续调用仍可引用已经成功创建的别名；\
          提交后由程序铸成稳定 id。改已有元素就直接填它现在的 id。\n\
+         parent 只表达真实包含关系；普通阅读分区用父节点的 visual.container=section。\n\
+         不要输出坐标、连线转折点或针对侧栏宽度排版，Mermaid + ELK 负责布局。\n\
+         label 是图上标题，attrs 的 summary 是一行业务说明，完整细节放 body。\n\
+         主干用 visual.emphasis=primary，辅助支路用 secondary/muted，避免所有节点同等突出。\n\
          没有实证来源的节点会画成虚线 —— 那是给用户看的盲区，所以 source 要老实填。\
          source=\"user\" 只允许用户在界面上主动选择；你不能输出，输出了整条 op 会被丢弃。"
     }
@@ -119,11 +123,11 @@ impl Tool for RecordGraph {
                             "description": "node=建/改节点 edge=建/改边 drop=删 render=改整图渲染选项 sketch=改成你自己写的源码 view=切换用哪一份"
                         },
                         "id": { "type": "string", "description": "node/edge：新建填 $别名，改已有填它的 id（如 n12_0 / e12_1）" },
-                        "kind": { "type": "string", "description": "节点：data/module/op/loss/metric/ablation/baseline/gate/note；边：flow/feeds/supervises/compares/depends。也可以自己造词，形状不认识就落到默认" },
-                        "label": { "type": "string", "description": "图上显示的名字，短" },
-                        "body": { "type": "string", "description": "装不进标签的细节，只在节点明细里出现" },
-                        "parent": { "type": ["string", "null"], "description": "归到哪个节点下面（画成 subgraph）；null = 提到顶层" },
-                        "attrs": { "type": "array", "description": "[[键, 值]]，值给 null 表示删这一项",
+                        "kind": { "type": "string", "description": "节点：data/module/op/loss/metric/ablation/baseline/gate/note；边：flow/feeds/supervises/compares/depends/snapshot/copies。也可以自己造词，未知值安全回退" },
+                        "label": { "type": "string", "description": "图上标题，可正常换行，不要重复 kind" },
+                        "body": { "type": "string", "description": "点击后才看的完整细节、依据与实现说明" },
+                        "parent": { "type": ["string", "null"], "description": "真实包含关系：归到哪个节点下面并画成 subgraph；null = 提到顶层。不要用它代替普通阅读分区" },
+                        "attrs": { "type": "array", "description": "[[键, 值]]，值给 null 表示删。summary=节点内短说明；visual.emphasis=primary|secondary|muted；visual.shape=rect|rounded|pill|cylinder|diamond|hexagon|subroutine|circle；visual.tone=indigo|blue|teal|amber|rose|slate；visual.text=sm|md|lg；有子节点的容器可用 visual.container=module|section",
                                    "items": { "type": "array" } },
                         "from": { "type": "string", "description": "edge：起点节点 id 或 $别名" },
                         "to": { "type": "string", "description": "edge：终点节点 id 或 $别名。op=view 时填 built 或 sketch" },
@@ -137,7 +141,7 @@ impl Tool for RecordGraph {
                         },
                         "confidence": { "type": "number", "description": "0–1" },
                         "why": { "type": "string", "description": "drop：为什么去掉" },
-                        "key": { "type": "string", "description": "render：如 dialect / dir / classdef.<名>" },
+                        "key": { "type": "string", "description": "render：dialect / dir / layout；layout 只用 elk 或 dagre。不要输出 classdef，自由样式用受限 visual.*" },
                         "value": { "type": ["string", "null"], "description": "render 的值，给 null 表示删" },
                         "lang": { "type": "string", "enum": ["mermaid", "html"], "description": "sketch 的语言" },
                         "src": { "type": "string", "description": "sketch：你自己写的图源码。自由但没有节点 id，用户只能整段改、点不了单个节点" }
