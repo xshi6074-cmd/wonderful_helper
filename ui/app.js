@@ -108,10 +108,10 @@ function onMsg(m) {
       S.stream.text += m.text;
       liveDelta();
       break;
-    case 'turn_started': S.turn = m.turn; S.running = true; S.stream = null; renderTop(); renderStream(); break;
+    case 'turn_started': S.turn = m.turn; S.running = true; S.stream = null; renderTop(); renderStream(); renderAsk(); break;
     case 'turn_closed':
       if (S.turn !== null && S.turn !== m.turn) break;
-      S.turn = null; S.running = false; S.stream = null; dropBanner('stop'); dropBanner('run'); renderTop(); renderStream(); send('snap');
+      S.turn = null; S.running = false; S.stream = null; dropBanner('stop'); dropBanner('run'); renderTop(); renderStream(); renderAsk(); send('snap');
       // 标题是后端按第一句用户发言算的，但那是 boot 时算的。刚说完第一句时
       // 本地补一下，不然侧栏会一直挂着「空对话」直到下次切会话。
       titleSelf();
@@ -307,10 +307,21 @@ function renderStream() {
     if (b.proc.length) box.append(procBlock(b));
     for (const e of b.msgs) {
       if (e.kind === 'asked') {
+        const answer = S.timeline.find(a => a.kind === 'answered' && a.corr === e.seq);
+        const options = h('div', { class: 'ask-options' });
+        for (const o of e.body?.options || []) {
+          options.append(h('button', {
+            class: 'ask-card' + (answer?.body?.choice === o ? ' chosen' : ''),
+            disabled: !!answer,
+            onclick: answer ? null : () => send('answer', { seq: e.seq, choice: o }),
+          }, o));
+        }
         box.append(h('div', { class: 'turn' },
           h('div', { class: 'msg ask' },
             h('div', { class: 'who' }, '提问'),
-            h('div', { class: 'bubble md', html: e.html || '' }))));
+            h('div', { class: 'bubble' },
+              h('div', { class: 'md', html: e.html || '' }),
+              options))));
       } else {
         box.append(h('div', { class: 'turn' },
           h('div', { class: 'msg assistant' + (e.body.interrupted ? ' note' : '') },
@@ -447,9 +458,15 @@ function procStep(e) {
       break;
     case 'inferred': {
       const ops = (B.ops || []).map(o => o.op + (o.path ? ' ' + o.path : '') + (o.id ? ' ' + o.id : ''));
-      v.append(`生效 ${(B.ops || []).length} 条${ops.length ? '：' + ops.join('、') : ''}`);
-      if ((B.dropped || []).length) {
-        v.append(h('div', { class: 'hint' }, `丢弃 ${B.dropped.length} 条（你本轮改过这些位置）：${B.dropped.join('、')}`));
+      v.append(h('span', {}, `生效 ${(B.ops || []).length} 条${ops.length ? '：' + ops.join('、') : ''}`));
+      const invalid = B.invalid || [], conflicts = B.conflicts || [];
+      if (invalid.length) v.append(h('div', { class: 'hint' },
+        `无效 ${invalid.length} 条（别名、id、端点或来源声明）：${invalid.join('、')}`));
+      if (conflicts.length) v.append(h('div', { class: 'hint' },
+        `冲突 ${conflicts.length} 条（你本轮改过这些位置）：${conflicts.join('、')}`));
+      // 老时间线只有 dropped，没有分类；不能凭空声称它一定是用户编辑冲突。
+      if (!invalid.length && !conflicts.length && (B.dropped || []).length) {
+        v.append(h('div', { class: 'hint' }, `未生效 ${B.dropped.length} 条：${B.dropped.join('、')}`));
       }
       break;
     }
@@ -472,7 +489,14 @@ function procStep(e) {
 /** 模型提了问 ⇒ 输入区上方出现选项按钮。提问是持久实体，重启也还在。 */
 function renderAsk() {
   const row = $('#ask-row'); row.textContent = '';
-  const qs = S.snap?.open_questions || [];
+  // 悬浮提问只服务“正在进行的这一轮”。问题与选项本身已在历史卡片中持久显示；
+  // 本轮一结束这里立刻消失，旧的未回答问题也不会在下一轮重新悬浮。
+  const askedHere = new Set(S.timeline
+    .filter(e => e.kind === 'asked' && e.turn === S.turn)
+    .map(e => e.seq));
+  const qs = S.running
+    ? (S.snap?.open_questions || []).filter(q => askedHere.has(q.seq))
+    : [];
   row.hidden = !qs.length;
   for (const q of qs) {
     row.append(h('div', { class: 'q' }, '模型在问：' + q.question));

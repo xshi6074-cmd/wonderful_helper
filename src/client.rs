@@ -428,10 +428,15 @@ fn is_empty_text(b: &Value) -> bool {
 /// → OpenAI 风格的 messages。它允许连续同角色，所以不用合并。
 pub fn openai_messages(msgs: &[Message]) -> Vec<Value> {
     msgs.iter()
-        .map(|m| match m.role {
-            MsgRole::System => json!({ "role": "system", "content": m.content }),
-            MsgRole::User => json!({ "role": "user", "content": m.content }),
+        .filter_map(|m| match m.role {
+            MsgRole::System => Some(json!({ "role": "system", "content": m.content })),
+            MsgRole::User => Some(json!({ "role": "user", "content": m.content })),
             MsgRole::Assistant => {
+                // 兼容修复旧会话：历史版本可能落过 Wrote{text:""}。没有正文也没有
+                // tool_calls 的 assistant 对协议没有任何语义，只会让 Moonshot 400。
+                if m.content.trim().is_empty() && m.tool_calls.is_empty() {
+                    return None;
+                }
                 let mut v = json!({ "role": "assistant", "content": m.content });
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = Value::Array(
@@ -448,13 +453,13 @@ pub fn openai_messages(msgs: &[Message]) -> Vec<Value> {
                             .collect(),
                     );
                 }
-                v
+                Some(v)
             }
-            MsgRole::Tool => json!({
+            MsgRole::Tool => Some(json!({
                 "role": "tool",
                 "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
                 "content": clip(&m.content, 200_000),
-            }),
+            })),
         })
         .collect()
 }

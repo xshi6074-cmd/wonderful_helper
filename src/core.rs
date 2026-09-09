@@ -45,7 +45,7 @@ use crate::msg::{
 };
 use crate::persist::{Restored, seal};
 use crate::scene::SceneId;
-use crate::state::{self, Op, Path, Workspace};
+use crate::state::{self, Aliases, Op, Path, Workspace};
 use crate::tools::{Registry, ToolConfig};
 use crate::turn::{TurnCtx, run_turn};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -224,6 +224,8 @@ pub struct Core {
     /// 每轮开头清空 —— 仲裁的作用域就是一个 turn，跨轮没有意义
     /// （跨轮的保护是 prompt 里的 `[用户设定]` 标记，不是硬拒绝）。
     turn_edits: HashSet<Path>,
+    /// 同一 turn 的多次动作工具往返之间沿用的模型别名。
+    turn_aliases: Aliases,
     /// 发出了还没返回的工具调用：`call_id → 那条 Called 的 seq`。
     ///
     /// 这就是「小生命周期」：返回事件靠它连回发出事件；turn 收尾时它非空就说明
@@ -344,6 +346,7 @@ pub fn start(deps: CoreDeps) -> Started {
         turn: TurnPhase::Idle,
         turn_start: Seq::ZERO,
         turn_edits: HashSet::new(),
+        turn_aliases: Aliases::default(),
         open_calls: HashMap::new(),
         open_questions: Vec::new(),
         scenes: Vec::new(),
@@ -711,6 +714,7 @@ impl Core {
 
                 self.turn = TurnPhase::Idle;
                 self.turn_edits.clear();
+                self.turn_aliases = Aliases::default();
                 if outcome.aborted {
                     self.metrics.turns_aborted += 1;
                 }
@@ -826,7 +830,7 @@ impl Core {
                     dropped: vec![],
                 });
             }
-            Body::Inferred { ops, dropped } => {
+            Body::Inferred { ops, dropped, .. } => {
                 let _ = self.ui.send(UiEvent::StateChanged {
                     seq: e.seq,
                     ops: ops.clone(),
@@ -861,15 +865,16 @@ impl Core {
     /// 把 turn 的一条 [`Emit`] 变成时间线上的事件。**仲裁在这里。**
     fn absorb(&mut self, turn: TurnId, emit: Emit) -> Applied {
         let t = Some(turn);
-        let (drafts, dropped) = match emit {
+        let prune_aliases = matches!(&emit, Emit::Infer { .. });
+        let (drafts, invalid, conflicts) = match emit {
             Emit::Judged { scenes, rationale } => {
-                (vec![Draft::new(t, Body::Judged { scenes, rationale })], vec![])
+                (vec![Draft::new(t, Body::Judged { scenes, rationale })], vec![], vec![])
             }
             Emit::Wrote { text, interrupted } => {
-                (vec![Draft::new(t, Body::Wrote { text, interrupted })], vec![])
+                (vec![Draft::new(t, Body::Wrote { text, interrupted })], vec![], vec![])
             }
             Emit::Called { text, calls } => {
-                (vec![Draft::new(t, Body::Called { text, calls })], vec![])
+                (vec![Draft::new(t, Body::Called { text, calls })], vec![], vec![])
             }
             Emit::Asked { call_id, question, options } => {
                 // 连回发起它的那条 Called。找不到就不带 corr —— 提问本身仍然有效，
@@ -877,27 +882,27 @@ impl Core {
                 let corr = self.open_calls.get(&call_id).copied();
                 let mut d = Draft::new(t, Body::Asked { question, options });
                 d.corr = corr;
-                (vec![d], vec![])
+                (vec![d], vec![], vec![])
             }
             Emit::Returned { call_id, name, content, outcome, task } => {
                 let corr = self.open_calls.get(&call_id).copied();
                 let mut d =
                     Draft::new(t, Body::Returned { call_id, name, content, outcome, task });
                 d.corr = corr;
-                (vec![d], vec![])
+                (vec![d], vec![], vec![])
             }
             Emit::Aborted { call_id, why } => {
                 let corr = self.open_calls.get(&call_id).copied();
                 let mut d = Draft::new(t, Body::Aborted { call_id, why });
                 d.corr = corr;
-                (vec![d], vec![])
+                (vec![d], vec![], vec![])
             }
-            Emit::Noted { text } => (vec![Draft::new(t, Body::Noted { text })], vec![]),
+            Emit::Noted { text } => (vec![Draft::new(t, Body::Noted { text })], vec![], vec![]),
             Emit::Folded { from, to, summary, folded } => {
-                (vec![Draft::new(t, Body::Folded { from, to, summary, folded })], vec![])
+                (vec![Draft::new(t, Body::Folded { from, to, summary, folded })], vec![], vec![])
             }
             Emit::Cost { role, task, usage } => {
-                (vec![Draft::new(t, Body::Cost { role, task, usage })], vec![])
+                (vec![Draft::new(t, Body::Cost { role, task, usage })], vec![], vec![])
             }
             Emit::Infer { ops } => {
                 // ★ 全项目唯一的仲裁点。
@@ -910,31 +915,59 @@ impl Core {
                 // 还占一条有序端点对（模型换个新 id 把用户断开的连接加回来，撞的是
                 // 这一条）；删节点除了 id 还占一条归一化标签键（模型换个 id 新建同名
                 // 节点复活它，撞的是这一条）。撞上任意一个就整条丢。
-                let (ops, mut dropped) =
-                    state::resolve(ops, &self.ws.flow, self.peek_seq());
+                let mut invalid = Vec::new();
+                let mut admissible = Vec::new();
+                for op in ops {
+                    if op.claims_user_source() {
+                        invalid.push(op.key(&self.ws.flow));
+                    } else {
+                        admissible.push(op);
+                    }
+                }
+                let (ops, unresolved) = state::resolve_with_aliases(
+                    admissible,
+                    &self.ws.flow,
+                    self.peek_seq(),
+                    &mut self.turn_aliases,
+                );
+                invalid.extend(unresolved);
+                let mut conflicts = Vec::new();
                 let mut kept = Vec::new();
                 for op in ops {
                     let keys = op.keys(&self.ws.flow);
                     if keys.iter().any(|k| self.turn_edits.contains(k)) {
-                        dropped.extend(keys.into_iter().next());
+                        conflicts.extend(keys.into_iter().next());
                     } else {
                         kept.push(op);
                     }
                 }
+                let mut dropped = invalid.clone();
+                dropped.extend(conflicts.clone());
                 self.metrics.ops_model += kept.len() as u64;
                 self.metrics.ops_dropped += dropped.len() as u64;
                 // 时间线只记生效的部分；dropped 附在同一条上作为审计与回喂的依据。
                 (
                     vec![Draft::new(
                         t,
-                        Body::Inferred { ops: kept, dropped: dropped.clone() },
+                        Body::Inferred {
+                            ops: kept,
+                            dropped: dropped.clone(),
+                            invalid: invalid.clone(),
+                            conflicts: conflicts.clone(),
+                        },
                     )],
-                    dropped,
+                    invalid,
+                    conflicts,
                 )
             }
         };
+        let mut dropped = invalid.clone();
+        dropped.extend(conflicts.clone());
         let (seq, events) = self.commit(drafts, None);
-        Applied { seq, dropped, events }
+        if prune_aliases {
+            self.turn_aliases.retain_existing(&self.ws.flow);
+        }
+        Applied { seq, dropped, invalid, conflicts, events }
     }
 
     /// 未闭合的调用逐个补一条 `Aborted`。
@@ -1166,6 +1199,10 @@ impl Core {
         self.turn = TurnPhase::Running { id, token: token.clone() };
         self.turn_start = self.seq;
         self.turn_edits.clear();
+        self.turn_aliases = Aliases::default();
+        // 启动本轮的这些输入是本轮起点，不是模型运行期间的“插话”。内容已经
+        // 在主时间线；这里只消费待处理标记，后续新来的输入才由检查点计数。
+        self.inbox.clear();
         self.view_taken = false;
         self.metrics.turns_started += 1;
 

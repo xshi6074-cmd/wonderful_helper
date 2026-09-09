@@ -60,7 +60,7 @@ pub fn mermaid(g: &Graph, style: &GraphStyle) -> String {
             out.push_str(&format!("  {} {} {}\n", e.from.0, conn, e.to.0));
         } else {
             out.push_str(&format!(
-                "  {} {}|{}| {}\n",
+                "  {} {}|\"{}\"| {}\n",
                 e.from.0,
                 conn,
                 esc(&e.label),

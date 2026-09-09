@@ -98,9 +98,10 @@ impl Tool for RecordGraph {
          **调用时机**：先用 fs_* / web_* 读到该读的，再调这个把拓扑写下来，最后才写正文回答。\n\
          图是给用户点选和就地修改的，所以每次只提交你**这一轮真想改的那几项**，\
          不要每轮把整张图重发一遍（所有字段都是 patch，不给就是不改）。\n\
-         新建元素时 id 填 `$别名`（如 `$enc`），同一批调用里可以互相引用；\
+         新建元素时 id 填 `$别名`（如 `$enc`），同一轮后续调用仍可引用已经成功创建的别名；\
          提交后由程序铸成稳定 id。改已有元素就直接填它现在的 id。\n\
-         没有实证来源的节点会画成虚线 —— 那是给用户看的盲区，所以 source 要老实填。"
+         没有实证来源的节点会画成虚线 —— 那是给用户看的盲区，所以 source 要老实填。\
+         source=\"user\" 只允许用户在界面上主动选择；你不能输出，输出了整条 op 会被丢弃。"
     }
 
     fn schema(&self) -> Value {
@@ -127,20 +128,29 @@ impl Tool for RecordGraph {
                         "from": { "type": "string", "description": "edge：起点节点 id 或 $别名" },
                         "to": { "type": "string", "description": "edge：终点节点 id 或 $别名。op=view 时填 built 或 sketch" },
                         "source": {
-                            "description": "这条推断哪来的。\"user\"=用户说的 \"guess\"=你自己猜的（画虚线） {\"repo\":\"src/x.py:42\"} {\"paper\":\"§3.1\"}",
+                            "description": "这条推断哪来的。你自己推测填 guess（画虚线）；有实证填 repo/paper。user 是用户界面专属值，模型不得输出，否则整条 op 丢弃。",
                             "anyOf": [
-                                { "type": "string", "enum": ["user", "guess"] },
-                                { "type": "object" }
+                                { "type": "string", "enum": ["guess"] },
+                                { "type": "object", "properties": { "repo": { "type": "string" } }, "required": ["repo"] },
+                                { "type": "object", "properties": { "paper": { "type": "string" } }, "required": ["paper"] }
                             ]
                         },
                         "confidence": { "type": "number", "description": "0–1" },
                         "why": { "type": "string", "description": "drop：为什么去掉" },
                         "key": { "type": "string", "description": "render：如 dialect / dir / classdef.<名>" },
-                        "value": { "type": "string", "description": "render 的值，给 null 表示删" },
+                        "value": { "type": ["string", "null"], "description": "render 的值，给 null 表示删" },
                         "lang": { "type": "string", "enum": ["mermaid", "html"], "description": "sketch 的语言" },
                         "src": { "type": "string", "description": "sketch：你自己写的图源码。自由但没有节点 id，用户只能整段改、点不了单个节点" }
                     },
-                    "required": ["op"]
+                    "required": ["op"],
+                    "allOf": [
+                        { "if": { "properties": { "op": { "const": "node" } } }, "then": { "required": ["id"] } },
+                        { "if": { "properties": { "op": { "const": "edge" } } }, "then": { "required": ["id"] } },
+                        { "if": { "properties": { "op": { "const": "drop" } } }, "then": { "required": ["id"] } },
+                        { "if": { "properties": { "op": { "const": "render" } } }, "then": { "required": ["key"] } },
+                        { "if": { "properties": { "op": { "const": "sketch" } } }, "then": { "required": ["lang", "src"] } },
+                        { "if": { "properties": { "op": { "const": "view" } } }, "then": { "required": ["to"] } }
+                    ]
                 }
             }},
             "required": ["ops"]
@@ -170,9 +180,10 @@ impl Tool for RecordNote {
          已经否决的路线和否决理由、还没落定的问题、暂时搁置的问题。\n\
          **调用时机**：和 record_graph 一样在正式回答之前；两个可以在同一次里一起调。\n\
          判断标准很简单：能画成节点或连线的用 record_graph，剩下的用这个。\n\
-         anchor 填一个节点 id（或同一批里刚建的 $别名），这条就挂在那个节点下面显示。\n\
+         anchor 填一个节点 id（或同一轮前面成功创建的 $别名），这条就挂在那个节点下面显示。\n\
          open = 还没落定的问题清单，parked = 搁置的。两者都是**整份替换**，\
-         所以要删一条就把剩下的重发一遍；落定了就从 open 里去掉。"
+         所以要删一条就把剩下的重发一遍；落定了就从 open 里去掉。\
+         source=\"user\" 只允许用户在界面上主动选择；你不能输出，输出了整条 op 会被丢弃。"
     }
 
     fn schema(&self) -> Value {
@@ -191,13 +202,18 @@ impl Tool for RecordNote {
                         "parked": { "type": "array", "items": { "type": "string" }, "description": "整份替换搁置清单" },
                         "source": {
                             "anyOf": [
-                                { "type": "string", "enum": ["user", "guess"] },
-                                { "type": "object" }
+                                { "type": "string", "enum": ["guess"] },
+                                { "type": "object", "properties": { "repo": { "type": "string" } }, "required": ["repo"] },
+                                { "type": "object", "properties": { "paper": { "type": "string" } }, "required": ["paper"] }
                             ]
                         },
                         "confidence": { "type": "number" }
                     },
-                    "required": ["op"]
+                    "required": ["op"],
+                    "allOf": [
+                        { "if": { "properties": { "op": { "const": "set" } } }, "then": { "required": ["path"] } },
+                        { "if": { "properties": { "op": { "const": "remove" } } }, "then": { "required": ["path"] } }
+                    ]
                 }
             }},
             "required": ["ops"]

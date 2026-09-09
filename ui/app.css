@@ -150,6 +150,12 @@ body.no-right #right,body.no-right #rgrip{display:none}
   border-left:2px solid var(--line);padding-left:14px}
 .msg.ask .bubble{background:var(--info-soft);border-radius:12px;padding:12px 16px;
   color:var(--info);font-family:var(--serif);font-size:15.5px}
+.ask-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;
+  margin-top:11px}
+.ask-card{text-align:left;padding:10px 12px;background:var(--surface);border-color:var(--line);
+  color:var(--ink);font-size:13.5px;white-space:normal}
+.ask-card:hover{border-color:var(--info);background:var(--surface)}
+.ask-card.chosen{border-color:var(--info);box-shadow:0 0 0 2px var(--info-soft);opacity:1}
 .streaming .bubble::after{content:"";display:inline-block;width:.5em;height:1em;
   background:var(--accent);vertical-align:-2px;margin-left:2px;animation:blink 1.1s steps(2) infinite}
 @keyframes blink{50%{opacity:0}}

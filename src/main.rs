@@ -474,7 +474,9 @@ async fn s04_injection() {
     let last = r.model.answer_prompt(r.model.answer_calls() - 1);
     ok(last.contains("补充一点"), "插话进了后续 prompt");
     let s = r.finish().await;
-    ok(s.metrics.inbox_taken >= 2, &format!("取走了 {} 条输入", s.metrics.inbox_taken));
+    let st = stats_of(&s.events).expect("stats");
+    ok(st.injections == 1, "★ 只有运行中补的那一句算插话，触发本轮的首句不算");
+    ok(s.metrics.inbox_taken == 1, &format!("实际只吸收了 {} 条插话", s.metrics.inbox_taken));
     inv::all(&s.events, &s.ws, &s.cost);
 }
 
@@ -1487,6 +1489,8 @@ async fn s32_config_layers() {
 
     let s = Settings::load(&dir, NO_ENV);
     ok(s.roles.answer.provider == "anthropic", "什么都没有时用内置默认");
+    ok(s.roles.answer.max_tokens == 65_536, "★ 回答段默认输出上限是 64K，不拿截断省预算");
+    ok(s.roles.subagent.max_tokens == 65_536, "★ 子任务默认输出上限也是 64K");
     ok(s.warnings.is_empty(), "干净启动没有告警");
 
     let mut w = Settings::default();
@@ -1640,6 +1644,8 @@ async fn s36_context_safety() {
 
     let r3 = fire(&reg, "fs_read", serde_json::json!({"path": "wide.txt"})).await;
     ok(r3.content.contains("本行过长已截断"), "★ 单行过长也截断（压缩过的代码一行能几百 KB）");
+    ok(!r3.content.contains("offset="), "★ 横向截断不能靠 offset 续读，不再给错误方向");
+    ok(r3.content.contains("原文共 1 行 / 5000 字节"), "页脚报原文事实，不把行号渲染算进字节");
 
     let r4 = fire(&reg, "fs_grep", serde_json::json!({"pattern": "needle"})).await;
     ok(r4.content.contains("只列了前"), "★ 海量匹配只给前 N 条并说明");
@@ -1649,8 +1655,17 @@ async fn s36_context_safety() {
     ok(!ok_kind(&r5), "越界的 offset 报错");
     ok(r5.content.contains("2000"), "而且告诉模型一共多少行");
 
+    std::fs::create_dir_all(dir.join("repo")).unwrap();
+    std::fs::write(dir.join("repo/model.py"), "needle = 1\n").unwrap();
+    let r6 = fire(&reg, "fs_find", serde_json::json!({"glob": "*.py", "path": "repo"})).await;
+    ok(r6.content.contains("repo/model.py"), "★ fs_find 返回相对 roots[0] 的可回喂路径");
+    let r7 = fire(&reg, "fs_grep", serde_json::json!({"pattern": "needle", "path": "repo"})).await;
+    ok(r7.content.contains("repo/model.py:1"), "★ fs_grep 也返回同一基准的路径");
+    let r8 = fire(&reg, "fs_read", serde_json::json!({"path": "repo/model.py"})).await;
+    ok(ok_kind(&r8) && r8.content.contains("needle = 1"), "搜索结果可原样喂回 fs_read");
+
     ok(d.metrics.get("clipped") >= 3, "★ 截断有计数（截断率高说明上限设小了或模型在乱用）");
-    ok(d.metrics.get("calls") == 5, "调用有计数");
+    ok(d.metrics.get("calls") == 8, "调用有计数");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1820,6 +1835,13 @@ async fn s40_wire_format() {
     );
     let t2 = oa.iter().find(|m| m["role"] == "tool").unwrap();
     ok(t2["tool_call_id"] == "c1", "工具返回带回了 tool_call_id");
+    let repaired = openai_messages(&[
+        Message::user("旧问题"),
+        Message::assistant(""),
+        Message::user("继续"),
+    ]);
+    ok(repaired.len() == 2 && repaired.iter().all(|m| m["role"] != "assistant"),
+       "★ 旧时间线里的空 assistant 在重放时被滤掉，会话可恢复");
 
     // ── Anthropic SSE ──
     let a_blocks = vec![
@@ -1923,6 +1945,23 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta"
             &format!("★ {name} 的 schema 列出了 op 的取值，不是个空对象"),
         );
     }
+    let graph_schema = &ex.specs.iter()
+        .find(|s| s.name == premortem::actions::RECORD_GRAPH).unwrap()
+        .schema["properties"]["ops"]["items"];
+    let all = graph_schema["allOf"].as_array().unwrap();
+    let req = |op: &str, field: &str| all.iter().any(|rule| {
+        rule["if"]["properties"]["op"]["const"] == op
+            && rule["then"]["required"].as_array().is_some_and(|xs| xs.iter().any(|x| x == field))
+    });
+    for (op, field) in [
+        ("node", "id"), ("edge", "id"), ("drop", "id"), ("render", "key"),
+        ("sketch", "lang"), ("sketch", "src"), ("view", "to"),
+    ] {
+        ok(req(op, field), &format!("★ {op} schema 必填 {field}，与 serde 一致"));
+    }
+    let source = &graph_schema["properties"]["source"];
+    ok(!source.to_string().contains("\"user\""),
+       "★ 模型工具 schema 不再把 source=user 当合法输出教给模型");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1966,6 +2005,11 @@ async fn s41_judge_runs_once_per_turn() {
         s.events.iter().filter(|e| e.body.tag() == "judged").count() == 1,
         "★ 时间线上只有一条 judged",
     );
+    let answer_costs = s.events.iter().filter(|e| matches!(
+        &e.body,
+        Body::Cost { role: Role::Answer, .. }
+    )).count();
+    ok(answer_costs == 4, "★ 每次 answer 调用都记 Cost，工具往返不再漏账");
     inv::all(&s.events, &s.ws, &s.cost);
 }
 
@@ -1993,7 +2037,7 @@ async fn s42_actions_write_inference() {
                 premortem::actions::RECORD_NOTE,
                 serde_json::json!({ "ops": [
                     { "op": "set", "path": "spec.temp", "value": "0.07", "anchor": "$loss",
-                      "source": "user" },
+                      "source": { "paper": "实验设定" } },
                     { "op": "set", "path": "open", "open": ["负样本从哪来？"] },
                 ]}),
             ),
@@ -2021,7 +2065,8 @@ async fn s42_actions_write_inference() {
 
     // 回喂：两个调用各自拿到一条结果，模型下一步就知道写成没写成
     let ap1 = r.model.answer_prompt(1);
-    ok(ap1.contains("提交了 3 条改动") && ap1.contains("提交了 2 条改动"), "★ 两个动作各自有回执");
+    ok(ap1.contains("解析出 3 条改动") && ap1.contains("解析出 2 条改动")
+        && ap1.contains("实际生效 5 条"), "★ 两个动作各自有准确回执");
     ok(ap1.contains("对比损失") && ap1.contains("flowchart"), "写完的图立刻回到 prompt 里");
 
     let s = r.finish().await;
@@ -2260,6 +2305,101 @@ async fn s46_scene_edges() {
     ok(serde_json::from_str::<Body>(old3).is_ok(), "★ 删掉的阶段事件仍然反序列化得了（老库能开）");
 }
 
+async fn s47_action_recovery_and_provenance() {
+    head("S47", "★ 动作修复：跨批别名、真实丢弃原因、模型不能冒充用户来源");
+    let dir = tmpdir("action-recovery");
+    let (_, reg) = toolchain(&dir, None);
+    let graph = premortem::actions::RECORD_GRAPH;
+    let m = MockModel::new()
+        .on_judge(judge_of("trace_code"))
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call_with(
+            "nodes", graph, serde_json::json!({"ops": [
+                {"op":"node","id":"$enc","label":"编码器","source":"guess"},
+                {"op":"node","id":"$loss","label":"损失","source":"guess"}
+            ]}),
+        )])])
+        // 下一次往返继续引用上一批的别名。旧实现会把整条边丢掉。
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call_with(
+            "edge", graph, serde_json::json!({"ops": [
+                {"op":"edge","id":"$e1","from":"$enc","to":"$loss",
+                 "label":"z (512 维表示)","source":"guess"}
+            ]}),
+        )])])
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call_with(
+            "bad-ref", graph, serde_json::json!({"ops": [
+                {"op":"edge","id":"$bad","from":"$missing","to":"$enc","source":"guess"}
+            ]}),
+        )])])
+        .on_answer(vec![StreamEvent::ToolCalls(vec![call_with(
+            "fake-user", graph, serde_json::json!({"ops": [
+                {"op":"node","id":"$fake","label":"模型冒充用户","source":"user"}
+            ]}),
+        )])])
+        .on_answer(chunks(&["完成"]));
+    let r = Rig::new(m, reg).await;
+    r.handle.session_send("画图", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+
+    let snap = r.handle.session_snapshot().await.unwrap();
+    ok(snap.ws.flow.nodes.len() == 2 && snap.ws.flow.edges.len() == 1,
+       "★ 上一批节点别名在本轮下一批仍能建边");
+    ok(!snap.ws.flow.nodes.values().any(|n| n.label == "模型冒充用户"),
+       "★ 模型输出 source=user 的整条 op 被丢弃");
+    let mer = premortem::render::mermaid(
+        &snap.ws.flow,
+        &premortem::memory::GraphStyle::default(),
+    );
+    ok(mer.contains("|\"z (512 维表示)\"|"), "★ 含括号的边标签放进引号，mermaid 可解析");
+
+    let invalid_prompt = r.model.answer_prompt(3);
+    ok(invalid_prompt.contains("别名、id、端点或来源声明无效"),
+       "resolve 丢弃回喂真实原因");
+    ok(!invalid_prompt.contains("用户在这一轮里刚编辑过"),
+       "★ 没有 edited 事件时绝不谎称用户刚改过");
+    let source_prompt = r.model.answer_prompt(4);
+    ok(source_prompt.contains("source=\"user\"") && source_prompt.contains("只能由用户本人选择"),
+       "模型冒充用户来源得到明确修法");
+
+    let s = r.finish().await;
+    let inferred: Vec<_> = s.events.iter().filter_map(|e| match &e.body {
+        Body::Inferred { invalid, conflicts, .. } if !invalid.is_empty() => {
+            Some((invalid.len(), conflicts.len()))
+        }
+        _ => None,
+    }).collect();
+    ok(inferred.len() == 2 && inferred.iter().all(|(_, conflicts)| *conflicts == 0),
+       "★ 时间线把无效引用与用户冲突分开记录");
+    let failed = s.events.iter().filter(|e| matches!(
+        &e.body,
+        Body::Returned { outcome, .. } if outcome == "failed"
+    )).count();
+    ok(failed >= 2, "整批零生效时工具 outcome=failed，不再一边说没生效一边报 ok");
+    inv::all(&s.events, &s.ws, &s.cost);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn s48_empty_answer_is_not_persisted() {
+    head("S48", "★ thinking 耗尽正文时不写空 assistant，后续历史仍可用");
+    let m = MockModel::new()
+        .on_judge(default_judge())
+        .on_answer(vec![StreamEvent::Done(Usage {
+            prompt: 100,
+            completion: 64_000,
+            estimated: false,
+        })]);
+    let r = Rig::new(m, Registry::new()).await;
+    r.handle.session_send("回答", SendMode::Queue).await;
+    ok(r.quiet(1).await, "一轮跑完");
+    let s = r.finish().await;
+    ok(!s.events.iter().any(|e| matches!(&e.body, Body::Wrote { text, .. } if text.trim().is_empty())),
+       "★ 空正文不落 Wrote，不会映射成空 assistant 污染历史");
+    ok(s.events.iter().any(|e| matches!(&e.body, Body::Noted { text } if text.contains("没有生成正文"))),
+       "本轮失败留有可诊断记录");
+    ok(s.events.iter().any(|e| matches!(&e.body, Body::Cost { role: Role::Answer, usage, .. }
+       if usage.completion == 64_000)), "reasoning 花掉的 completion 仍完整记账");
+    inv::all(&s.events, &s.ws, &s.cost);
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
     println!("Premortem 链路测试 —— 主时间线版");
@@ -2311,6 +2451,8 @@ async fn main() {
     s44_distill_sections_apply().await;
     s45_multiple_scenes().await;
     s46_scene_edges().await;
+    s47_action_recovery_and_provenance().await;
+    s48_empty_answer_is_not_persisted().await;
 
     let p = PASS.load(Ordering::Relaxed);
     let f = FAIL.load(Ordering::Relaxed);

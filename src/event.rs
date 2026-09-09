@@ -125,6 +125,10 @@ pub enum Body {
         ops: Vec<Op>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dropped: Vec<Path>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        invalid: Vec<Path>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        conflicts: Vec<Path>,
     },
     /// **已废弃。** 阶段闸门（设计讨论 / 交接）删掉了，见 `crate::state` 里那段说明。
     ///

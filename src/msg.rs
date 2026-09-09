@@ -183,8 +183,12 @@ pub enum Emit {
 #[derive(Debug, Clone, Default)]
 pub struct Applied {
     pub seq: Seq,
-    /// 被 turn 内仲裁丢掉的路径。**必须回喂给模型**，否则它下一轮会原样再提交一次。
+    /// 所有未生效的路径，保留给现有指标与调用方。
     pub dropped: Vec<Path>,
+    /// 别名 / id / 端点解析失败，或模型冒充 `source="user"`。
+    pub invalid: Vec<Path>,
+    /// 与本轮用户编辑冲突。
+    pub conflicts: Vec<Path>,
     pub events: Vec<Event>,
 }
 
@@ -194,12 +198,29 @@ impl Applied {
         if self.dropped.is_empty() {
             return None;
         }
-        let items =
-            self.dropped.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
-        Some(format!(
-            "你对下面这些字段的改动没有生效，因为用户在这一轮里刚改过它们：\n{items}\n\
-             推断图里的现值就是用户的值，别再提交同样的改动。"
-        ))
+        let mut parts = Vec::new();
+        if !self.invalid.is_empty() {
+            let items = self.invalid.iter().map(|p| format!("- {p}"))
+                .collect::<Vec<_>>().join("\n");
+            parts.push(format!(
+                "下面这些改动因别名、id、端点或来源声明无效而没有生效：\n{items}\n\
+                 请根据当前推断图里的真实 id 修正；source=\"user\" 只能由用户本人选择，模型提交会被丢弃。"
+            ));
+        }
+        if !self.conflicts.is_empty() {
+            let items = self.conflicts.iter().map(|p| format!("- {p}"))
+                .collect::<Vec<_>>().join("\n");
+            parts.push(format!(
+                "下面这些改动因为用户在这一轮里刚编辑过同一位置而没有生效：\n{items}\n\
+                 推断图里的现值就是用户的值，别再提交同样的改动。"
+            ));
+        }
+        if parts.is_empty() {
+            let items = self.dropped.iter().map(|p| format!("- {p}"))
+                .collect::<Vec<_>>().join("\n");
+            parts.push(format!("下面这些改动没有生效：\n{items}"));
+        }
+        Some(parts.join("\n"))
     }
 }
 

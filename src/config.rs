@@ -344,14 +344,16 @@ impl Default for Settings {
                     provider: "anthropic".into(),
                     model: "claude-opus-5".into(),
                     temperature: None,
-                    max_tokens: 8192,
+                    // 输出预算是宽安全上限，不拿它做省钱旋钮。工具型回答已经付过
+                    // 大 prompt 成本，半途截断只会浪费；真实花费由 Cost 完整记账。
+                    max_tokens: 65_536,
                 },
                 // subagent 吃仓库/论文这类大块上下文，要能力也要便宜
                 subagent: ModelCfg {
                     provider: "anthropic".into(),
                     model: "claude-sonnet-5".into(),
                     temperature: None,
-                    max_tokens: 8192,
+                    max_tokens: 65_536,
                 },
             },
             tools: crate::policy::PolicyCfg::default(),

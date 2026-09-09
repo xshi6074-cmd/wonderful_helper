@@ -39,7 +39,7 @@
 use crate::event::{Body, Event};
 use crate::ids::{EdgeId, ElemId, NodeId, Seq};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type Value = serde_json::Value;
 
@@ -745,6 +745,17 @@ pub enum Op {
 }
 
 impl Op {
+    /// 模型不能替用户声明来源。`source="user"` 只允许由用户编辑路径产生；
+    /// 模型这么写时整条 op 都应拒绝，而不是让它把猜测伪装成实线事实。
+    pub fn claims_user_source(&self) -> bool {
+        matches!(
+            self,
+            Op::Set { source: Some(Source::User), .. }
+                | Op::Node { source: Some(Source::User), .. }
+                | Op::Edge { source: Some(Source::User), .. }
+        )
+    }
+
     /// **仲裁键。**一条 op 可能占多个键 —— 那正是堵漏洞的地方。
     ///
     /// 用户的 op 把这些键**占下**（写进 `turn_edits`），模型的 op **查**这些键，
@@ -986,12 +997,41 @@ impl Op {
 ///
 /// `anchor` 指向不存在的节点是个例外：**只清掉 anchor，不丢整条 op**。
 /// 那条图外推断本身是有效的判断，不该因为挂错了地方就整条作废。
+#[derive(Debug, Clone, Default)]
+pub struct Aliases {
+    nodes: HashMap<String, NodeId>,
+    edges: HashMap<String, EdgeId>,
+}
+
+impl Aliases {
+    /// 仲裁与提交后只保留仍然真实存在的别名。这样一条被用户编辑挡掉的
+    /// 新建 op 不会留下指向幽灵 id 的别名，删掉的元素也不会继续被引用。
+    pub fn retain_existing(&mut self, g: &Graph) {
+        self.nodes.retain(|_, id| g.nodes.contains_key(id));
+        self.edges.retain(|_, id| g.edges.contains_key(id));
+    }
+}
+
+/// 解析一个独立批次。用户编辑走这条；模型推断应走 [`resolve_with_aliases`]，
+/// 让同一 turn 的下一次工具往返还能引用前一批已经成功铸出的别名。
 pub fn resolve(ops: Vec<Op>, g: &Graph, seq: Seq) -> (Vec<Op>, Vec<Path>) {
-    use std::collections::HashMap;
+    resolve_with_aliases(ops, g, seq, &mut Aliases::default())
+}
+
+/// 别名在一个 turn 内持续有效。只有真正留下来的新元素才会把别名写回 `aliases`；
+/// 一条端点无效的边不会占死 `$e1`，模型修正后还能重试。
+pub fn resolve_with_aliases(
+    ops: Vec<Op>,
+    g: &Graph,
+    seq: Seq,
+    aliases: &mut Aliases,
+) -> (Vec<Op>, Vec<Path>) {
 
     // 第一遍：按出现顺序铸 id。节点与边共用一个序号，所以 id 在批内唯一。
-    let mut nmap: HashMap<String, NodeId> = HashMap::new();
-    let mut emap: HashMap<String, EdgeId> = HashMap::new();
+    let mut nmap = aliases.nodes.clone();
+    let mut emap = aliases.edges.clone();
+    let old_nodes: std::collections::HashSet<String> = nmap.keys().cloned().collect();
+    let old_edges: std::collections::HashSet<String> = emap.keys().cloned().collect();
     let mut i = 0usize;
     for op in &ops {
         match op {
@@ -1006,7 +1046,16 @@ pub fn resolve(ops: Vec<Op>, g: &Graph, seq: Seq) -> (Vec<Op>, Vec<Path>) {
             _ => {}
         }
     }
-    let minted: std::collections::HashSet<NodeId> = nmap.values().cloned().collect();
+    let minted: std::collections::HashSet<NodeId> = nmap
+        .iter()
+        .filter(|(alias, _)| !old_nodes.contains(*alias))
+        .map(|(_, id)| id.clone())
+        .collect();
+    let minted_edges: std::collections::HashSet<EdgeId> = emap
+        .iter()
+        .filter(|(alias, _)| !old_edges.contains(*alias))
+        .map(|(_, id)| id.clone())
+        .collect();
 
     // 第二遍：改写引用，顺手做存在性检查。
     let mut kept = Vec::new();
@@ -1039,12 +1088,30 @@ pub fn resolve(ops: Vec<Op>, g: &Graph, seq: Seq) -> (Vec<Op>, Vec<Path>) {
             }
         }
         if !bad {
-            bad = !exists(&op, g, &minted, &emap);
+            bad = !exists(&op, g, &minted, &minted_edges);
         }
         if bad {
             dropped.push(key);
         } else {
             kept.push(op);
+        }
+    }
+    let kept_nodes: std::collections::HashSet<NodeId> = kept
+        .iter()
+        .filter_map(|op| match op { Op::Node { id, .. } => Some(id.clone()), _ => None })
+        .collect();
+    let kept_edges: std::collections::HashSet<EdgeId> = kept
+        .iter()
+        .filter_map(|op| match op { Op::Edge { id, .. } => Some(id.clone()), _ => None })
+        .collect();
+    for (alias, id) in nmap {
+        if old_nodes.contains(&alias) || kept_nodes.contains(&id) {
+            aliases.nodes.insert(alias, id);
+        }
+    }
+    for (alias, id) in emap {
+        if old_edges.contains(&alias) || kept_edges.contains(&id) {
+            aliases.edges.insert(alias, id);
         }
     }
     (kept, dropped)
@@ -1055,7 +1122,7 @@ fn exists(
     op: &Op,
     g: &Graph,
     minted: &std::collections::HashSet<NodeId>,
-    emap: &std::collections::HashMap<String, EdgeId>,
+    minted_edges: &std::collections::HashSet<EdgeId>,
 ) -> bool {
     let known_node = |n: &NodeId| g.nodes.contains_key(n) || minted.contains(n);
     match op {
@@ -1069,7 +1136,7 @@ fn exists(
             true
         }
         Op::Edge { id, from, to, .. } => {
-            let fresh = emap.values().any(|e| e == id);
+            let fresh = minted_edges.contains(id);
             if !fresh && !g.edges.contains_key(id) {
                 return false;
             }

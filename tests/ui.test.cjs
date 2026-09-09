@@ -340,6 +340,49 @@ test('snapshot replay deduplicates events and questions request a fresh snapshot
   assert.equal(f.evalUI('S.timeline.length'), 2);
   assert.equal(f.evalUI('sent[0].op'), 'snap');
 });
+test('asked history keeps interactive option cards and marks the chosen answer', () => {
+  const f = setup();
+  f.evalUI(`S.timeline = [{seq:10,turn:3,kind:'asked',body:{question:'选哪个？',options:['甲','乙']},html:'<p>选哪个？</p>'}];
+    renderStream();`);
+  let cards = all(f.doc.querySelector('#stream')).filter(e => String(e.className || '').includes('ask-card'));
+  assert.equal(cards.length, 2, '问题历史里直接显示全部选项');
+  cards[1].fire('click');
+  assert.equal(f.evalUI('sent.at(-1).op'), 'answer');
+  assert.equal(f.evalUI('sent.at(-1).seq'), 10);
+  assert.equal(f.evalUI('sent.at(-1).choice'), '乙');
+
+  f.evalUI(`S.timeline.push({seq:11,kind:'answered',corr:10,body:{choice:'乙'},html:'<p>乙</p>'}); renderStream();`);
+  cards = all(f.doc.querySelector('#stream')).filter(e => String(e.className || '').includes('ask-card'));
+  assert.equal(cards.length, 2, '回答后历史选项仍保留');
+  assert.ok(String(cards[1].className).includes('chosen'), '当时选中的一项可追溯');
+  const before = f.evalUI('sent.length');
+  cards[0].fire('click');
+  assert.equal(f.evalUI('sent.length'), before, '回答后的历史卡片不重复提交');
+});
+test('floating ask row belongs only to the active turn and disappears when it closes', () => {
+  const f = setup();
+  f.evalUI(`S.timeline = [{seq:20,turn:7,kind:'asked',body:{question:'继续？',options:['是','否']}}];
+    S.snap = {open_questions:[{seq:20,question:'继续？',options:['是','否']}]};`);
+  f.evalUI(`S.turn = 7; S.running = true; renderAsk();`);
+  assert.equal(f.doc.querySelector('#ask-row').hidden, false, '当前轮提问悬浮显示');
+  f.evalUI(`S.turn = null; S.running = false; renderAsk();`);
+  assert.equal(f.doc.querySelector('#ask-row').hidden, true, '本轮结束立刻消失');
+  f.evalUI(`S.turn = 8; S.running = true; renderAsk();`);
+  assert.equal(f.doc.querySelector('#ask-row').hidden, true, '旧问题不会在下一轮重新悬浮');
+});
+test('inference history distinguishes invalid ops from user-edit conflicts', () => {
+  const f = setup();
+  f.evalUI(`S.timeline = [{seq:30,turn:9,kind:'inferred',body:{ops:[],
+    dropped:['node:bad','edge:e1'],invalid:['node:bad'],conflicts:['edge:e1']}}]; renderStream();`);
+  const text = f.doc.querySelector('#stream').textContent;
+  assert.ok(text.includes('无效 1 条') && text.includes('node:bad'), text);
+  assert.ok(text.includes('冲突 1 条') && text.includes('edge:e1'), text);
+
+  f.evalUI(`S.timeline = [{seq:31,turn:9,kind:'inferred',body:{ops:[],dropped:['old:path']}}]; renderStream();`);
+  const oldText = f.doc.querySelector('#stream').textContent;
+  assert.ok(oldText.includes('未生效 1 条'), oldText);
+  assert.ok(!oldText.includes('你本轮改过'), oldText);
+});
 test('disconnected Enter keeps draft, stop names observed turn, roots keep extra grants', () => {
   const f = setup();
   f.evalUI(`connect = () => {}; boot(); S.session = 's'; S.turn = 7; ws.readyState = 3;`);

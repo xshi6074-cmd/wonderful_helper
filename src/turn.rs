@@ -365,10 +365,20 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                     // 流没给 Done 就结束了：当作一次失败的回答，但已收到的正文要留下
                     None => {
                         stats.answer_ms += t_answer.elapsed().as_millis() as u64;
-                        if !partial.is_empty() {
+                        let completion_chars = partial.chars().count();
+                        if !partial.trim().is_empty() {
                             ctx.core.emit(ctx.id, Emit::Wrote {
                                 text: std::mem::take(&mut partial), interrupted: false }).await;
+                        } else {
+                            ctx.core.emit(ctx.id, Emit::Noted {
+                                text: "[回答段没有生成正文；未写入空 assistant 消息]".into(),
+                            }).await;
                         }
+                        ctx.core.cost(
+                            ctx.id,
+                            Role::Answer,
+                            Usage::estimate(last_prompt_tokens, completion_chars),
+                        ).await;
                         break 'turn;
                     }
                     Some(StreamEvent::Chunk(d)) => {
@@ -378,6 +388,7 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                         let _ = ctx.ui.send(UiEvent::Delta { turn: ctx.id, text: d });
                     }
                     Some(StreamEvent::ToolCalls(cs)) => {
+                        let emitted_chars = partial.chars().count();
                         // 模型自己决定调什么、调几个。harness 只负责跑和保序。
                         //
                         // **发出即落盘**：Called 先进时间线，Core 记下 call_id → seq。
@@ -408,21 +419,65 @@ pub async fn run_turn(ctx: TurnCtx) -> TurnOutcome {
                                 task: r.task,
                             }).await;
                         }
+                        // 真客户端会在 ToolCalls 后紧跟 Done(usage)。旧代码在这里直接
+                        // continue，导致每次工具往返的整笔费用被漏掉。
+                        let mut accounted = false;
+                        while let Some(tail) = stream.next().await {
+                            match tail {
+                                StreamEvent::Done(usage) => {
+                                    ctx.core.cost(ctx.id, Role::Answer, usage).await;
+                                    accounted = true;
+                                    break;
+                                }
+                                StreamEvent::Chunk(d) => {
+                                    partial.push_str(&d);
+                                    let _ = ctx.ui.send(UiEvent::Delta { turn: ctx.id, text: d });
+                                }
+                                StreamEvent::Failed(e) => {
+                                    ctx.core.emit(ctx.id, Emit::Noted {
+                                        text: format!("[流中断] {e}"),
+                                    }).await;
+                                    break;
+                                }
+                                StreamEvent::ToolCalls(_) => {
+                                    ctx.core.emit(ctx.id, Emit::Noted {
+                                        text: "[流协议异常：一次响应出现了第二批工具调用]".into(),
+                                    }).await;
+                                    break;
+                                }
+                            }
+                        }
+                        if !accounted {
+                            ctx.core.cost(
+                                ctx.id,
+                                Role::Answer,
+                                Usage::estimate(
+                                    last_prompt_tokens,
+                                    emitted_chars + partial.chars().count(),
+                                ),
+                            ).await;
+                        }
                         stats.answer_ms += t_answer.elapsed().as_millis() as u64;
                         if ctx.token.is_cancelled() { aborted = true; break 'turn; }
                         continue 'turn; // 带结果再问模型，顺便重过检查点
                     }
                     Some(StreamEvent::Done(usage)) => {
                         ctx.core.cost(ctx.id, Role::Answer, usage).await;
-                        ctx.core.emit(ctx.id, Emit::Wrote {
-                            text: std::mem::take(&mut partial), interrupted: false }).await;
+                        if partial.trim().is_empty() {
+                            ctx.core.emit(ctx.id, Emit::Noted {
+                                text: "[回答段没有生成正文；未写入空 assistant 消息]".into(),
+                            }).await;
+                        } else {
+                            ctx.core.emit(ctx.id, Emit::Wrote {
+                                text: std::mem::take(&mut partial), interrupted: false }).await;
+                        }
                         stats.answer_ms += t_answer.elapsed().as_millis() as u64;
                         break 'turn;
                     }
                     Some(StreamEvent::Failed(e)) => {
                         ctx.core.emit(ctx.id, Emit::Noted {
                             text: format!("[流中断] {e}") }).await;
-                        if !partial.is_empty() {
+                        if !partial.trim().is_empty() {
                             ctx.core.emit(ctx.id, Emit::Wrote {
                                 text: std::mem::take(&mut partial), interrupted: true }).await;
                         }
@@ -493,14 +548,21 @@ async fn run_batch(
         stats.tools_run += act_idx.len() as u32;
         let applied = ctx.core.emit(ctx.id, Emit::Infer { ops }).await?;
         stats.dropped_ops += applied.dropped.len() as u32;
+        let applied_count = applied.events.iter().find_map(|e| match &e.body {
+            crate::event::Body::Inferred { ops, .. } => Some(ops.len()),
+            _ => None,
+        }).unwrap_or(0);
+        let parsed_total: usize = per.iter().map(|(_, count, _, _)| *count).sum();
         // 被丢的必须回喂，否则模型下一轮还会提交同样的改动，白花钱。
         // 回喂走工具结果，不再另发一条 Noted —— 工具结果本来就是给模型的回话。
         let feedback = applied.feedback();
         for (i, count, bad, misplaced) in per {
             let mut msg = if count == 0 {
-                "一条改动都没提交。".to_string()
+                "本次调用没有解析出可提交的改动。".to_string()
             } else {
-                format!("提交了 {count} 条改动。")
+                format!(
+                    "本次调用解析出 {count} 条改动；本批共解析 {parsed_total} 条，实际生效 {applied_count} 条。"
+                )
             };
             if !bad.is_empty() {
                 msg.push_str(&format!(
@@ -523,7 +585,7 @@ async fn run_batch(
                 msg.push('\n');
                 msg.push_str(f);
             }
-            let kind = if count == 0 {
+            let kind = if count == 0 || applied_count == 0 {
                 stats.tools_failed += 1;
                 crate::tools::ToolResultKind::Failed
             } else {

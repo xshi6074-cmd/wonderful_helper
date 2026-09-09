@@ -201,6 +201,16 @@ impl Policy {
         Ok(real)
     }
 
+    /// 返回一个能原样喂回 `fs_read` 的路径。第一个 root 下用相对路径；其它
+    /// 授权 root 下用绝对路径，因为相对路径的解析基准按契约就是 roots[0]。
+    pub fn readable_path(&self, real: &Path) -> String {
+        self.roots
+            .first()
+            .and_then(|root| real.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| real.to_string_lossy().replace('\\', "/"))
+    }
+
     /// 网址闸门。返回规范化后的 URL。
     pub fn check_url(&self, raw: &str) -> Result<String, Denied> {
         validate_web_url(&self.cfg, raw).map_err(|e| self.deny(e))
@@ -307,6 +317,10 @@ pub struct Clipped {
     pub lines_total: usize,
     pub bytes_total: usize,
     pub truncated: bool,
+    /// 因行数 / 总字节上限没有显示的后续行；可以用 offset 或缩小范围续取。
+    pub lines_omitted: bool,
+    /// 单行过长而被横向截短的行数；offset 无法取回同一行的后半截。
+    pub lines_shortened: usize,
 }
 
 impl Clip {
@@ -316,15 +330,21 @@ impl Clip {
         let mut out = String::new();
         let mut shown = 0usize;
         let mut truncated = false;
+        let mut lines_omitted = false;
+        let mut lines_shortened = 0usize;
+        let mut last_appended_was_shortened = false;
 
         for line in text.lines() {
             lines_total += 1;
             if shown >= self.max_lines || out.len() >= self.max_bytes {
                 truncated = true;
+                lines_omitted = true;
                 continue; // 继续数总行数，才能在页脚说清「一共多少行」
             }
             let (l, cut) = cut_chars(line, self.max_line_len);
             truncated |= cut;
+            lines_shortened += usize::from(cut);
+            last_appended_was_shortened = cut;
             out.push_str(&l);
             if cut {
                 out.push_str(" …[本行过长已截断]");
@@ -336,8 +356,19 @@ impl Clip {
             let (t, _) = cut_bytes(&out, self.max_bytes);
             out = t;
             truncated = true;
+            if !last_appended_was_shortened {
+                lines_shortened += 1;
+            }
         }
-        Clipped { text: out, lines_shown: shown, lines_total, bytes_total, truncated }
+        Clipped {
+            text: out,
+            lines_shown: shown,
+            lines_total,
+            bytes_total,
+            truncated,
+            lines_omitted,
+            lines_shortened,
+        }
     }
 }
 
@@ -348,13 +379,22 @@ impl Clipped {
         if !self.truncated {
             return String::new();
         }
-        format!(
-            "\n[已截断：显示 {} / 共 {} 行，原文 {} 字节。{}]",
+        let mut detail = format!(
+            "已截断：本次显示 {} 行，原文共 {} 行 / {} 字节。",
             self.lines_shown,
             self.lines_total,
             self.bytes_total,
-            how_to_continue
-        )
+        );
+        if self.lines_shortened > 0 {
+            detail.push_str(&format!(
+                "其中 {} 行过长被横向截短，offset 不能取回同一行的后半截。",
+                self.lines_shortened
+            ));
+        }
+        if self.lines_omitted {
+            detail.push_str(how_to_continue);
+        }
+        format!("\n[{detail}]")
     }
 
     /// 正文 + 页脚。

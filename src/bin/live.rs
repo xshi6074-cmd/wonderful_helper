@@ -194,7 +194,7 @@ async fn main() {
                 Body::Returned { name, content, outcome, .. } => {
                     println!("  [返回] {name} · {outcome} · {}", compact(&content));
                 }
-                Body::Inferred { ops, dropped } => {
+                Body::Inferred { ops, dropped, .. } => {
                     println!("\n  [推断] 生效 {} 条，丢弃 {} 条", ops.len(), dropped.len());
                 }
                 _ => {}

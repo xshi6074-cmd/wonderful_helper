@@ -184,7 +184,18 @@ impl Tool for FsRead {
             };
             let meta = match std::fs::metadata(&real) {
                 Ok(m) => m,
-                Err(e) => return ToolResult::failed(&call, format!("读不到 {p}：{e}")),
+                Err(e) => {
+                    let base = d.policy.roots().first()
+                        .map(|r| r.display().to_string())
+                        .unwrap_or_else(|| "（未配置）".into());
+                    return ToolResult::failed(
+                        &call,
+                        format!(
+                            "读不到 {p}：{e}。相对路径以 tools.roots[0]={base} 为基准；\
+                             fs_find / fs_grep 返回的路径可以原样喂给 fs_read。"
+                        ),
+                    );
+                }
             };
             if meta.is_dir() {
                 return ToolResult::failed(
@@ -225,13 +236,24 @@ impl Tool for FsRead {
                 .map(|(i, l)| format!("{:>6}\t{}\n", i + 1, l))
                 .collect();
 
-            let clipped = d.policy.clip().apply(&body);
-            let next = offset + clipped.lines_shown;
+            let mut clipped = d.policy.clip().apply(&body);
+            let next = offset.saturating_add(clipped.lines_shown);
+            let more = clipped.lines_shown > 0 && next <= total;
+            // Clip 看到的是带行号且已受 limit 限制的渲染串；这里改回文件事实，
+            // 避免 header 说 2401 行、footer 却说 2000 行，字节数也不再含行号。
+            clipped.lines_total = total;
+            clipped.bytes_total = text.len();
+            clipped.lines_omitted |= more;
+            clipped.truncated |= more;
+            let continuation = if more {
+                format!("续读后续行：fs_read path={p} offset={next}")
+            } else {
+                String::new()
+            };
             let out = format!(
                 "{p}（共 {total} 行）\n{}",
-                clipped.render(&format!("续读：fs_read path={p} offset={next}"))
+                clipped.render(&continuation)
             );
-            let more = next <= total;
             d.metrics.out(out.len(), clipped.truncated || more);
             let tail = if more && !clipped.truncated {
                 format!("\n[还有 {} 行。续读：fs_read path={p} offset={next}]", total - next + 1)
@@ -361,6 +383,7 @@ fn grep_blocking(
         let Some(entry) = entry else { continue };
         let path = entry.path().to_path_buf();
         let rel = rel_of(root, &path);
+        let readable = d.policy.readable_path(&path);
         if let Some(set) = &set
             && !set.is_match(&rel) && !set.is_match(path.file_name().unwrap_or_default()) {
                 continue;
@@ -372,7 +395,7 @@ fn grep_blocking(
             &matcher,
             &path,
             UTF8(|lnum, line| {
-                here.push(format!("{}:{}: {}", rel, lnum, line.trim_end()));
+                here.push(format!("{}:{}: {}", readable, lnum, line.trim_end()));
                 Ok(here.len() + out.len() < cap)
             }),
         );
@@ -448,7 +471,7 @@ impl Tool for FsFind {
                         capped = true;
                         break;
                     }
-                    hits.push(rel);
+                    hits.push(d.policy.readable_path(entry.path()));
                 }
             }
             if hits.is_empty() {
