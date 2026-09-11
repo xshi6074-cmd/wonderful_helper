@@ -899,9 +899,10 @@ function editList(key, items) {
  */
 function trackBackground(m) {
   const was = S.bg[m.session];
-  if (m.t === 'turn_started' || m.t === 'delta') S.bg[m.session] = true;
-  else if (m.t === 'turn_closed') delete S.bg[m.session];
-  else return;
+  // 带 session 的消息只有那条会话的 Core 才发得出来，所以「有动静」就等于「还活着」。
+  // 只认 delta 会漏掉判断段和工具那几十秒 —— 恰恰是用户最容易以为「它死了」的那段。
+  if (m.t === 'turn_closed') delete S.bg[m.session];
+  else S.bg[m.session] = true;
   if (was !== S.bg[m.session]) renderSessions();
 }
 

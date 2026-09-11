@@ -128,9 +128,12 @@ async function perform(host, state, req) {
       themeVariables: themeVariables(req.theme),
       flowchart: {
         htmlLabels: true,
-        wrappingWidth: 220,
-        nodeSpacing: 42,
-        rankSpacing: 58,
+        wrappingWidth: 210,
+        // 松一点。上一版 42/58 在有分组的图里几乎贴在一起，线从缝里挤过去，
+        // 看着比实际结构乱得多 —— 图挤不挤，比配色更决定第一眼的观感。
+        nodeSpacing: 56,
+        rankSpacing: 76,
+        padding: 14,
         curve: req.layout === 'elk' ? 'linear' : 'basis',
       },
       elk: {
@@ -255,17 +258,24 @@ function currentTheme() {
   return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
+/// 界面用的是系统字体栈（这个项目刻意不引 web font），图也必须用同一套：
+/// 上一版写死 Inter，本机没有就悄悄掉到另一套字体，于是图里的字和界面
+/// 其它地方永远差半档 —— 说不出哪里怪，但就是不像一个东西。
+const FONT = 'system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif';
+
 function themeVariables(theme) {
   if (theme === 'dark') {
     return {
-      background: '#151822', primaryTextColor: '#edf0f7', lineColor: '#8790a3',
-      clusterBkg: '#1a1e2a', clusterBorder: '#586174', edgeLabelBackground: '#151822',
-      fontFamily: 'Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif',
+      background: '#131218', primaryTextColor: '#e9ecf5', lineColor: '#9ba5b6',
+      clusterBkg: '#181b24', clusterBorder: '#3a4150', edgeLabelBackground: '#1a1922',
+      nodeBorder: '#4a5162', titleColor: '#a2a9b9',
+      fontFamily: FONT, fontSize: '13px',
     };
   }
   return {
-    background: '#f7f9fc', primaryTextColor: '#1b2433', lineColor: '#667085',
-    clusterBkg: '#f4f6fb', clusterBorder: '#a5adbb', edgeLabelBackground: '#f7f9fc',
-    fontFamily: 'Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif',
+    background: '#ffffff', primaryTextColor: '#1b2433', lineColor: '#7b8698',
+    clusterBkg: '#f8f9fc', clusterBorder: '#d9dde6', edgeLabelBackground: '#ffffff',
+    nodeBorder: '#c6ccd8', titleColor: '#697386',
+    fontFamily: FONT, fontSize: '13px',
   };
 }

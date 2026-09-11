@@ -1339,7 +1339,18 @@ pub async fn serve(app: Arc<App>, port: u16) -> Result<(), String> {
         tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("绑定 {addr} 失败：{e}"))?;
     let real = listener.local_addr().map_err(|e| e.to_string())?;
     println!("premortem UI → http://{real}");
-    axum::serve(listener, router).await.map_err(|e| e.to_string())
+    // Ctrl-C 时把会话好好关掉：等 turn 收尾、等 writer 冲完。
+    // 停放的会话也在 close() 里一起收 —— 它们正是「还在跑」的那些，
+    // 直接被进程带走的话，丢的是用户刚等出来的那一整段正文。
+    let closing = app.clone();
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("[serve] 收到退出信号，正在收尾…");
+            closing.close().await;
+        })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

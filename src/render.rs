@@ -195,31 +195,31 @@ fn emit_class_defs(out: &mut String) {
     const DEFS: &[(&str, &str)] = &[
         (
             "pm_kind_module",
-            "fill:#eef0ff,stroke:#6459c7,color:#1b2433,stroke-width:1.6px,font-size:15px",
+            "fill:#eef0ff,stroke:#6459c7,color:#1b2433,stroke-width:1.25px,font-size:13px",
         ),
         (
             "pm_kind_data",
-            "fill:#e7f4fb,stroke:#277da1,color:#1b2433,stroke-width:1.6px,font-size:15px",
+            "fill:#e7f4fb,stroke:#277da1,color:#1b2433,stroke-width:1.25px,font-size:13px",
         ),
         (
             "pm_kind_op",
-            "fill:#e7f6f2,stroke:#23816f,color:#1b2433,stroke-width:1.5px,font-size:14px",
+            "fill:#e7f6f2,stroke:#23816f,color:#1b2433,stroke-width:1.25px,font-size:13px",
         ),
         (
             "pm_kind_loss",
-            "fill:#fbeceb,stroke:#b85a54,color:#1b2433,stroke-width:1.8px,font-size:15px",
+            "fill:#fbeceb,stroke:#b85a54,color:#1b2433,stroke-width:1.4px,font-size:13px",
         ),
         (
             "pm_kind_metric",
-            "fill:#fff4d8,stroke:#a96f16,color:#1b2433,stroke-width:1.5px,font-size:14px",
+            "fill:#fff4d8,stroke:#a96f16,color:#1b2433,stroke-width:1.25px,font-size:13px",
         ),
         (
             "pm_kind_branch",
-            "fill:#f0edf9,stroke:#7867a6,color:#1b2433,stroke-width:1.4px,font-size:14px",
+            "fill:#f0edf9,stroke:#7867a6,color:#1b2433,stroke-width:1.25px,font-size:13px",
         ),
         (
             "pm_kind_note",
-            "fill:#eef1f5,stroke:#7b8494,color:#1b2433,stroke-width:1.2px,font-size:13px",
+            "fill:#eef1f5,stroke:#7b8494,color:#1b2433,stroke-width:1.1px,font-size:12px",
         ),
         (
             "pm_tone_indigo",
@@ -230,37 +230,37 @@ fn emit_class_defs(out: &mut String) {
         ("pm_tone_amber", "fill:#fff4d8,stroke:#a96f16,color:#49300c"),
         ("pm_tone_rose", "fill:#fbeceb,stroke:#b85a54,color:#4b2220"),
         ("pm_tone_slate", "fill:#eef1f5,stroke:#687386,color:#252c38"),
-        ("pm_emphasis_primary", "stroke-width:3px,font-weight:700"),
-        ("pm_emphasis_secondary", "stroke-width:2px,font-weight:600"),
+        ("pm_emphasis_primary", "stroke-width:2.2px,font-weight:700"),
+        ("pm_emphasis_secondary", "stroke-width:1.8px,font-weight:600"),
         ("pm_emphasis_muted", "opacity:.68"),
-        ("pm_text_sm", "font-size:12px"),
-        ("pm_text_md", "font-size:15px"),
-        ("pm_text_lg", "font-size:18px,font-weight:650"),
+        ("pm_text_sm", "font-size:11px"),
+        ("pm_text_md", "font-size:13px"),
+        ("pm_text_lg", "font-size:15.5px,font-weight:650"),
         (
             "pm_group_module",
-            "fill:#f4f3fb,stroke:#8578c4,color:#1b2433,stroke-width:2px,font-size:16px,font-weight:650",
+            "fill:#f4f3fb,stroke:#8578c4,color:#697386,stroke-width:1.2px,font-size:11.5px,font-weight:650",
         ),
         (
             "pm_group_section",
-            "fill:#f8f9fc,stroke:#aab1be,color:#697386,stroke-width:1px,stroke-dasharray:2 4,font-size:13px",
+            "fill:#f8f9fc,stroke:#c3c9d4,color:#697386,stroke-width:1.1px,stroke-dasharray:3 5,font-size:11.5px",
         ),
         (
             "pm_edge_flow",
-            "stroke:#5a6678,stroke-width:1.8px,color:#5a6678",
+            "stroke:#7b8698,stroke-width:1.6px,color:#7b8698",
         ),
         (
             "pm_edge_supervises",
-            "stroke:#a64f61,stroke-width:2.8px,color:#a64f61",
+            "stroke:#a64f61,stroke-width:2.2px,color:#a64f61",
         ),
         (
             "pm_edge_compares",
-            "stroke:#8b6a19,stroke-width:1.6px,color:#8b6a19",
+            "stroke:#8b6a19,stroke-width:1.5px,color:#8b6a19",
         ),
         (
             "pm_edge_depends",
             "stroke:#35766c,stroke-width:1.5px,color:#35766c",
         ),
-        ("pm_guess", "stroke-dasharray:7 5"),
+        ("pm_guess", "stroke-dasharray:6 5"),
         ("pm_user", "stroke:#6f57cf"),
     ];
     for (name, def) in DEFS {

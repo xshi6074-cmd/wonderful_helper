@@ -302,9 +302,87 @@ details.block textarea{font-family:var(--mono);font-size:12px;min-height:170px;r
 #graph{overflow:auto;max-height:44vh;min-height:96px;padding:8px}
 #graph .mermaid-graph{display:block;min-width:100%;height:auto;max-width:none!important}
 .pm-selectable{cursor:pointer;outline:none}
-.pm-selectable:hover>rect,.pm-selectable:hover>polygon,.pm-selectable:focus-visible>rect,
-.pm-selectable:focus-visible>polygon{filter:brightness(1.04);stroke-width:3px!important}
 .pm-selectable:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+
+/* ── 图的外观层 ──────────────────────────────────────────────────────
+   Mermaid 负责布局、分组和连线路由，样子全部在这里改。这样换主题、调外观
+   都不用碰服务端生成的图源码，图的**结构**也就永远只有一份定义。
+
+   Mermaid 把样式内联在元素上，所以这一层不得不用 !important —— 那是它的
+   渲染方式决定的，不是随手加的。 */
+
+/* 节点：圆角 + 细描边 + 一点点投影。默认那种直角厚边看着像 2005 年的框图。
+   投影挂在 .node 整体上而不是形状上，才不会把文字也一起糊一层。
+
+   **选择器必须是后代而不是直接子元素**：mermaid 把形状包在
+   `g.label-container` 里（矩形类是 <rect>，圆角/菱形/圆柱类直接是 <path>），
+   写成 `.node>rect` 一条都选不中 —— 颜色之所以还对，是因为 fill/stroke
+   在 SVG 里会继承下去，而 stroke-width、rx 不会。 */
+.mermaid-graph g.node rect,.mermaid-graph g.node polygon,
+.mermaid-graph g.node .label-container path,.mermaid-graph g.node>path{
+  stroke-width:1.25px!important;transition:stroke-width .12s ease}
+/* rx 只对矩形有意义；path 画的形状自带弧度，circle/polygon 套圆角没有意义。 */
+.mermaid-graph g.node rect{rx:11px;ry:11px}
+.mermaid-graph .node{filter:drop-shadow(0 1px 1.5px rgba(20,24,38,.07)) drop-shadow(0 8px 14px -10px rgba(20,24,38,.3))}
+@media (prefers-color-scheme:dark){
+  .mermaid-graph .node{filter:drop-shadow(0 1px 2px rgba(0,0,0,.45))}
+}
+
+/* 字：跟界面同一套字体栈与同一档字号。上一版写死 Inter，而这个项目刻意不引
+   web font —— 于是实际落到的是系统兜底字体，和界面其它地方对不上。
+
+   ★ 这几条**不能**限定在 .mermaid-graph 底下。
+   mermaid 是先把标签渲染到一个临时元素里量尺寸、再照量出来的宽高裁形状的，
+   而 `.mermaid-graph` 这个类是渲染完成后才由我们加到 <svg> 上的 —— 写成后代
+   选择器，量的时候这些样式还不存在，画完才生效，于是字比形状宽：
+   「隐藏测试 pass rate」被切成「pass rat」，两行的摘要压出下边框。
+   这些类名只有 mermaid 在用，放全局不会串到界面其它地方。 */
+.nodeLabel,.edgeLabel,.cluster-label,.mermaid-graph .label,
+.mermaid-graph foreignObject div{font-family:var(--sans)!important}
+.nodeLabel{font-size:13px!important;font-weight:560!important;line-height:1.45!important}
+/* 摘要是第二层信息：小一号、轻一档、退到次要色。原来它和标题同色同重，
+   一个方块里两行一样重的字，看上去就是一团。 */
+.nodeLabel small{
+  display:inline-block;margin-top:3px;
+  font-size:11px!important;font-weight:400!important;line-height:1.4!important;
+  opacity:.92}
+.mermaid-graph .nodeLabel small{color:var(--graph-muted)!important}
+
+/* 分组：比节点更圆、更淡，标签做成一个小标签片，不和组内节点抢注意力。 */
+.mermaid-graph .cluster>rect{rx:16px;ry:16px;stroke-width:1.1px!important}
+/* 同上：字号字重要在量尺寸时就生效，所以不挂在 .mermaid-graph 下面。 */
+.cluster-label .nodeLabel{font-size:11.5px!important;font-weight:650!important}
+.cluster-label small{display:none}  /* 组标题上再挂摘要就太挤了 */
+.mermaid-graph .cluster-label .nodeLabel{color:var(--graph-muted)!important}
+
+/* 连线：细一点、拐角圆一点。ELK 走的是直角路由，圆角接头能去掉大半的生硬感。 */
+.mermaid-graph .edgePath path.path,.mermaid-graph path.flowchart-link{
+  stroke-width:1.6px!important;stroke-linecap:round;stroke-linejoin:round}
+.mermaid-graph .marker{stroke-width:.8px}
+
+/* 边上的字做成胶囊，压在线上也读得清。
+   **底衬只能加在真有字的那个 span 上**：mermaid 给每条边都挂一个 .labelBkg，
+   没有标签的边它也挂（foreignObject 尺寸是 0）—— 给 .labelBkg 加背景和边框，
+   图上就会冒出一堆没有字的白色小块，正是这次改版第一版的样子。 */
+.mermaid-graph .edgeLabel{font-size:11px!important;background:transparent!important}
+.mermaid-graph .edgeLabel .labelBkg{background:transparent!important;border:0!important;padding:0!important}
+.mermaid-graph .edgeLabel span.edgeLabel:not(:empty){
+  display:inline-block;
+  background:var(--surface)!important;color:var(--graph-muted)!important;
+  padding:1px 7px!important;border-radius:999px!important;
+  border:1px solid var(--line)!important;box-shadow:0 1px 2px rgba(20,24,38,.06)}
+.mermaid-graph .edgeLabel span.edgeLabel p{margin:0!important}
+
+/* 悬停/选中：上一版靠 brightness + 3px 粗边，亮度在深色主题里几乎看不出来，
+   粗边又会把布局挤歪一点。改成描边提亮 + 一圈光晕，两个主题下都看得见。 */
+.mermaid-graph .pm-selectable:hover rect,.mermaid-graph .pm-selectable:hover polygon,
+.mermaid-graph .pm-selectable:hover path,
+.mermaid-graph .pm-selectable:focus-visible rect,
+.mermaid-graph .pm-selectable:focus-visible path{
+  stroke-width:2px!important}
+.mermaid-graph .node.pm-selectable:hover{
+  filter:drop-shadow(0 0 0 var(--accent)) drop-shadow(0 2px 3px rgba(20,24,38,.12))
+         drop-shadow(0 10px 18px -10px rgba(111,87,207,.5))}
 /* Mermaid 的 classDef 给布局器稳定字号与可独立使用的回退色；应用主题只覆盖颜色。 */
 .mermaid-graph .pm_kind_module>*{fill:var(--graph-module-fill)!important;stroke:var(--graph-module-stroke)!important;color:var(--graph-ink)!important}
 .mermaid-graph .pm_kind_data>*{fill:var(--graph-data-fill)!important;stroke:var(--graph-data-stroke)!important;color:var(--graph-ink)!important}
