@@ -551,6 +551,8 @@ mark.hit.cur{background:var(--accent);color:#fff}
 /* ───────── 会话行：改名 / 删除 ───────── */
 #session-list li{display:flex;align-items:center;gap:6px}
 #session-list li .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 切走了但那一轮还在后台跑。用户得看得出「它没被我掐掉」。 */
+#session-list li .bg-run{color:var(--ok,#2c7a52);font-weight:600}
 #session-list li .ops{display:flex;gap:2px;opacity:0;flex:0 0 auto}
 #session-list li:hover .ops{opacity:1}
 #session-list li .ops button{padding:0 4px;font-size:11px;line-height:1.6}

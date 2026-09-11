@@ -654,6 +654,17 @@ impl Core {
                 let _ = reply.send(applied);
             }
 
+            // 轮外记账：**不过代际闸门**。蒸馏发生在两轮之间，恢复期的调用发生在
+            // 还没有任何一轮的时候 —— 两者都对不上任何 turn，而花的都是真钱。
+            // 挂到最近一轮上（没有轮次就不挂），账目归属才和用户看到的分段一致。
+            CoreMsg::CostOut { role, usage } => {
+                let turn = self.last_turn();
+                self.commit(
+                    vec![Draft::new(turn, Body::Cost { role, task: None, usage })],
+                    None,
+                );
+            }
+
             CoreMsg::Finished { turn, outcome } => {
                 if !self.is_current(turn) {
                     self.metrics.stale_msgs_dropped += 1;
@@ -1065,6 +1076,14 @@ impl Core {
 
     fn is_running(&self, turn: TurnId) -> bool {
         matches!(&self.turn, TurnPhase::Running { id, .. } if *id == turn)
+    }
+
+    /// 最近一轮：正在跑的那轮，否则已经开过的最后一轮。全新会话返回 None。
+    fn last_turn(&self) -> Option<TurnId> {
+        match &self.turn {
+            TurnPhase::Running { id, .. } | TurnPhase::Closing { id } => Some(*id),
+            TurnPhase::Idle => (self.next_turn > 1).then(|| TurnId(self.next_turn - 1)),
+        }
     }
 
     /// Running 或 Closing 都算「当前代」。

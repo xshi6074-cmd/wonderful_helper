@@ -58,6 +58,15 @@ pub struct App {
     settings: RwLock<Settings>,
     secrets: RwLock<Secrets>,
     live: Mutex<Option<Live>>,
+    /// 切走时**还在跑**的会话：Core 留着，让那一轮自己跑完。
+    ///
+    /// 用户开新会话不该腰斩上一条正在生成的回答 —— 上一版是 `open` 里直接
+    /// `close()`，于是「换个话题问一句」＝「把刚才那轮杀掉」，而且杀在半路，
+    /// 那一轮的正文没落盘（只有轮末整体提交），回来就只剩一句 aborted。
+    ///
+    /// 一个会话只能有一个 Core（唯一写权，见 [`CoreDeps::session`]），所以切回
+    /// 一条还停在这里的会话时是**认领**它，不是再开一个。
+    parked: Mutex<Vec<Live>>,
     commands: Mutex<()>,
     /// 已序列化好的 JSON，广播给所有打开的页面。多开一个标签页也能同步看到。
     out: broadcast::Sender<String>,
@@ -93,9 +102,19 @@ impl App {
             settings: RwLock::new(settings),
             secrets: RwLock::new(secrets),
             live: Mutex::new(None),
+            parked: Mutex::new(Vec::new()),
             commands: Mutex::new(()),
             out,
             caps_in,
+        });
+
+        // 收停放的会话：那一轮跑完就把 Core 关掉，别让它白占着模型连接和 writer。
+        let sweep = app.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PARK_SWEEP).await;
+                sweep.sweep_parked().await;
+            }
         });
 
         // 协商结果落盘。**单独一个任务**，因为写文件不能挡在模型请求的路径上 ——
@@ -142,6 +161,15 @@ impl App {
 
     /// 起一个会话的 Core。`resume` 为 None 表示开新会话。
     async fn open(self: &Arc<Self>, resume: Option<SessionId>) -> Result<(), String> {
+        // 切回一条还停在后台跑着的会话 ⇒ 认领它，不是再开一个 Core。
+        // 同一会话两个 Core 就是两份写权，seq 立刻打架。
+        if let Some(id) = &resume
+            && let Some(back) = self.reclaim(id).await
+        {
+            self.leave_current().await;
+            *self.live.lock().await = Some(back);
+            return Ok(());
+        }
         let settings = self.settings.read().await.clone();
         let secrets = self.secrets.read().await.clone();
         let models = settings.build_models_with(&secrets, &real_env, Some(self.caps_in.clone()))?;
@@ -167,7 +195,7 @@ impl App {
             }
         };
         // 配置或目标无效时保留当前 Core；恢复必须等旧 writer 冲完。
-        self.close().await;
+        self.leave_current().await;
 
         let session = resume.clone().unwrap_or_else(SessionId::new);
         if resume.is_none() {
@@ -211,7 +239,7 @@ impl App {
         let started = start(cd);
 
         let out = self.out.clone();
-        let pump = tokio::spawn(pump(ui_rx, out));
+        let pump = tokio::spawn(pump(session.clone(), ui_rx, out));
 
         *self.live.lock().await = Some(Live {
             session,
@@ -226,12 +254,56 @@ impl App {
         Ok(())
     }
 
+    /// 关掉当前会话，连同所有停放的。**退出和换配置走这条。**
     async fn close(self: &Arc<Self>) {
+        let parked: Vec<Live> = std::mem::take(&mut *self.parked.lock().await);
+        for live in parked {
+            shut(live).await;
+        }
         let Some(live) = self.live.lock().await.take() else { return };
-        live.handle.session_shutdown().await;
-        let _ = live.core_join.await;
-        let _ = live.writer_join.await;
-        live.pump.abort();
+        shut(live).await;
+    }
+
+    /// 离开当前会话：**还在跑就停放，不腰斩**；已经空闲才真关。
+    async fn leave_current(self: &Arc<Self>) {
+        let Some(live) = self.live.lock().await.take() else { return };
+        let busy = live.handle.session_snapshot().await.is_some_and(|s| s.turn.is_some());
+        if busy {
+            self.parked.lock().await.push(live);
+        } else {
+            shut(live).await;
+        }
+    }
+
+    /// 把一条停放的会话认领回来。不在停放区就是 None。
+    async fn reclaim(self: &Arc<Self>, id: &SessionId) -> Option<Live> {
+        let mut parked = self.parked.lock().await;
+        let i = parked.iter().position(|l| &l.session == id)?;
+        Some(parked.remove(i))
+    }
+
+    /// 停放的会话跑完了就收掉。**只收空闲的**，还在跑的下一轮再看。
+    async fn sweep_parked(self: &Arc<Self>) {
+        let mut idle = Vec::new();
+        {
+            let mut parked = self.parked.lock().await;
+            let mut i = 0;
+            while i < parked.len() {
+                let done = match parked[i].handle.session_snapshot().await {
+                    Some(s) => s.turn.is_none(),
+                    // 拿不到快照 = Core 已经不在了，也该收。
+                    None => true,
+                };
+                if done {
+                    idle.push(parked.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for live in idle {
+            shut(live).await;
+        }
     }
 
     fn push(&self, v: Value) {
@@ -239,12 +311,31 @@ impl App {
     }
 }
 
+/// 多久扫一次停放区。停放的会话跑完之后最多多活这么久，不影响正确性。
+const PARK_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 优雅关掉一条会话：等 turn 收尾 → 等 writer 冲完 → 停掉转发。
+async fn shut(live: Live) {
+    live.handle.session_shutdown().await;
+    let _ = live.core_join.await;
+    let _ = live.writer_join.await;
+    live.pump.abort();
+}
+
 /// UiEvent → 浏览器。**要削推送量就削这里**，只有这一个地方。
-async fn pump(mut rx: broadcast::Receiver<UiEvent>, out: broadcast::Sender<String>) {
+///
+/// 每条都带上 `session`：停放的会话还在后台吐事件，页面必须认得出哪些不是
+/// 当前这条会话的，否则别人的正文会插进你正在看的时间线里。
+async fn pump(
+    session: SessionId,
+    mut rx: broadcast::Receiver<UiEvent>,
+    out: broadcast::Sender<String>,
+) {
     loop {
         match rx.recv().await {
             Ok(e) => {
-                if let Some(v) = fanout(e) {
+                if let Some(mut v) = fanout(e) {
+                    v["session"] = Value::String(session.0.clone());
                     let _ = out.send(v.to_string());
                 }
             }
@@ -945,6 +1036,19 @@ fn scenes_json(pb: &crate::scene::Playbook) -> Value {
 /// 而那种失效要到**下一轮**才以「场景全没了、回退到内置目录」的形式冒出来 ——
 /// 隔着一次交互的错最难查。案例文件同理：frontmatter 不对就整条读不出来，
 /// 而且是静默的（`load_cases` 里 `parse_case` 返回 None 就跳过）。
+///
+/// # 失败的爆炸半径 = 依赖组，不是整批
+///
+/// 上一版任何一节校验不过就整批返回，于是「`playbook.toml` 的 TOML 写坏了」
+/// 会让同一次勾选里**完全无关**的 `project.md` 也一个字都写不进去 ——
+/// 用户勾了 N 节、按了确认、得到 0 个文件，而失败原因挂在另一节上。
+///
+/// 但也不能反过来「每节各写各的」：案例可以引用同一份草稿里新增的场景，
+/// 拆开写就会出现「案例落了盘、它依赖的场景没落」的悬空引用。
+///
+/// 所以按**依赖关系**分组：
+/// - `playbook.toml` + `cases/*` 是一组，组内仍然整体校验、整体写；
+/// - 其余文件互不依赖，各自校验、各自写，一节坏不连累另一节。
 fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
     let Some(arr) = sections.as_array() else {
         return json!({ "t": "applied", "ok": 0, "errors": ["没有要写的内容"] });
@@ -953,8 +1057,8 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
     let mut done: Vec<String> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
 
-    // 先做跨节预检再写任何文件。尤其是案例可以依赖同一份草稿里新增的场景，
-    // 不能按 UI 排列顺序逐节校验；同一目标出现两次也不能写到一半才冲突。
+    // 同一目标出现两次是草稿本身的缺陷（两节会互相覆盖），照旧整批拒绝：
+    // 这时候写哪一节都是猜。
     let mut targets = std::collections::BTreeSet::new();
     for s in arr {
         let file = s["file"].as_str().unwrap_or("");
@@ -966,144 +1070,34 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
         return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
     }
 
-    // 版本、目标与空内容也整批预检。否则前两节已经覆盖，第三节才发现用户在审阅
-    // 期间改过文件，会得到一半新一半旧的长期记忆。
-    for s in arr {
-        let file = s["file"].as_str().unwrap_or("");
-        if crate::memory::write_mode_for(file).is_none() || !mem_allowed(file) {
-            errs.push(format!("{file}：不是允许写入的持久层文件"));
-            continue;
-        }
-        if s["text"].as_str().is_none_or(|text| text.trim().is_empty()) {
-            errs.push(format!("{file}：内容是空的"));
-            continue;
-        }
-        let Some(expected) = s["base_revision"].as_str() else {
-            errs.push(format!("{file}：草稿缺少源文件版本，请重新蒸馏"));
-            continue;
-        };
-        let current = match std::fs::read_to_string(root.join(file)) {
-            Ok(text) => Some(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                errs.push(format!("{file}：读取当前文件失败 {e}"));
-                continue;
-            }
-        };
-        if crate::memory::content_revision(current.as_deref()) != expected {
-            errs.push(format!("{file}：审阅期间文件已变化，请重新蒸馏后再合并"));
-        }
-    }
-    if !errs.is_empty() {
-        return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
-    }
+    let in_scene_group =
+        |file: &str| file == "playbook.toml" || file.starts_with("cases/");
 
-    let needs_playbook = arr.iter().any(|s| {
-        s["file"].as_str().is_some_and(|file| {
-            file == "playbook.toml" || file.starts_with("cases/")
-        })
-    });
-    if needs_playbook {
-        let current_playbook = match std::fs::read_to_string(root.join("playbook.toml")) {
-            Ok(text) => text,
-            Err(e) => {
-                errs.push(format!("playbook.toml：读取当前场景库失败 {e}"));
-                return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
-            }
-        };
-        let prospective_playbook_text = match arr.iter().find(|s| s["file"] == "playbook.toml") {
-            Some(section) => match crate::scene::Playbook::merge_toml(
-                &current_playbook,
-                section["text"].as_str().unwrap_or(""),
-            ) {
-                Ok(text) => text,
-                Err(e) => {
-                    errs.push(format!("playbook.toml：{e}"));
-                    return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
-                }
-            },
-            None => current_playbook,
-        };
-        let prospective_playbook = match crate::scene::Playbook::from_toml_str(&prospective_playbook_text) {
-            Ok(playbook) => playbook,
-            Err(e) => {
-                errs.push(format!("playbook.toml：当前或合并后的场景库无效：{e}"));
-                return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
-            }
-        };
-        for s in arr.iter().filter(|s| {
-            s["file"].as_str().is_some_and(|file| file.starts_with("cases/"))
-        }) {
-            let file = s["file"].as_str().unwrap_or("");
-            let text = s["text"].as_str().unwrap_or("");
-            if let Err(e) = crate::memory::validate_case_dependencies(file, text, &prospective_playbook) {
-                errs.push(format!("{file}：{e}"));
-            }
-        }
-        if !errs.is_empty() {
-            return json!({ "t": "applied", "ok": 0, "files": done, "errors": errs });
+    // ── 第一组：互不依赖的文件，各自成败 ──
+    for s in arr.iter().filter(|s| !in_scene_group(s["file"].as_str().unwrap_or(""))) {
+        match write_section(&root, s) {
+            Ok(file) => done.push(file),
+            Err(e) => errs.push(e),
         }
     }
 
-    let mut ordered = arr.iter().collect::<Vec<_>>();
-    // 案例若引用同批新增场景，先让场景库落盘，避免中间出现悬空引用。
-    ordered.sort_by_key(|s| if s["file"] == "playbook.toml" { 0 } else { 1 });
-    for s in ordered {
-        let file = s["file"].as_str().unwrap_or("").to_string();
-        let text = s["text"].as_str().unwrap_or("").to_string();
-        let Some(mode) = crate::memory::write_mode_for(&file) else {
-            errs.push(format!("{file}：不是允许写入的持久层文件"));
-            continue;
-        };
-        if !mem_allowed(&file) {
-            errs.push(format!("{file}：不是允许写入的持久层文件"));
-            continue;
-        }
-        if text.trim().is_empty() {
-            errs.push(format!("{file}：内容是空的，跳过"));
-            continue;
-        }
-        let path = root.join(&file);
-        let current = match std::fs::read_to_string(&path) {
-            Ok(text) => Some(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                errs.push(format!("{file}：读取当前文件失败 {e}"));
-                continue;
-            }
-        };
-        let expected = s["base_revision"].as_str().unwrap_or("");
-        let actual = crate::memory::content_revision(current.as_deref());
-        if actual != expected {
-            errs.push(format!("{file}：审阅期间文件已变化，请重新蒸馏后再合并"));
-            continue;
-        }
-        let merged = match mode {
-            crate::memory::WriteMode::Replace => format!("{}\n", text.trim()),
-            crate::memory::WriteMode::Merge => {
-                let Some(current) = current.as_deref() else {
-                    errs.push(format!("{file}：当前场景库不存在，不能应用场景 diff"));
-                    continue;
-                };
-                match crate::scene::Playbook::merge_toml(current, &text) {
-                    Ok(merged) => merged,
-                    Err(e) => {
-                        errs.push(format!("{file}：{e}"));
-                        continue;
+    // ── 第二组：场景库与案例。组内整体校验、整体写 ──
+    let scene_group: Vec<&Value> =
+        arr.iter().filter(|s| in_scene_group(s["file"].as_str().unwrap_or(""))).collect();
+    if !scene_group.is_empty() {
+        match check_scene_group(&root, &scene_group) {
+            Err(group_errs) => errs.extend(group_errs),
+            Ok(()) => {
+                let mut ordered = scene_group.clone();
+                // 案例若引用同批新增场景，先让场景库落盘，避免中间出现悬空引用。
+                ordered.sort_by_key(|s| if s["file"] == "playbook.toml" { 0 } else { 1 });
+                for s in ordered {
+                    match write_section(&root, s) {
+                        Ok(file) => done.push(file),
+                        Err(e) => errs.push(e),
                     }
                 }
             }
-        };
-        if let Err(e) = crate::memory::validate(&file, &merged) {
-            errs.push(format!("{file}：{e}"));
-            continue;
-        }
-        if let Some(p) = path.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        match std::fs::write(&path, &merged) {
-            Ok(()) => done.push(file),
-            Err(e) => errs.push(format!("{file}：写入失败 {e}")),
         }
     }
 
@@ -1121,6 +1115,88 @@ fn distill_apply(app: &Arc<App>, sections: &Value) -> Value {
         app.push(v);
     }
     json!({ "t": "applied", "ok": done.len(), "files": done, "errors": errs })
+}
+
+/// 校验并写一节。错误里一定带文件名 —— UI 上那行红字就是它。
+///
+/// 校验与写在同一个函数里而不是分两遍：两遍之间文件可能又变了，
+/// 而「校验时对、写时已经不对」正是这套 base_revision 想挡的东西。
+fn write_section(root: &std::path::Path, s: &Value) -> Result<String, String> {
+    let file = s["file"].as_str().unwrap_or("").to_string();
+    let text = s["text"].as_str().unwrap_or("").to_string();
+    if crate::memory::write_mode_for(&file).is_none() || !mem_allowed(&file) {
+        return Err(format!("{file}：不是允许写入的持久层文件"));
+    }
+    let mode = crate::memory::write_mode_for(&file).expect("刚判过不是 None");
+    if text.trim().is_empty() {
+        return Err(format!("{file}：内容是空的"));
+    }
+    let Some(expected) = s["base_revision"].as_str() else {
+        return Err(format!("{file}：草稿缺少源文件版本，请重新蒸馏"));
+    };
+    let path = root.join(&file);
+    let current = read_memory_file(&path).map_err(|e| format!("{file}：读取当前文件失败 {e}"))?;
+    if crate::memory::content_revision(current.as_deref()) != expected {
+        return Err(format!("{file}：审阅期间文件已变化，请重新蒸馏后再合并"));
+    }
+    let merged = match mode {
+        crate::memory::WriteMode::Replace => format!("{}\n", text.trim()),
+        crate::memory::WriteMode::Merge => {
+            let Some(current) = current.as_deref() else {
+                return Err(format!("{file}：当前场景库不存在，不能应用场景 diff"));
+            };
+            crate::scene::Playbook::merge_toml(current, &text)
+                .map_err(|e| format!("{file}：{e}"))?
+        }
+    };
+    crate::memory::validate(&file, &merged).map_err(|e| format!("{file}：{e}"))?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    std::fs::write(&path, &merged).map_err(|e| format!("{file}：写入失败 {e}"))?;
+    Ok(file)
+}
+
+/// 场景组的跨节校验：合并后的场景库要合法，案例引用的场景要存在（**含同批新增的**）。
+///
+/// 一条不过整组都不写：案例落了盘而它依赖的场景没落，是比「这次没写成」更糟的状态。
+fn check_scene_group(root: &std::path::Path, group: &[&Value]) -> Result<(), Vec<String>> {
+    let current_playbook = match std::fs::read_to_string(root.join("playbook.toml")) {
+        Ok(text) => text,
+        Err(e) => return Err(vec![format!("playbook.toml：读取当前场景库失败 {e}")]),
+    };
+    let prospective_text = match group.iter().find(|s| s["file"] == "playbook.toml") {
+        Some(section) => crate::scene::Playbook::merge_toml(
+            &current_playbook,
+            section["text"].as_str().unwrap_or(""),
+        )
+        .map_err(|e| vec![format!("playbook.toml：{e}")])?,
+        None => current_playbook,
+    };
+    let prospective = crate::scene::Playbook::from_toml_str(&prospective_text)
+        .map_err(|e| vec![format!("playbook.toml：当前或合并后的场景库无效：{e}")])?;
+
+    let errs: Vec<String> = group
+        .iter()
+        .filter(|s| s["file"].as_str().is_some_and(|f| f.starts_with("cases/")))
+        .filter_map(|s| {
+            let file = s["file"].as_str().unwrap_or("");
+            let text = s["text"].as_str().unwrap_or("");
+            crate::memory::validate_case_dependencies(file, text, &prospective)
+                .err()
+                .map(|e| format!("{file}：{e}"))
+        })
+        .collect();
+    if errs.is_empty() { Ok(()) } else { Err(errs) }
+}
+
+/// 不存在当成 None，其它 IO 错误照实报。
+fn read_memory_file(path: &std::path::Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// 列一个目录。给操作者挑路径用，见调用点的说明。
@@ -1353,6 +1429,114 @@ mod tests {
         let updated = std::fs::read_to_string(&playbook_path).unwrap();
         assert!(crate::scene::Playbook::from_toml_str(&updated).unwrap().get("new_scene").is_some());
         assert!(app.dir.join("memory/cases/new-case.md").exists());
+        cleanup(app).await;
+    }
+
+    /// 一节坏掉只该炸它自己所在的依赖组。
+    ///
+    /// 上一版是整批预检 + 早退：`playbook.toml` 的 TOML 写坏了，同一次勾选里
+    /// 毫不相干的 `project.md` 也一个字写不进去 —— 用户勾了两节、按了确认、
+    /// 得到 0 个文件，而报错挂在另一节上。
+    #[tokio::test]
+    async fn a_broken_section_does_not_veto_independent_ones() {
+        let app = fixture().await;
+        let root = app.dir.join("memory");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("project.md");
+        let playbook_revision = crate::memory::content_revision(
+            std::fs::read_to_string(root.join("playbook.toml")).ok().as_deref(),
+        );
+
+        let out = distill_apply(&app, &json!([
+            {
+                "file": "project.md",
+                "mode": "replace",
+                "text": "# 项目记忆\n\n这一节完全合法，不该被别人连累。",
+                "base_revision": crate::memory::content_revision(
+                    std::fs::read_to_string(&project).ok().as_deref()),
+            },
+            {
+                "file": "playbook.toml",
+                "mode": "merge",
+                "text": "[[scene]]\nid = \"broken\"\nlabel = \"没收尾的字符串",
+                "base_revision": playbook_revision,
+            },
+        ]));
+
+        assert_eq!(out["ok"], 1, "合法的那节要写进去：{out}");
+        assert!(out["files"].to_string().contains("project.md"), "{out}");
+        assert!(out["errors"].to_string().contains("playbook.toml"), "坏的那节要照实报：{out}");
+        assert!(
+            std::fs::read_to_string(&project).unwrap().contains("不该被别人连累"),
+            "project.md 没真的落盘"
+        );
+        cleanup(app).await;
+    }
+
+    /// 轮外记账（蒸馏）必须进账本。
+    ///
+    /// 上一版 `cost_out` 用 `TurnId(u64::MAX)` 当哨兵挤进 `Emit`，而代际闸门对
+    /// 哨兵永远判过期 —— 蒸馏真金白银调一次模型，账上一分不涨。
+    #[tokio::test]
+    async fn out_of_turn_cost_reaches_the_ledger() {
+        let app = fixture().await;
+        app.open(None).await.unwrap();
+        let h = app.live.lock().await.as_ref().unwrap().handle.clone();
+        let mut rx = app.out.subscribe();
+
+        h.cost_out(
+            crate::model::Role::Subagent,
+            crate::model::Usage { prompt: 1200, completion: 300, estimated: false },
+        )
+        .await;
+        h.session_flush().await;
+
+        let tick = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let raw = rx.recv().await.expect("broadcast closed");
+                let v: Value = serde_json::from_str(&raw).unwrap();
+                if v["t"] == "cost" {
+                    return v;
+                }
+            }
+        })
+        .await
+        .expect("蒸馏的花费没有产生任何 cost 事件");
+
+        assert_eq!(tick["role"], "Subagent", "{tick}");
+        assert_eq!(tick["total"], 1500, "账本总数要包含轮外这一笔：{tick}");
+        cleanup(app).await;
+    }
+
+    /// 切回一条还停在后台的会话是**认领**，不是再开一个 Core。
+    ///
+    /// 同一会话两个 Core ＝ 两份写权，seq 立刻撞号 —— 这是停放机制唯一
+    /// 会造成数据损坏的失误，所以单独钉一条。
+    #[tokio::test]
+    async fn a_parked_session_is_reclaimed_not_opened_twice() {
+        let app = fixture().await;
+        app.open(None).await.unwrap();
+        let live = app.live.lock().await.take().unwrap();
+        let id = live.session.clone();
+        let old = live.handle.clone();
+        old.session_edit(vec![Op::set("audit", "parked")]).await.unwrap();
+        // 模拟「切走的时候它还在跑」
+        app.parked.lock().await.push(live);
+
+        app.open(Some(id.clone())).await.unwrap();
+
+        assert!(app.parked.lock().await.is_empty(), "认领之后不该还留在停放区");
+        assert!(old.session_snapshot().await.is_some(), "原来那个 Core 被关掉了 —— 说明是重开的");
+        let guard = app.live.lock().await;
+        let now = guard.as_ref().unwrap();
+        assert_eq!(now.session, id);
+        assert_eq!(
+            now.handle.session_snapshot().await.unwrap().ws.fields
+                [&crate::state::Path::from("audit")]
+                .value,
+            "parked"
+        );
+        drop(guard);
         cleanup(app).await;
     }
 

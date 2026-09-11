@@ -339,6 +339,12 @@ pub enum CoreMsg {
         emit: Emit,
         reply: tokio::sync::oneshot::Sender<Applied>,
     },
+    /// 不属于任何一轮的记账：蒸馏、恢复期间的调用。
+    ///
+    /// 不走 [`CoreMsg::Emit`]：那条路要过代际闸门，而轮外的调用**天然对不上任何代际**。
+    /// 上一版用 `TurnId(u64::MAX)` 当哨兵挤进 `Emit`，结果闸门一律判它过期，
+    /// 蒸馏花掉的真钱一分都没进账本。
+    CostOut { role: crate::model::Role, usage: crate::model::Usage },
     Finished { turn: TurnId, outcome: TurnOutcome },
 }
 

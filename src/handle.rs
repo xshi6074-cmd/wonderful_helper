@@ -78,15 +78,7 @@ impl CoreHandle {
 
     /// 轮外的记账（蒸馏、恢复期间的调用）。挂在最近一轮上，账不能因为没轮次就漏。
     pub async fn cost_out(&self, role: Role, usage: Usage) {
-        let (tx, _rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(CoreMsg::Emit {
-                turn: TurnId(u64::MAX),
-                emit: Emit::Cost { role, task: None, usage },
-                reply: tx,
-            })
-            .await;
+        let _ = self.tx.send(CoreMsg::CostOut { role, usage }).await;
     }
 
     pub async fn finished(&self, turn: TurnId, outcome: TurnOutcome) {

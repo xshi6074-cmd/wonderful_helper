@@ -51,6 +51,7 @@ const S = {
   focusRole: null,        // 配置面板要展开并滚到哪个角色
   models: {},             // provider → 从厂商拉回来的在售型号
   banners: [],            // { level, text, key }
+  bg: {},                 // 切走时还在跑的会话：id → true。只用来在左栏点个「生成中」
 };
 
 let graphApi = globalThis.__graphRenderer || null;
@@ -88,6 +89,13 @@ function send(op, extra = {}) {
 }
 
 function onMsg(m) {
+  // 切走时还在跑的会话不会被腰斩，它继续在后台吐事件，走的是同一条连接。
+  // 除了 boot（那条就是「切会话」本身），别的会话的事件一律不进当前时间线 ——
+  // 否则另一条会话的正文会插进你正在看的这条里。
+  if (m.t !== 'boot' && m.session && S.session && m.session !== S.session) {
+    trackBackground(m);
+    return;
+  }
   switch (m.t) {
     case 'boot':
       if (S.session && S.session !== m.session) closeGraphCanvas();
@@ -344,8 +352,9 @@ function renderStream() {
     if (b.closed) {
       // 那一坨 stats JSON 不摊在对话里 —— 它是排查用的，不是读对话时要看的。
       // 挂成 title，想看的时候悬停；执行过程本来就在上面的折叠块里。
+      // 轮外块没有轮号，分支按钮对它没有意义（从哪一轮分？），不给。
       box.append(h('div', { class: 'turn-foot' },
-        h('button', {
+        b.turn === null || b.turn === undefined ? null : h('button', {
           title: '从这一轮分出一条新分支。原会话一条都不动。',
           onclick: () => send('fork', { turn: b.turn, title: `从第 ${b.turn} 轮分支` }),
         }, '⑂ 从这里分支'),
@@ -447,9 +456,14 @@ function procBlock(b) {
   const steps = h('div', { class: 'steps' });
   for (const e of b.proc) steps.append(procStep(e));
   const kinds = [...new Set(b.proc.map(e => PROC_LABEL[e.kind] || e.kind))];
+  // 轮外的事件（用户在两轮之间改图、蒸馏记账）没有轮号。上一版直接拼进模板，
+  // 于是界面上写着「第 null 轮」。它不属于任何一轮，就别硬给它编一个。
+  const title = b.turn === null || b.turn === undefined
+    ? `轮外 · ${b.proc.length} 步`
+    : `第 ${b.turn} 轮 · ${b.proc.length} 步`;
   return h('div', { class: 'proc' },
     h('details', {},
-      h('summary', {}, `第 ${b.turn} 轮 · ${b.proc.length} 步`,
+      h('summary', {}, title,
         h('span', { class: 'hint' }, kinds.join(' · '))),
       steps));
 }
@@ -879,6 +893,18 @@ function editList(key, items) {
 
 // ───────────────────────── 左栏 ─────────────────────────
 
+/**
+ * 后台会话还在跑什么。只记「在不在跑」，正文不留 —— 那条会话的完整时间线
+ * 在库里，切回去 boot 会整份带回来，这里留一份副本只会产生第二个真相。
+ */
+function trackBackground(m) {
+  const was = S.bg[m.session];
+  if (m.t === 'turn_started' || m.t === 'delta') S.bg[m.session] = true;
+  else if (m.t === 'turn_closed') delete S.bg[m.session];
+  else return;
+  if (was !== S.bg[m.session]) renderSessions();
+}
+
 /** 本会话有内容了就把侧栏里那条的标题补上。 */
 function titleSelf() {
   const me = S.sessions.find(x => x.id === S.session);
@@ -901,7 +927,10 @@ function renderSessions() {
       onclick: () => send('open', { session: s.id }),
     },
       h('span', { class: 'nm' }, name),
-      h('span', { class: 'sub' }, s.parent ? '⑂ ' + s.id.slice(0, 6) : s.id.slice(0, 6)),
+      h('span', { class: 'sub' },
+        s.parent ? '⑂ ' + s.id.slice(0, 6) : s.id.slice(0, 6),
+        // 切走了但那一轮还在跑。用户需要知道「它没被我掐掉」。
+        S.bg[s.id] ? h('span', { class: 'bg-run', title: '这条会话还在生成，切回去就能看到' }, ' ● 生成中') : null),
       h('span', { class: 'ops' },
         h('button', {
           class: 'icon', title: '改名',

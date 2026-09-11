@@ -676,6 +676,20 @@ impl Acc {
         if let Some(tcs) = d["tool_calls"].as_array() {
             for tc in tcs {
                 let i = tc["index"].as_u64().unwrap_or(0) as usize;
+                // ★ 这个下标是**厂商给的**，而下面是照着它扩数组。
+                //
+                // 不设上限的话，一个离谱的 index（协议变更、流被截断后拼出的
+                // 半个数字、对面就是不守规矩）会让这里一路 push 到把内存吃光。
+                // 那种死法没有任何日志：进程被内核干掉，端口空出来，
+                // stdout 停在启动那一行 —— 排查时看起来像「凭空消失」。
+                //
+                // 真实的并行调用个数是个位数，64 已经宽得离谱。超了就丢这一条：
+                // 少一个调用是模型看得见、下一轮能重来的错，OOM 不是。
+                const MAX_PARALLEL_CALLS: usize = 64;
+                if i >= MAX_PARALLEL_CALLS {
+                    eprintln!("[client] 丢弃 index={i} 的 tool_call：超出并行调用上限");
+                    continue;
+                }
                 while self.calls.len() <= i {
                     self.calls.push((String::new(), String::new(), String::new()));
                 }
