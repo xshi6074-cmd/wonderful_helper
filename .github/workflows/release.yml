@@ -1,0 +1,55 @@
+# 打 v* tag 时：各平台原生编译 serve，打包上传到 GitHub Release。
+#
+# 为什么每个平台各起一台机器，而不是在 Linux 上交叉编译：
+# rusqlite 的 bundled 要编 SQLite 的 C 代码，交叉编译得另配目标平台的 C 工具链；
+# macOS 还需要 Apple SDK，按许可只能在 Mac 上用。原生 runner 这些都是现成的。
+#
+# 发版：git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 而不是 latest：glibc 版本低一些，老一点的发行版也能跑
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # edition 2024 要 Rust ≥ 1.85，runner 自带的版本不一定够
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          # 只发 UI 服务。premortem（链路场景测试）和 live 是开发用的
+          bin: serve
+          target: ${{ matrix.target }}
+          archive: premortem-$tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
