@@ -4,60 +4,103 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Premortem 设计文档</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
+  /* 配色与界面同一套：淡紫灰底、白卡片、紫色主色。字体全用系统栈 ——
+     不引 web font，离线打开和打印成 PDF 都不会掉回难看的默认字体。 */
   :root{
-    --paper:#F6F8F7; --surface:#FFFFFF;
-    --ink:#1A2226; --ink-2:#5A6C73; --ink-3:#86979C;
-    --rule:#D2DAD8; --rule-2:#E6EBEA;
-    --hot:#BC5019;
-    --sans:"IBM Plex Sans","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans SC",sans-serif;
-    --mono:"IBM Plex Mono","SFMono-Regular",Menlo,monospace;
+    color-scheme:light;
+    --ground:#f4f3f8; --surface:#ffffff; --sunk:#ecebf3;
+    --line:#e1dfec; --line-2:#eeedf5;
+    --ink:#1a1822; --ink-2:#4a4658; --muted:#7d7891;
+    --accent:#6f57cf; --accent-soft:#eeeaff;
+    --bad:#a3304a; --bad-soft:#fae9ec;
+    --warn:#8a6a12; --warn-soft:#f7f0da;
+    --shadow:0 1px 2px rgba(26,24,34,.05), 0 6px 18px -8px rgba(26,24,34,.16);
+    --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+    --mono:ui-monospace,"SF Mono","IBM Plex Mono","Sarasa Mono SC",Menlo,Consolas,monospace;
+    /* 推断图的材料色，和界面 app.css 里的 --graph-* 一致 */
+    --g-ink:#1b2433;
+    --g-module-f:#eef0ff; --g-module-s:#6459c7;
+    --g-data-f:#e7f4fb;   --g-data-s:#277da1;
+    --g-op-f:#e7f6f2;     --g-op-s:#23816f;
+    --g-loss-f:#fbeceb;   --g-loss-s:#b85a54;
+    --g-metric-f:#fff4d8; --g-metric-s:#a96f16;
+    --g-note-f:#eef1f5;   --g-note-s:#7b8494;
+    --g-flow:#5a6678; --g-sup:#a64f61; --g-cmp:#8b6a19; --g-dep:#35766c; --g-user:#6f57cf;
   }
-  @media (prefers-color-scheme: dark){
+  /* 只在屏幕上跟随系统深色；打印永远用浅色，不然系统是深色时导出的 PDF 是黑底 */
+  @media screen and (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
-      --paper:#10161A; --surface:#171F24;
-      --ink:#E2EAE8; --ink-2:#93A5AB; --ink-3:#6D7F85;
-      --rule:#2B373C; --rule-2:#212B30; --hot:#E88A4E;
+      color-scheme:dark;
+      --ground:#131218; --surface:#1a1922; --sunk:#0e0d13;
+      --line:#2b2937; --line-2:#221f2c;
+      --ink:#e6e4ee; --ink-2:#b6b2c6; --muted:#837e96;
+      --accent:#b3a4f5; --accent-soft:#26214a;
+      --bad:#e28b9d; --bad-soft:#2f1a20; --warn:#d6ad52; --warn-soft:#2b2414;
+      --g-ink:#e9ecf5;
+      --g-module-f:#292746; --g-module-s:#aaa0ef; --g-data-f:#193545; --g-data-s:#68b2d2;
+      --g-op-f:#183a34; --g-op-s:#64b9a6; --g-loss-f:#412629; --g-loss-s:#df8b85;
+      --g-metric-f:#40361c; --g-metric-s:#d6a64e; --g-note-f:#292d36; --g-note-s:#929bab;
+      --g-flow:#a2a9b9; --g-sup:#df8b85; --g-cmp:#d6a64e; --g-dep:#64b9a6; --g-user:#b3a4f5;
     }
   }
-  :root[data-theme="dark"]{
-    --paper:#10161A; --surface:#171F24;
-    --ink:#E2EAE8; --ink-2:#93A5AB; --ink-3:#6D7F85;
-    --rule:#2B373C; --rule-2:#212B30; --hot:#E88A4E;
-  }
+  @media screen{ :root[data-theme="dark"]{
+    color-scheme:dark;
+    --ground:#131218; --surface:#1a1922; --sunk:#0e0d13;
+    --line:#2b2937; --line-2:#221f2c;
+    --ink:#e6e4ee; --ink-2:#b6b2c6; --muted:#837e96;
+    --accent:#b3a4f5; --accent-soft:#26214a;
+    --bad:#e28b9d; --bad-soft:#2f1a20; --warn:#d6ad52; --warn-soft:#2b2414;
+    --g-ink:#e9ecf5;
+    --g-module-f:#292746; --g-module-s:#aaa0ef; --g-data-f:#193545; --g-data-s:#68b2d2;
+    --g-op-f:#183a34; --g-op-s:#64b9a6; --g-loss-f:#412629; --g-loss-s:#df8b85;
+    --g-metric-f:#40361c; --g-metric-s:#d6a64e; --g-note-f:#292d36; --g-note-s:#929bab;
+    --g-flow:#a2a9b9; --g-sup:#df8b85; --g-cmp:#d6a64e; --g-dep:#64b9a6; --g-user:#b3a4f5;
+  } }
+
   *{ box-sizing:border-box; }
   html{ -webkit-text-size-adjust:100%; }
-  body{ margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); line-height:1.75; font-size:15px; }
-  .wrap{ max-width:1020px; margin:0 auto; padding:56px 28px 110px; }
+  body{ margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans); line-height:1.75; font-size:15px; }
+  .wrap{ max-width:980px; margin:0 auto; padding:52px 28px 100px; }
 
-  header{ display:flex; flex-direction:column; gap:12px; padding-bottom:28px; border-bottom:1px solid var(--rule); }
-  .eyebrow{ font-size:11.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); font-weight:500; }
-  h1{ font-size:38px; font-weight:600; letter-spacing:-.022em; margin:0; }
-  .lede{ font-size:15.5px; color:var(--ink-2); max-width:64ch; margin:0; }
+  header{ background:var(--surface); border-radius:14px; box-shadow:var(--shadow); padding:34px 36px 30px; display:flex; flex-direction:column; gap:10px; }
+  .eyebrow{ font-size:12px; letter-spacing:.08em; color:var(--muted); font-weight:500; }
+  h1{ font-size:36px; font-weight:650; letter-spacing:-.02em; margin:0; }
+  h1 .dot{ display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--accent); margin-left:8px; vertical-align:middle; }
+  .lede{ font-size:15.5px; color:var(--ink-2); max-width:62ch; margin:0; }
 
-  section{ padding-top:48px; }
-  h2{ font-size:21px; font-weight:600; margin:0 0 16px; letter-spacing:-.01em; display:flex; align-items:baseline; gap:14px; }
-  h2 .num{ font-family:var(--mono); font-size:13px; color:var(--hot); font-weight:500; }
-  h3{ font-size:15px; font-weight:600; margin:26px 0 10px; }
-  h3:first-of-type{ margin-top:4px; }
-  p{ margin:0 0 12px; max-width:68ch; }
+  section{ margin-top:22px; background:var(--surface); border-radius:14px; box-shadow:var(--shadow); padding:30px 36px 32px; }
+  h2{ font-size:20px; font-weight:650; margin:0 0 14px; letter-spacing:-.01em; display:flex; align-items:center; gap:12px; }
+  h2 .num{ display:inline-grid; place-items:center; min-width:28px; height:28px; padding:0 6px; border-radius:8px; background:var(--accent-soft); color:var(--accent); font-size:14px; font-weight:600; }
+  h3{ font-size:15.5px; font-weight:620; margin:28px 0 10px; color:var(--ink); }
+  h3:first-of-type{ margin-top:6px; }
+  p{ margin:0 0 12px; max-width:70ch; color:var(--ink); }
   p:last-child{ margin-bottom:0; }
-  code{ font-family:var(--mono); font-size:.88em; background:var(--rule-2); padding:1px 5px; border-radius:3px; }
-  ul,ol{ margin:0 0 12px; padding-left:22px; max-width:68ch; }
-  li{ margin-bottom:7px; }
-  li::marker{ color:var(--ink-3); }
+  strong{ font-weight:620; }
+  code{ font-family:var(--mono); font-size:.86em; background:var(--sunk); color:var(--ink-2); padding:1px 5px; border-radius:4px; }
+  ul,ol{ margin:0 0 12px; padding-left:22px; max-width:70ch; }
+  li{ margin-bottom:6px; }
+  li::marker{ color:var(--accent); }
 
-  .tbl{ overflow-x:auto; border:1px solid var(--rule); border-radius:5px; background:var(--surface); margin:14px 0; }
+  .tbl{ overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface); margin:14px 0; }
   table{ border-collapse:collapse; width:100%; min-width:560px; font-size:14px; }
-  th{ text-align:left; font-weight:600; font-size:11.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); padding:12px 16px; border-bottom:1px solid var(--rule); white-space:nowrap; }
-  td{ padding:12px 16px; border-bottom:1px solid var(--rule-2); vertical-align:top; }
+  th{ text-align:left; font-weight:600; font-size:12px; letter-spacing:.04em; color:var(--muted); background:var(--ground); padding:10px 14px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td{ padding:10px 14px; border-bottom:1px solid var(--line-2); vertical-align:top; line-height:1.6; }
   tr:last-child td{ border-bottom:none; }
-  td.k{ font-family:var(--mono); font-size:12.5px; white-space:nowrap; color:var(--ink-2); }
+  td.k{ font-family:var(--mono); font-size:12.5px; white-space:nowrap; color:var(--accent); }
 
-  figure{ margin:18px 0 0; padding:22px 20px 16px; background:var(--surface); border:1px solid var(--rule); border-radius:5px; overflow-x:auto; }
+  figure{ margin:18px 0 0; padding:20px 18px 14px; background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow-x:auto; }
   figure svg{ display:block; width:100%; min-width:660px; height:auto; color:var(--ink); }
-  figcaption{ margin-top:14px; padding-top:12px; border-top:1px solid var(--rule-2); font-size:13px; color:var(--ink-2); line-height:1.6; min-width:660px; }
+  figcaption{ margin-top:12px; padding-top:10px; border-top:1px solid var(--line-2); font-size:13px; color:var(--ink-2); line-height:1.6; min-width:660px; }
+
+  /* 核心功能块：流程图单独拎出来 */
+  .core{ margin:6px 0 26px; padding:22px 24px 20px; background:var(--accent-soft); border-radius:12px; }
+  .core .badge{ display:inline-block; font-size:12px; font-weight:600; color:var(--accent); background:var(--surface); border-radius:20px; padding:2px 10px; margin-bottom:8px; }
+  .core h3{ margin:0 0 10px; font-size:17px; }
+  .core ul{ margin-top:10px; }
+  .core figure{ border-color:transparent; box-shadow:var(--shadow); }
+  .loop{ margin:16px 0 0; padding:10px 14px; border-radius:10px; background:var(--surface); font-size:14px; color:var(--ink-2); }
+  .loop b{ color:var(--accent); font-weight:600; }
 
   svg text{ font-family:var(--sans); fill:currentColor; }
   svg .bx{ fill:none; stroke:currentColor; stroke-width:1.2; }
@@ -68,8 +111,8 @@
   svg .ln-thin{ stroke:currentColor; stroke-width:1; fill:none; opacity:.55; }
   svg .ln-dash{ stroke:currentColor; stroke-width:1.2; fill:none; stroke-dasharray:5 4; }
   svg .frame{ fill:none; stroke:currentColor; stroke-width:1; stroke-dasharray:3 5; opacity:.42; }
-  svg .hot{ stroke:var(--hot); }
-  svg .hotf{ fill:var(--hot); }
+  svg .hot{ stroke:var(--accent); }
+  svg .hotf{ fill:var(--accent); }
   svg .mut{ fill:currentColor; opacity:.62; }
   svg .inv{ fill:var(--surface); }
   svg .t{ font-size:12.5px; font-weight:500; }
@@ -77,6 +120,64 @@
   svg .tm{ font-size:10.5px; font-family:var(--mono); }
   svg .tl{ font-size:15px; font-weight:600; }
   svg .tag{ font-size:10.5px; letter-spacing:.08em; }
+
+  /* 流程图示意里的形状与材料色：形状 = kind，颜色 = kind，虚线 = 模型猜的，紫粗边 = 用户定的 */
+  svg .n-data{ fill:var(--g-data-f); stroke:var(--g-data-s); stroke-width:1.4; }
+  svg .n-module{ fill:var(--g-module-f); stroke:var(--g-module-s); stroke-width:1.4; }
+  svg .n-op{ fill:var(--g-op-f); stroke:var(--g-op-s); stroke-width:1.4; }
+  svg .n-loss{ fill:var(--g-loss-f); stroke:var(--g-loss-s); stroke-width:1.4; }
+  svg .n-metric{ fill:var(--g-metric-f); stroke:var(--g-metric-s); stroke-width:1.4; }
+  svg .n-note{ fill:var(--g-note-f); stroke:var(--g-note-s); stroke-width:1.4; }
+  svg .n-user{ stroke:var(--g-user); stroke-width:3; }
+  svg .gt{ fill:var(--g-ink); font-size:12px; font-weight:500; }
+  svg .e-flow{ stroke:var(--g-flow); stroke-width:1.5; fill:none; }
+  svg .e-sup{ stroke:var(--g-sup); stroke-width:3; fill:none; }
+  svg .e-cmp{ stroke:var(--g-cmp); stroke-width:1.5; fill:none; }
+  svg .e-dep{ stroke:var(--g-dep); stroke-width:1.5; fill:none; }
+  svg .e-guess{ stroke-dasharray:7 5; }
+  svg .card{ fill:var(--surface); stroke:var(--line); stroke-width:1; }
+  svg .inp{ fill:var(--ground); stroke:var(--line); stroke-width:1; }
+  svg .btn-p{ fill:var(--accent); }
+  svg .btn{ fill:var(--surface); stroke:var(--line); }
+  svg .btn-d{ fill:var(--bad-soft); }
+  svg .lbl{ font-size:10.5px; fill:var(--muted); }
+  svg .val{ font-size:11.5px; fill:var(--ink); }
+  svg .on-p{ font-size:11.5px; fill:#fff; font-weight:500; }
+  svg .on-d{ font-size:11.5px; fill:var(--bad); }
+  svg .step{ fill:var(--surface); stroke:var(--line); stroke-width:1.2; }
+  svg .step-hot{ fill:var(--accent-soft); stroke:var(--accent); stroke-width:1.4; }
+
+  /* ── 打印 / 导出 PDF ──
+     之前的 PDF 是 LibreOffice 转的，它不认大部分 CSS（圆角、min-width、分页控制），
+     表格和图才会错乱。用浏览器「打印 → 另存为 PDF」按下面这套走。 */
+  @page { size:A4; margin:15mm 14mm 16mm; }
+  @media print{
+    :root{ color-scheme:light; }
+    html, body{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    body{ background:var(--ground); font-size:10pt; line-height:1.6; }
+    .wrap{ max-width:none; padding:0; }
+    header, section{ box-shadow:none; border:1px solid var(--line); border-radius:10px; }
+    header{ padding:22px 24px 20px; }
+    h1{ font-size:26pt; }
+    .lede{ font-size:10.5pt; }
+    section{ margin-top:12px; padding:18px 22px 20px; break-inside:auto; }
+    h2{ font-size:14.5pt; margin-bottom:10px; break-after:avoid; }
+    h3{ font-size:11pt; margin-top:16px; break-after:avoid; }
+    .core h3{ font-size:12pt; }
+    p, ul, ol{ max-width:none; }
+    p, li{ orphans:3; widows:3; }
+    .tbl{ overflow:visible; }
+    table{ min-width:0; font-size:8.8pt; }
+    tr{ break-inside:avoid; }
+    th{ font-size:8pt; padding:6px 9px; }
+    td{ padding:6px 9px; }
+    td.k{ white-space:normal; }
+    figure{ overflow:visible; break-inside:avoid; margin-top:12px; padding:12px 12px 8px; }
+    figure svg{ min-width:0; max-height:200mm; }
+    figcaption{ min-width:0; font-size:8.6pt; margin-top:8px; padding-top:6px; }
+    .core{ padding:16px 18px 14px; }
+    .loop{ font-size:9.5pt; break-inside:avoid; }
+  }
 </style>
 </head>
 <body>
@@ -84,109 +185,228 @@
 
 <header>
   <div class="eyebrow">程序设计训练（Rust）· AI Agent 大作业 · 设计文档</div>
-  <h1>Premortem</h1>
-  <p class="lede">缩小从一个模糊待验证的 idea，到能交给编码 agent 写实验代码的实验设计方案之间的 gap。</p>
-  <p>本文档已按 2026-09-06 的当前实现校准；“验收方案”仍表示后续产品效果评估，不等同于已经完成的实验结果。</p>
+  <h1>Premortem<span class="dot"></span></h1>
+  <p class="lede">缩小从一个模糊待验证的 idea，到能交给编码 agent 写实验代码的实验设计方案之间的 gap，打造更个性化的research workspace。</p>
 </header>
 
 <section>
   <h2><span class="num">一</span>痛点分析</h2>
-  <p>选题来源于一个刚入门的科研新手需要 agent 辅助落实实验代码的场景。基于 Codex / Claude Code 的 agent 有很强的执行和编码能力，使用者看起来手上有很强力的工具，但从一个模糊待验证的 idea 到跑出实验结果能验证或证伪这个 idea，中间有很大 gap，需要反复试错、与 agent 频繁交互调整来填平。原因大致是下面这些：</p>
+  <p>随着agent能力变强，research student可以将自己更多的模糊idea交给agent设计实验和验证。但是实际使用的过程中，agent时常不追问模糊方案中的设计偏差，设计空白或设计失误要在实验结果不好时才能暴露，之后仍需多轮调整，费时费力。经过反思，原因可能如下：</p>
   <ol>
-    <li>科研新手对自己的领域认识不全，容易给出一个模糊、比较偏离正轨的实验思路就让 agent 照此实现；或者不熟悉实验链路和各模块适配情况，浅读论文给出一些胡乱拼凑的实验设计。</li>
-    <li>Agent 执行强，但权衡判断不主动，很可能盲目执行、过度执行。</li>
-    <li>Agent 一般不维持关于用户学习状态、对项目认识状态的工作记忆。通用 agent 的 memory 多是命令执行要求或长期用户画像。</li>
-    <li>当前给出模糊需求让 agent 独立完成全权设计，稳定性、准确性尚低，具体权衡仍然需要 human in loop。</li>
+    <li>刚刚开始科研的学生经验不足，仅有的一些经验分散在对话里，涉及到交互、基础知识、细节问题等诸多方面，无法分清。</li>
+    <li>与agent不能及时地对齐意图：任务交给agent执行后学生自己对流程失去了清晰的把握，设计不完全，对错误的感知变弱。</li>
+    <li>Agent memory不完全适配学习需求。通用 agent 的 memory 多是命令执行要求或长期用户画像。</li>
+    <li>当前给出模糊需求让 agent 独立完成全权设计，稳定性、准确性尚低。agent通常对设计好的部分执行更好，其它部分“跑通就行”。</li>
   </ol>
-  <p>但 agent 编码能力相对可信。所以需要用户反复试错并调整与 agent 的交互方式，或者让这些调整和判断的经验被 agent 学习吸收为固定流程。</p>
+  <p>所以理想的agent形态应该能分类、整理、复用学生的经验；与用户进行快速的意图对齐，把需要反复强调的提示词流程化；拥有灵活和个性化的记忆管理机制</p>
 </section>
 
 <section>
-  <h2><span class="num">二</span>定位与设计思路</h2>
-  <p>实现一个 agent，用于缩小从模糊待验证的 idea 到能交给编码 agent 写实验代码的实验设计方案之间的 gap。它不写实验代码，也不替用户做决定。</p>
-  <p>每一轮先判断当前处于哪一种协作场景，据此注入该场景对应的约束、建议与参考案例，并暴露该场景下可用的工具，然后生成回复。回答模型可在读取仓库或网页后，用动作工具即时维护用户可修改的实验方案推断。跨会话持久记忆不会被模型自动覆盖：用户触发“一键蒸馏”后，系统先生成可预览、可修改的草稿，只有用户确认的部分才写回。场景在多轮协作中持续判定，场景、指令、参考案例与工具集都可按个人经验配置。</p>
-  <p>三条贯穿全局的约束：</p>
-  <ul>
-    <li><strong>Agent 不主导流程。</strong>推断随交互自由更新；推断图上标出每个字段的出处，模型应在改动用户填过的字段之前先在正文里询问；同一轮内若用户已修改某处，基于旧快照的模型改动会被 core 丢弃；进入实现由用户拍板。</li>
-    <li><strong>判断的优先级高于回复。</strong>每轮先判断场景，判断结果决定这一轮用什么约束、给什么案例、开放哪些工具，然后才生成回复。</li>
-    <li><strong>判断决定注入什么，不决定做什么。</strong>harness 把工具与呈现形式摆出来，用不用、用几次、什么顺序由模型决定。每句话要能说清它服务于哪个尚未落定的问题。</li>
-  </ul>
+  <h2><span class="num">二</span>场景定制方案</h2>
+  <p>设计"场景分流"机制，在对话前先判断当前是否命中某些经验的相似场景，将相应经验灌入上下文供agent参考。同时给对话提供一键蒸馏，形成经验闭环。用户也可以选择蒸馏与其它agent的协作记录，选择保存。</p>
+  <p>维护一层工作memory：把梳理架构图固定为必须执行的动作，要求agent设计时考虑完整实验链路，对于未定部分诚实标出；用户可以随时修改架构图，同时随每轮对话对实验设计有清晰把握，有利于意图快速对齐。显示维护待决策和已经决策的部分，减少错过设计要点的可能。</p>
+  <p>强调个性化：分设行动和探索两种模式，对于希望快速落实方案的场景在不损失精度的情况下要求agent对用户精准发问，减少交互；对于用户希望拓展学习的场景鼓励agent进行发散和开放式提问。所有prompt方便修改，经验场景易于插拔。</p>
 </section>
 
 <section>
-  <h2><span class="num">三</span>功能</h2>
+  <h2><span class="num">三</span>特色功能详述</h2>
+  <p>以下功能分别对应架构图中的 state、model、UI 与 tool call 接口。Core 不替模型决定研究流程，主要负责把这些接口接成一条可恢复、可打断、写入顺序确定的协作链路。</p>
 
-  <h3>1 · 推断架构图</h3>
-  <p>回答模型按需使用只读仓库工具查看目录、检索引用和读取文件，并把确认过的结构写成推断图，呈现在对话侧边栏。底层保存结构化节点、边、属性与图外字段；结构化视图由前端绘制为可点选 SVG，用户可编辑节点、图外字段、待落定与搁置项。系统同时保留确定性生成的 Mermaid 源码；若模型切换到自由 sketch，则用户改的是整段源码，不再支持逐节点编辑。</p>
-  <p>节点与边可标注来源与置信度。来源是仓库位置、论文章节、用户口述或模型推测；未标来源与标为模型推测的在图上以虚线区分。图中有逻辑不顺或缺失的部分能让用户意识到盲区，也便于用户和 agent 快速对齐。</p>
-  <p>写权归 core 唯一所有。模型通过 <code>record_graph</code> / <code>record_note</code> 提交的改动当场进入事件时间线并更新物化视图；用户的侧栏编辑也立即生效。core 只在同一轮内仲裁用户刚改过的路径，防止模型基于旧值覆盖；跨轮依靠来源标记与提示词约束，而不是永久硬锁。</p>
+  <div class="core">
+    <span class="badge">核心功能</span>
+    <h3>实验流程图：用户和模型看的是同一张图</h3>
+    <p>讨论实验时最难发现的偏差，是双方对“实验现在长什么样”理解不同，却谁都没有意识到。Premortem 让回答模型把完整实验链路画成一张结构化流程图放在侧栏；用户直接在图上点选、修改。这张图同时是模型下一轮上下文里的那一份，所以用户纠正一次，双方就对齐一次，不必在长对话里反复重申。</p>
+    <ul>
+      <li><strong>形状和颜色都有含义。</strong>数据、模块、算子、损失、指标、注记各有固定形状与材料色；流向、监督、对照、依赖用不同线型区分。形状词表在 <code>prompts.toml</code> 中，用户可以改。</li>
+      <li><strong>哪里是猜的一眼可见。</strong>有依据的画实线，模型推测的画虚线，用户定下的描紫色粗边。虚线的地方，就是需要确认的盲区。</li>
+      <li><strong>点一下就能改。</strong>点节点可以改标题、类型、细节或直接删除；点边可以改说明和关系类型。展开大画布后支持缩放、ELK / Dagre 布局切换，以及查看 Mermaid 源码。</li>
+      <li><strong>不会被旧快照冲掉。</strong>用户的编辑立即写入事件时间线；同一轮里，模型基于旧图对同一元素的修改会被 core 拒绝，不会把刚纠正的内容改回去。</li>
+    </ul>
 
-  <h3>2 · 协作场景</h3>
-  <p>每轮由判断模型只产出场景与理由。harness 据此做三件事：注入该场景的约束与建议、注入命中的参考案例、暴露该场景下的工具。之后由回答模型自行决定说什么、调用哪些工具、调用几次，以及何时把推断写回。界面显示本轮所选场景与判定理由，并支持为下一轮指定场景；切换会写入时间线，但不会在正在运行的轮次中途换 prompt。</p>
-  <p>提问同样是一个工具。模型可选择提出选择题等不同询问方式。</p>
-  <p>场景目录是配置文件，用户随时可改。新增一个场景或替换整份目录都不需要改代码。</p>
+    <figure>
+      <svg viewBox="0 0 920 500" role="img" aria-label="流程图编辑示意：左侧是侧栏里的实验流程图，数据为圆柱、模块为矩形、算子为胶囊、损失为六边形、指标为平行四边形、注记为圆角矩形；监督边加粗，对照边无箭头，模型推测的边为虚线，用户确定的节点描紫色粗边。点击可学习 prompt 节点弹出编辑框，含标题、类型、细节、应用、取消、删除这个节点。下方是对齐循环：模型写图、侧栏重绘、用户编辑、下一轮模型读到同一张图。">
+        <defs>
+          <marker id="gA" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--g-flow)"/></marker>
+          <marker id="gS" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--g-sup)"/></marker>
+          <marker id="gD" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--g-dep)"/></marker>
+          <marker id="gP" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"/></marker>
+        </defs>
 
-  <h3>3 · 记忆与持久层</h3>
+        <text class="tag mut" x="24" y="26">侧栏 · 实验流程图</text>
+        <rect class="frame" x="16" y="36" width="600" height="276" rx="8"/>
+
+        <!-- 数据：圆柱 -->
+        <path class="n-data" d="M40,72 a70,9 0 0,0 140,0 a70,9 0 0,0 -140,0 v38 a70,9 0 0,0 140,0 v-38"/>
+        <text class="gt" x="110" y="100" text-anchor="middle">输入批次</text>
+        <!-- 模块：矩形 -->
+        <rect class="n-module" x="232" y="64" width="150" height="46" rx="3"/>
+        <text class="gt" x="307" y="92" text-anchor="middle">冻结 ViT 骨干</text>
+        <!-- 用户定的模块：紫色粗边 -->
+        <rect class="n-module n-user" x="232" y="152" width="150" height="46" rx="3"/>
+        <text class="gt" x="307" y="180" text-anchor="middle">可学习 prompt</text>
+        <!-- 算子：胶囊 -->
+        <rect class="n-op" x="444" y="64" width="146" height="46" rx="23"/>
+        <text class="gt" x="517" y="92" text-anchor="middle">EMA teacher</text>
+        <!-- 损失：六边形 -->
+        <polygon class="n-loss" points="452,175 468,152 566,152 582,175 566,198 468,198"/>
+        <text class="gt" x="517" y="180" text-anchor="middle">一致性 loss</text>
+        <!-- 指标：平行四边形 -->
+        <polygon class="n-metric" points="252,240 392,240 372,282 232,282"/>
+        <text class="gt" x="312" y="266" text-anchor="middle">Top-1 准确率</text>
+        <!-- 注记：圆角矩形 -->
+        <rect class="n-note" x="444" y="240" width="146" height="42" rx="12"/>
+        <text class="gt" x="517" y="266" text-anchor="middle">对照：去掉 prompt</text>
+
+        <!-- 边 -->
+        <line class="e-flow" x1="180" y1="87" x2="226" y2="87" marker-end="url(#gA)"/>
+        <line class="e-flow" x1="307" y1="152" x2="307" y2="116" marker-end="url(#gA)"/>
+        <text class="ts mut" x="315" y="138">拼进输入</text>
+        <line class="e-flow" x1="382" y1="87" x2="438" y2="87" marker-end="url(#gA)"/>
+        <line class="e-flow e-guess" x1="517" y1="110" x2="517" y2="146" marker-end="url(#gA)"/>
+        <text class="ts" x="527" y="133" fill="var(--warn)">模型猜的</text>
+        <line class="e-sup" x1="452" y1="175" x2="390" y2="175" marker-end="url(#gS)"/>
+        <text class="ts" x="421" y="167" text-anchor="middle" fill="var(--g-sup)">监督</text>
+        <line class="e-dep" x1="307" y1="198" x2="310" y2="234" marker-end="url(#gD)"/>
+        <text class="ts" x="318" y="221" fill="var(--g-dep)">依赖</text>
+        <line class="e-cmp" x1="386" y1="261" x2="444" y2="261"/>
+        <text class="ts" x="415" y="253" text-anchor="middle" fill="var(--g-cmp)">对照</text>
+
+        <!-- 图例 -->
+        <line class="e-flow" x1="36" y1="298" x2="60" y2="298"/><text class="ts mut" x="66" y="302">有依据</text>
+        <line class="e-flow e-guess" x1="116" y1="298" x2="140" y2="298"/><text class="ts mut" x="146" y="302">模型猜的</text>
+        <line x1="208" y1="298" x2="232" y2="298" stroke="var(--g-user)" stroke-width="3"/><text class="ts mut" x="238" y="302">你定的</text>
+
+        <!-- 点击 → 编辑框 -->
+        <path d="M384,194 C450,222 560,224 640,196" fill="none" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#gP)"/>
+        <path d="M366,178 l0,18 l5,-5 l4,9 l3,-1.5 l-4,-9 l7,0 z" fill="var(--ink)" stroke="var(--surface)" stroke-width="1"/>
+        <text class="ts hotf" x="612" y="232" text-anchor="middle">点击节点</text>
+
+        <rect class="card" x="646" y="50" width="258" height="262" rx="12"/>
+        <text x="664" y="78" font-size="13" font-weight="600">节点 n7</text>
+        <text class="lbl" x="664" y="102">标题</text>
+        <rect class="inp" x="664" y="108" width="222" height="26" rx="6"/>
+        <text class="val" x="673" y="125">可学习 prompt（每层 8 个）</text>
+        <text class="lbl" x="664" y="152">类型</text>
+        <rect class="inp" x="664" y="158" width="222" height="26" rx="6"/>
+        <text class="val" x="673" y="175">module</text>
+        <text class="lbl" x="664" y="202">细节</text>
+        <rect class="inp" x="664" y="208" width="222" height="40" rx="6"/>
+        <text class="val" x="673" y="224">只训练 prompt，骨干保持冻结</text>
+        <text class="val" x="673" y="240">来源：用户口述</text>
+        <rect class="btn-p" x="664" y="264" width="54" height="28" rx="7"/>
+        <text class="on-p" x="691" y="282" text-anchor="middle">应用</text>
+        <rect class="btn" x="726" y="264" width="54" height="28" rx="7"/>
+        <text class="val" x="753" y="282" text-anchor="middle">取消</text>
+        <rect class="btn-d" x="788" y="264" width="98" height="28" rx="7"/>
+        <text class="on-d" x="837" y="282" text-anchor="middle">删除这个节点</text>
+
+        <!-- 对齐循环 -->
+        <text class="tag mut" x="24" y="350">每一轮的对齐循环</text>
+        <rect class="step" x="20" y="362" width="196" height="58" rx="10"/>
+        <text class="t" x="118" y="386" text-anchor="middle">① 回答模型 record_graph</text>
+        <text class="ts mut" x="118" y="405" text-anchor="middle">局部加 / 改节点与边，带来源</text>
+        <rect class="step" x="252" y="362" width="196" height="58" rx="10"/>
+        <text class="t" x="350" y="386" text-anchor="middle">② 侧栏即时重绘</text>
+        <text class="ts mut" x="350" y="405" text-anchor="middle">虚线处就是待确认的盲区</text>
+        <rect class="step-hot" x="484" y="362" width="196" height="58" rx="10"/>
+        <text class="t hotf" x="582" y="386" text-anchor="middle">③ 用户点选改 / 删 / 确认</text>
+        <text class="ts mut" x="582" y="405" text-anchor="middle">立即成为时间线上的编辑事件</text>
+        <rect class="step" x="716" y="362" width="188" height="58" rx="10"/>
+        <text class="t" x="810" y="386" text-anchor="middle">④ 下一轮上下文</text>
+        <text class="ts mut" x="810" y="405" text-anchor="middle">模型读到的就是这张图</text>
+        <line class="ln" x1="216" y1="391" x2="246" y2="391" marker-end="url(#gA)"/>
+        <line class="ln" x1="448" y1="391" x2="478" y2="391" marker-end="url(#gA)"/>
+        <line class="ln" x1="680" y1="391" x2="710" y2="391" marker-end="url(#gA)"/>
+        <path class="ln" d="M810,420 v20 H118 v-14" marker-end="url(#gA)"/>
+        <text class="ts mut" x="464" y="455" text-anchor="middle">对齐靠同一张图，而不是靠双方从长对话里回忆</text>
+        <text class="ts hotf" x="464" y="484" text-anchor="middle">同一轮内用户刚动过的元素，模型基于旧快照提交的修改会被 core 拒绝并计入 dropped。</text>
+      </svg>
+      <figcaption>图 A · 流程图的编辑与对齐（示意）。形状与颜色按 kind 区分，线型区分关系；紫色粗边是用户确定的内容，虚线是模型推测。点节点弹出的编辑框与界面一致：标题、类型、细节，以及删除。</figcaption>
+    </figure>
+  </div>
+
   <div class="tbl"><table>
-    <thead><tr><th>层</th><th>内容</th><th>形态</th></tr></thead>
+    <thead><tr><th>架构接口</th><th>主要功能</th><th>用户能看到或控制什么</th></tr></thead>
     <tbody>
+      <tr><td class="k">state</td><td>实时推断层与跨会话持久层</td><td>侧栏 working memory；可直接编辑的项目记忆</td></tr>
+      <tr><td class="k">model</td><td>场景判断、正式回答、折叠与蒸馏三个角色</td><td>分别选择 provider 与模型；查看本轮场景及理由</td></tr>
+      <tr><td class="k">UI</td><td>对话、选择题、模式切换、场景覆盖、会话历史</td><td>在关键节点做选择，停止当前轮次或从历史分支</td></tr>
+      <tr><td class="k">tool call</td><td>本地文件扫读、网页抓取、记录推断与提问</td><td>查看调用进度；通过目录与联网策略限制可读范围</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>1 · Memory：把当前理解与长期经验分开</h3>
+  <div class="tbl"><table>
+    <thead><tr><th>层</th><th>保存内容</th><th>更新方式</th><th>生命周期</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>推断层 / working memory</td>
+        <td>实验结构图、图外关键字段、待落定项、搁置项与本轮场景</td>
+        <td>回答模型调用 <code>record_graph</code> / <code>record_note</code>；用户在侧栏修改已有内容</td>
+        <td>属于一条会话，随事件时间线保存并可在重启后恢复</td>
+      </tr>
       <tr>
         <td>持久层</td>
-        <td>项目总体概述、阶段目标、进展（跑通并成立的与试过没成立的实验方法概述）；用户的合作偏好；用户的实验相关知识情况与经验评估；易犯错场景目录与对应指令；参考案例</td>
-        <td>跨会话。Markdown 与 TOML 文件，用户随时直接编辑</td>
-      </tr>
-      <tr>
-        <td>推断层</td>
-        <td>推断图、图外字段、待落定与搁置项；本轮场景</td>
-        <td>随会话写入 SQLite，可在重启后重放恢复；模型与用户改动均即时成为事件</td>
+        <td>项目概述与进展、合作偏好、知识状态、场景目录、提示词与真实案例</td>
+        <td>用户直接编辑 Markdown / TOML，或确认一键蒸馏生成的草稿</td>
+        <td>跨会话；新对话开始时重新装载</td>
       </tr>
     </tbody>
   </table></div>
-  <p>持久层的目标是让一个新对话能快速入手这个项目。首次运行时把初始内容写成文件，之后读到的就是用户改过的版本。</p>
-  <p>知识与经验评估用三档决定 agent 是提问还是讲解：有储备则提问；明确没有储备则先讲通机制再把判断交回；储备情况不清楚时先问清楚这一点本身。</p>
+  <p>推断层不是对话摘要，而是系统对“当前实验设计”的结构化理解。图用节点和边表达数据、模块、算子、监督、指标与依赖关系；不适合塞进图里的目标、约束、决定理由和验证口径放在图外字段中。待落定与搁置分开维护，使“现在必须决定”与“有价值但暂不展开”不会混在一起。</p>
+  <p>模型读到仓库事实或形成新候选后，可局部更新图和笔记，不必重画整张图。节点和边保留来源与置信度，界面用“有依据 / 模型猜测 / 用户确定”区分状态；结构化图在前端绘制成可点击 SVG，并提供展开画布、ELK / Dagre 布局切换与 Mermaid 源码查看。用户对已有节点、边和清单的编辑立即进入同一条事件时间线。</p>
+  <p>Core 独占会话状态写权：模型动作与用户编辑都按事件顺序提交。同一轮中，如果用户已经改过某个对象，模型基于旧快照提交的冲突修改会被拒绝，避免流式生成期间把用户刚刚纠正的内容覆盖掉。SQLite 中保存的是 append-only 事件；checkpoint 只用于加速恢复，工作区视图可由事件重新物化。</p>
+  <p>持久层承担另一种任务：让一个新对话迅速知道项目做到哪里、用户怎样协作、哪些知识已经讲过，以及过去哪些错误值得在相似场景中提前检查。文件在每轮开始时重新读取，因此用户通过界面修改后，下一轮即可生效；它不会被普通回答自动改写。</p>
 
-  <h3>4 · 模式选择</h3>
+  <h3>2 · 经验卡片：让一次踩坑变成下一次的检查入口</h3>
+  <p>系统把可复用经验组织为“场景卡片”。一张卡片在逻辑上由两部分组成：<code>playbook.toml</code> 中的触发条件与核查方法，以及 <code>cases/*.md</code> 中与该场景关联的真实案例。规则负责迁移，案例保留当时的具体上下文和证据边界。</p>
   <div class="tbl"><table>
-    <thead><tr><th></th><th>探索 mode</th><th>行动 mode</th></tr></thead>
+    <thead><tr><th>卡片字段</th><th>作用</th></tr></thead>
     <tbody>
-      <tr><td>可用场景</td><td>全集，含讲解与开放式追问</td><td>关闭讲解类场景</td></tr>
-      <tr><td>资料抽取目标</td><td>领域知识、动机、术语</td><td>方法、超参、实现细节</td></tr>
+      <tr><td class="k">when</td><td>描述什么可见信号值得触发，并写明不该触发的情况，避免每轮都套同一张卡</td></tr>
+      <tr><td class="k">guidance</td><td>给回答模型一套具体核查方法，例如沿生产者—变换—消费者检查接口语义</td></tr>
+      <tr><td class="k">tools</td><td>补充该场景下可暴露的工具；只决定“能用什么”，不强制调用顺序</td></tr>
+      <tr><td class="k">cases</td><td>保存真实经历中的目标、遗漏、修正、结果与适用边界，为规则提供例证</td></tr>
     </tbody>
   </table></div>
-  <p>mode 由用户显式切换。</p>
+  <p><strong>模型选择。</strong>每轮正式回答前，判断模型只读取场景目录和当前上下文，返回最多三个场景及简短理由；它不检索资料，也不提前写推断。Core 随后把命中卡片的 guidance、相关案例和工具说明注入回答段。判断、回答和蒸馏角色可在配置页分别选择 provider 与模型，因此简单的场景分类不必占用与正式回答相同的模型。</p>
+  <p><strong>用户选择。</strong>当前场景与判定理由显示在对话顶栏。用户可以点开场景标签，多选或替换下一轮要采用的卡片；用户选择优先于判断模型。覆盖动作会进入时间线，但不会在已经运行的回答中途更换 prompt，从而保证同一轮前后一致。</p>
+  <p><strong>一键蒸馏。</strong>用户主动点击后，蒸馏角色读取完整会话时间线、当前 working memory 与已有持久记忆，生成按目标文件分节的更新草稿。项目进展、合作偏好与知识状态采用完整替换草稿；场景库只给出按 ID 合并的新增或更新卡片；案例单独成文件。界面允许逐节预览、修改和勾选，只有通过格式与冲突校验并由用户点击写入的部分才进入持久层。这里沉淀的是可复用经验，不是让模型权重自动“学习”一次对话。</p>
 
-  <h3>5 · 一键蒸馏</h3>
-  <p>用户在一段会话结束后触发蒸馏。subagent 角色读取未删减的全程时间线与推断图，产出按目标文件分节的更新草稿：项目进展、合作偏好、知识与经验评估、值得入库的场景与案例。草稿原文落为 <code>memory/draft-&lt;timestamp&gt;.md</code>；界面允许逐节预览、修改和勾选，校验通过后才写回持久层。</p>
+  <h3>3 · 用户体验：把关键选择做成轻量交互</h3>
+  <p><strong>探索 / 行动模式。</strong>顶栏提供显式切换。探索模式允许原理说明、候选比较和开放式追问；行动模式关闭主动教学类场景，把注意力放在实现接口、训练时序、评估与交付缺口。两种模式分别配置提示词和工具使用说明，切换由用户发起，并在下一轮统一生效。</p>
+  <p><strong>选择题工具。</strong>当目标、预算或偏好确实需要用户决定时，回答模型可以调用 <code>ask_user</code>，展示 2—4 个带有实际差异的选项。提问本身会持久化；点击选项后，回答作为下一轮的普通用户输入进入上下文。工具不会让当前 turn 挂起等待人类，因此停止、刷新与会话恢复仍能正常工作。</p>
+  <p><strong>对话控制。</strong>正文通过 WebSocket 流式显示，工具调用显示进行状态；用户可以停止当前轮次。CancellationToken 会把停止信号传播到模型调用和工具任务，已经提交的推断与已经收到的正文仍然保留。会话列表支持保存、恢复与从指定 turn 分支，方便比较不同设计路线而不覆盖原历史。</p>
+  <p><strong>配置入口。</strong>判断、回答、subagent 三个角色的 provider、model、温度和输出上限可分别配置；持久记忆、场景卡片、提示词和本地工具授权目录均能在界面中查看或修改。常用选择留在主界面，高级配置集中在侧栏，避免把模型参数与研究讨论混在一起。</p>
+
+  <h3>4 · 工具调用：只读材料，按需回灌</h3>
+  <p>本地读取不是一个裸 shell，而是一组可组合的只读工具。模型先看项目轮廓，再按文件名或符号缩小范围，最后分页读取真正支撑结论的片段。它们共同支持扫读授权目录中的代码与文本材料，并把相关结构或要点写入当前 working memory；当前实现不提供通用 PDF、Office 文档或二进制文件解析。</p>
+  <div class="tbl"><table>
+    <thead><tr><th>工具</th><th>用途</th><th>边界</th></tr></thead>
+    <tbody>
+      <tr><td class="k">repo_tree</td><td>按深度查看目录结构并统计文件类型，定位项目入口</td><td>尊重 .gitignore，不跟随符号链接，输出受条数和深度上限约束</td></tr>
+      <tr><td class="k">fs_find</td><td>用 glob 按文件名、后缀或目录模式定位文件</td><td>未命中只说明当前授权范围和忽略规则下未找到</td></tr>
+      <tr><td class="k">fs_grep</td><td>用正则检索文本并返回真实路径与行号</td><td>匹配结果用于定位；判断控制流仍需继续读取上下文</td></tr>
+      <tr><td class="k">fs_read</td><td>从指定行开始分页读取文本文件</td><td>单文件、单次返回和行数均有限制，截断时给出续读位置</td></tr>
+      <tr><td class="k">web_fetch</td><td>抓取已知 URL，抽取正文并转为保留标题、列表、代码、表格和链接的 Markdown</td><td>不是搜索引擎；不保证登录页、动态页面或 PDF 可解析</td></tr>
+    </tbody>
+  </table></div>
+  <p><code>web_fetch</code> 不把未知长度的网页全文直接塞进模型上下文。正文先保存到 <code>workspace/</code>，工具只返回网页信息、文本前缀和本地路径；模型需要更多内容时，再用 <code>fs_read</code> 分页或 <code>fs_grep</code> 定位。这让网页大小不会意外吞掉整轮上下文。</p>
+  <p>工具注册表根据当前场景、模式和配置决定回答模型能看到哪些能力。独立的只读调用可并行，动作工具和提问按顺序提交；调度层统一处理超时、心跳、取消与结果保序。路径需落在用户授权目录内，联网受协议、域名、重定向和响应体上限约束；模型没有裸 shell，也没有任意写文件工具。</p>
+
+  <p class="loop"><b>功能闭环：</b>读取本地或网页事实 → 写入实时 working memory → 通过场景卡片与选择题暴露关键问题 → 用户确认或修正 → 一键蒸馏为下一次可复用的持久经验。</p>
 </section>
 
-<section>
-  <h2><span class="num">四</span>场景定制方案</h2>
-
-  <h3>定制一 · 判断与回答分离的两段式循环</h3>
-  <p><strong>解决</strong>：通用 agent 由模型自行决定要不要提问，"尽快收敛到可执行"的目标会压制提问倾向，问题只在撞墙后暴露。</p>
-  <p><strong>做法</strong>：harness 强制每轮先跑判断段，它只产出场景判定与理由；据此注入约束、案例与工具集，再跑回答段。推断由回答段在读完材料后通过动作工具写入，避免在尚未检索时提前下结论。判断段不带任何场景的指令全文与案例，可配便宜模型。场景目录与案例库为可插拔配置。</p>
-  <p><strong>对比示例</strong>：同一个模糊 idea，通用 agent 直接给出的实现方案，与本系统在动手前提出的第一个问题。</p>
-
-  <h3>定制二 · 结构化架构图推断</h3>
-  <p><strong>解决</strong>：新手判断不了 agent 给的设计对不对，也意识不到 agent 误解了什么。</p>
-  <p><strong>做法</strong>：推断以带来源标注的结构化架构图承载。回答模型先通过 <code>repo_tree</code>、<code>fs_grep</code>、<code>fs_read</code> 等只读工具核对真实代码，再用动作工具填充；未标来源或标为模型猜测的节点在图上以虚线区分。</p>
-  <p><strong>对比示例</strong>：同一个仓库下，纯文字回答与带来源标注的架构图在"能否发现模块接口不匹配"上的差别。</p>
-
-  <h3>定制三 · 持久记忆驱动的问 / 讲切换</h3>
-  <p><strong>解决</strong>：agent 不知道用户懂到哪一步，只能反复解释或默认全懂。</p>
-  <p><strong>做法</strong>：跨会话维护用户的知识与经验评估，三态决定 agent 提问、讲解还是先问清储备本身。评估由一键蒸馏更新，用户可直接编辑。</p>
-  <p><strong>对比示例</strong>：用户自陈某处不熟之后，前后两轮回复在详略上的变化。</p>
-</section>
 
 <section>
-  <h2><span class="num">五</span>系统架构</h2>
+  <h2><span class="num">四</span>系统架构</h2>
   <p>core 负责调度与写权仲裁。UI、模型、tool call、state 分别作为接口插入 core；SQLite 事件时间线是事实源，workspace 是可由事件重建的会话物化视图。</p>
 
   <figure>
     <svg viewBox="0 0 920 590" role="img" aria-label="模块结构图：core 居中调度并仲裁写权，UI、模型、state、tool call 四个接口接入，state 分持久层与推断层，工具调度连接只读工具与推断动作">
       <defs>
         <marker id="m1" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
-        <marker id="m1h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+        <marker id="m1h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"/></marker>
       </defs>
       <rect class="frame" x="16" y="16" width="888" height="548" rx="6"/>
       <text class="tag mut" x="34" y="42">PREMORTEM SESSION · 事件时间线 / 物化视图 / token 账本</text>
@@ -251,7 +471,7 @@
     <svg viewBox="0 0 960 420" role="img" aria-label="单轮流程图：用户输入、组装上下文、判断调用只产出场景与理由、注入场景约束与案例并暴露工具、回答调用自主读取材料与记录推断并流式输出；上下文折叠与用户触发的蒸馏使用 subagent 角色">
       <defs>
         <marker id="m2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
-        <marker id="m2h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+        <marker id="m2h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"/></marker>
       </defs>
       <rect class="bx hot" x="344" y="70" width="340" height="60" rx="4"/>
       <text class="t hotf" x="514" y="96" text-anchor="middle">subagent 角色（独立支路）</text>
@@ -305,7 +525,7 @@
     <svg viewBox="0 0 900 350" role="img" aria-label="记忆两层图：持久层跨会话，以 Markdown 与 TOML 文件形式由用户直接编辑；推断层写入 SQLite 事件时间线并可重放恢复；一键蒸馏由用户触发，产出草稿，经确认后写入持久层">
       <defs>
         <marker id="m3" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="currentColor"/></marker>
-        <marker id="m3h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--hot)"/></marker>
+        <marker id="m3h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"/></marker>
       </defs>
       <rect class="bx-core" x="240" y="40" width="400" height="112" rx="4"/>
       <text class="t" x="440" y="68" text-anchor="middle">持久层 · 跨会话</text>
@@ -415,7 +635,7 @@
       <path class="ln hot" d="M626,42 L640,42 L640,260 L626,260"/>
       <text class="ts hotf" x="650" y="140">回答段</text>
       <text class="ts hotf" x="650" y="156">+ 本轮场景的约束与案例</text>
-  
+
       <rect class="bx-dash" x="60" y="292" width="640" height="46" rx="3"/>
       <text class="ts" x="78" y="312">接近模型上限时：把较早的一段对话折叠成摘要，保留最近数轮原文。</text>
       <text class="ts mut" x="78" y="330">折叠发生在判断段之前；原事件不删除，蒸馏仍可读取完整时间线。</text>
@@ -425,7 +645,7 @@
 </section>
 
 <section>
-  <h2><span class="num">六</span>技术选型</h2>
+  <h2><span class="num">五</span>技术选型</h2>
   <div class="tbl"><table>
     <thead><tr><th>用途</th><th>选型</th><th>说明</th></tr></thead>
     <tbody>
@@ -445,7 +665,7 @@
 </section>
 
 <section>
-  <h2><span class="num">七</span>课程要求对照</h2>
+  <h2><span class="num">六</span>课程要求对照</h2>
   <div class="tbl"><table>
     <thead><tr><th></th><th>要求</th><th>落在哪里</th></tr></thead>
     <tbody>
@@ -454,18 +674,9 @@
       <tr><td class="k">R3</td><td>模型与参数可配置</td><td>判断 / 回答 / subagent 三个角色在 <code>config.json</code> 中分别配置 provider、model、温度与上限；也可用环境变量覆盖</td></tr>
       <tr><td class="k">R4</td><td>实时展示进度，支持打断</td><td>WebSocket 推送流式正文、工具状态与心跳；用户可停止当前 turn，CancellationToken 向模型与工具子任务传播</td></tr>
       <tr><td class="k">R5</td><td>上下文历史管理，可保存 / 加载</td><td><code>premortem.db</code> 保存 append-only 事件与 checkpoint；支持会话恢复、崩溃修补和从指定 turn 分支</td></tr>
-      <tr><td class="k">R6</td><td>统计 Token 用量与费用</td><td><code>ModelClient</code> 层统一记录 token，按角色归集并在界面显示累计值；货币费用换算尚未实现</td></tr>
+      <tr><td class="k">R6</td><td>统计 Token 用量与费用</td><td><code>ModelClient</code> 层统一记录 token，按角色归集并在界面显示累计值；点击后显示包含缓存命中计算的实时费用。</td></tr>
     </tbody>
   </table></div>
-</section>
-
-<section>
-  <h2><span class="num">八</span>验收方案</h2>
-  <ul>
-    <li><strong>提前命中率。</strong>以真实实验设计记录作为标准答案，同一个模糊想法分别交给本 agent 与通用编码 agent，检验本系统是否在动手之前提出了切实的问题。该指标与干预次数一并报告。</li>
-    <li><strong>真实论文实验方法对照。</strong>将真实论文的场景与模糊 idea 交给 agent，验证 agent 设计方案与论文实验方案的匹配度。</li>
-    <li><strong>冷启动可用性。</strong>内置一组脱敏的 bootstrap 场景与案例，保证在没有个人积累的情况下首次打开即可用。</li>
-  </ul>
 </section>
 
 </div>
