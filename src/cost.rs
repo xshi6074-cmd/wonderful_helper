@@ -38,6 +38,7 @@ impl CostLedger {
         let slot = self.by_role.entry(role).or_default();
         slot.prompt += u.prompt;
         slot.completion += u.completion;
+        slot.cached += u.cached;
         slot.estimated |= u.estimated;
         self.entries += 1;
         if u.estimated {

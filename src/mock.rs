@@ -136,7 +136,7 @@ pub fn judge_all(scenes: &[&str]) -> JudgeOut {
     JudgeOut {
         scenes: scenes.iter().map(|s| s.to_string()).collect(),
         rationale: format!("判成 {}", scenes.join("+")),
-        usage: Usage { prompt: 120, completion: 30, estimated: false },
+        usage: Usage { prompt: 120, completion: 30, estimated: false, cached: 0 },
     }
 }
 
@@ -144,7 +144,7 @@ fn default_answer() -> Vec<StreamEvent> {
     vec![
         StreamEvent::Chunk("好的".into()),
         StreamEvent::Chunk("。".into()),
-        StreamEvent::Done(Usage { prompt: 400, completion: 60, estimated: false }),
+        StreamEvent::Done(Usage { prompt: 400, completion: 60, estimated: false, cached: 0 }),
     ]
 }
 

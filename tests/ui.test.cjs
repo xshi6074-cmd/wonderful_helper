@@ -12,7 +12,8 @@ class Element {
   }
   set textContent(v) { this.text = String(v); this.children = []; }
   get textContent() { return (this.text || '') + this.children.map(c => c.textContent).join(''); }
-  append(...children) { for (const c of children) { if (c) { this.children.push(c); c.parent = this; } } }
+  // 真实 DOM 的 append 收字符串（当文本节点），替身也得收，不然渲染时间线就炸在替身上
+  append(...children) { for (let c of children) { if (typeof c === 'string') { const t = new Element('#text'); t.textContent = c; c = t; } if (c) { this.children.push(c); c.parent = this; } } }
   replaceChildren(...children) { this.text = ''; this.children = []; this.append(...children); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); }
   setAttribute(k, v) { this.attrs[k] = v; if (k === 'value') this.value = v; }
@@ -473,4 +474,50 @@ test('node editor preserves draft, patches changed fields only, and exposes same
   assert.match(f.doc.querySelector('.sheet-body').textContent, /当前值.*我的草稿/);
   all(f.doc.querySelector('.sheet-body')).find(e => e.tag === 'button' && e.textContent === '仍用我的草稿覆盖').fire('click');
   assert.equal(f.evalUI('sent[0].ops[0].label'), '我的草稿');
+});
+
+// 花费：顶栏 token 那颗变成按钮，点开按配置的单价折算。
+// 用户路径：配置里给回答段填单价 → 保存 → 聊几轮 → 点顶栏「N tok」→ 看到金额，
+// 没填单价的判断段只列 token 并提示去哪填。
+test('token chip is a button that opens a cost breakdown priced from role config', () => {
+  const html = fs.readFileSync('ui/index.html', 'utf8');
+  assert.match(html, /<button[^>]*id="token-chip"/, '顶栏那颗是按钮，不是 span');
+  const f = setup();
+  const st = structuredClone(settings);
+  st.roles.answer.price = { input: 3, output: 15, cached: 0.3, currency: '$' };
+  const cost = (role, usage) => ({ kind: 'cost', body: { role, usage } });
+  f.evalUI(`onMsg({t:'boot',session:'s1',sessions:[],settings:${JSON.stringify(st)},keys:{},timeline:${JSON.stringify([
+    cost('Answer', { prompt: 1000000, completion: 100000, cached: 400000 }),
+    cost('Judge', { prompt: 1000, completion: 10 }),
+  ])},snap:null});`);
+  assert.equal(f.evalUI(`$('#token-chip').textContent`), '1101010 tok');
+  f.evalUI('openCost()');
+  const m = f.doc.querySelector('#modal');
+  assert.equal(m.hidden, false);
+  const text = m.textContent;
+  // (600k×3 + 400k×0.3 + 100k×15) / 1M = 3.42
+  assert.match(text, /\$3\.42/, text);
+  assert.match(text, /400000（40%）/, '缓存命中单列出来');
+  assert.match(text, /判断段没有填单价/, '没填单价的角色说清楚，不悄悄算成 0 元');
+  assert.doesNotMatch(text, /NaN|undefined/);
+  // 实时进来的一条 cost 事件，下次点开就算进去
+  f.evalUI(`onMsg({t:'event',seq:99,kind:'cost',body:{role:'Answer',usage:{prompt:0,completion:1000000}}});openCost();`);
+  assert.match(f.doc.querySelector('#modal').textContent, /\$18\.42/);
+});
+test('empty session cost sheet says nothing spent', () => {
+  const f = setup();
+  f.evalUI(`onMsg({t:'boot',session:'s1',sessions:[],settings:${JSON.stringify(settings)},keys:{},timeline:[],snap:null}); openCost();`);
+  assert.match(f.doc.querySelector('#modal').textContent, /还没有花过 token/);
+});
+test('role price fields save as one price object', () => {
+  const f = form();
+  const judgeBlock = f.nodes.find(e => e.tag === 'details' && /判断段/.test(e.textContent));
+  const inputs = all(judgeBlock).filter(e => e.tag === 'input' && e.attrs.placeholder === '每百万 token');
+  assert.equal(inputs.length, 2, '输入、输出两个单价框');
+  inputs[0].value = '1'; inputs[0].fire('input');
+  inputs[1].value = '5'; inputs[1].fire('input');
+  f.save.fire('click');
+  const msg = f.evalUI('sent.at(-1)');
+  assert.equal(JSON.stringify(msg.changes['roles.judge.price']), JSON.stringify({ input: 1, output: 5, cached: null, currency: '$' }));
+  assert.equal(Object.keys(msg.changes).length, 1, Object.keys(msg.changes).join(','));
 });

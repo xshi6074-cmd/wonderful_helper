@@ -261,6 +261,30 @@ pub struct ModelCfg {
     #[serde(default)]
     pub temperature: Option<f32>,
     pub max_tokens: u32,
+    /// 单价。**不给默认值**：价格会变、币种各家不同，内置一份过期的价格
+    /// 比没有更糟 —— 账看起来精确，其实是错的。没填时界面只报 token 数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<Price>,
+}
+
+/// 每百万 token 的单价。
+///
+/// 只分三档：普通输入、缓存命中的输入、输出。Anthropic 的缓存**写入**
+/// 按 1.25×/2× 计价，这里当普通输入算 —— 会略低估，但不用再多一档配置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    /// 缓存命中的输入单价。`None` = 按普通输入算（宁可高估）。
+    #[serde(default)]
+    pub cached: Option<f64>,
+    /// 只是个显示用的符号（`$`、`¥`）。不同角色可以不同，界面分币种加总。
+    #[serde(default = "default_currency")]
+    pub currency: String,
+}
+
+fn default_currency() -> String {
+    "$".into()
 }
 
 /// 三个角色各自的配置。
@@ -339,6 +363,7 @@ impl Default for Settings {
                     model: "claude-haiku-4-5-20251001".into(),
                     temperature: None,
                     max_tokens: 2048,
+                    price: None,
                 },
                 answer: ModelCfg {
                     provider: "anthropic".into(),
@@ -347,6 +372,7 @@ impl Default for Settings {
                     // 输出预算是宽安全上限，不拿它做省钱旋钮。工具型回答已经付过
                     // 大 prompt 成本，半途截断只会浪费；真实花费由 Cost 完整记账。
                     max_tokens: 65_536,
+                    price: None,
                 },
                 // subagent 吃仓库/论文这类大块上下文，要能力也要便宜
                 subagent: ModelCfg {
@@ -354,6 +380,7 @@ impl Default for Settings {
                     model: "claude-sonnet-5".into(),
                     temperature: None,
                     max_tokens: 65_536,
+                    price: None,
                 },
             },
             tools: crate::policy::PolicyCfg::default(),

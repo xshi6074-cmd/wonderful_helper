@@ -484,9 +484,10 @@ fn parse_judge(api: Api, v: &Value) -> Result<JudgeOut, ModelError> {
             (
                 input,
                 Usage {
-                    prompt: u["input_tokens"].as_u64().unwrap_or(0) as u32,
+                    prompt: anthropic_prompt(u),
                     completion: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                     estimated: false,
+                    cached: cache_hits(u),
                 },
             )
         }
@@ -508,10 +509,12 @@ fn parse_judge(api: Api, v: &Value) -> Result<JudgeOut, ModelError> {
                     prompt: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                     completion: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                     estimated: false,
+                    cached: cache_hits(u),
                 },
             )
         }
     };
+    let usage = Usage { cached: usage.cached.min(usage.prompt), ..usage };
 
     let Some(raw) = input["scenes"].as_array() else {
         return Err(ModelError::Schema("record_judgement.scenes 必须是数组".into()));
@@ -625,8 +628,9 @@ impl Acc {
         let mut out = vec![];
         match v["type"].as_str().unwrap_or("") {
             "message_start" => {
-                self.usage.prompt =
-                    v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+                let u = &v["message"]["usage"];
+                self.usage.prompt = anthropic_prompt(u);
+                self.usage.cached = cache_hits(u).min(self.usage.prompt);
             }
             "content_block_start" => {
                 let b = &v["content_block"];
@@ -649,8 +653,13 @@ impl Acc {
                 }
             }
             "message_delta" => {
-                self.usage.completion =
-                    v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                let u = &v["usage"];
+                self.usage.completion = u["output_tokens"].as_u64().unwrap_or(0) as u32;
+                // 新版 API 在 message_delta 里也带累计的输入侧计数；有就以它为准。
+                if u.get("input_tokens").is_some_and(|x| x.is_u64()) {
+                    self.usage.prompt = anthropic_prompt(u);
+                    self.usage.cached = cache_hits(u).min(self.usage.prompt);
+                }
             }
             "error" => {
                 out.push(StreamEvent::Failed(format!(
@@ -668,6 +677,7 @@ impl Acc {
         if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
             self.usage.prompt = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
             self.usage.completion = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            self.usage.cached = cache_hits(u).min(self.usage.prompt);
         }
         let d = &v["choices"][0]["delta"];
         if let Some(t) = d["content"].as_str().filter(|t| !t.is_empty()) {
@@ -745,6 +755,48 @@ pub fn parse_sse(api: Api, blocks: &[&str]) -> Vec<StreamEvent> {
     }
     out.extend(acc.finish());
     out
+}
+
+/// Anthropic 的 `input_tokens` 只是**最后一个缓存断点之后**的那段；
+/// 真正发出去的输入 = 它 + 缓存读 + 缓存写。只取 `input_tokens` 会把开了缓存的
+/// 请求算得便宜好几倍。OpenAI 兼容那一族的 `prompt_tokens` 本身就含缓存命中，不用加。
+fn anthropic_prompt(u: &Value) -> u32 {
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    (n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")) as u32
+}
+
+/// 缓存命中了多少输入 token。
+///
+/// # 为什么不按厂商逐个写字段名
+///
+/// 各家叫法不一，而且会变：OpenAI / 智谱放在 `prompt_tokens_details.cached_tokens`，
+/// DeepSeek 顶层给 `prompt_cache_hit_tokens`（外加同义的 `cached_tokens`），
+/// Kimi 顶层 `cached_tokens`，Anthropic 是 `cache_read_input_tokens`（2026-09 查）。
+/// 自建网关再换个名字也不稀奇。所以这里**按关键字**匹配：整棵 usage 里键名含
+/// `cache` 的数字都算候选，排除明显不是「命中」的（`miss`、缓存写入 `creation`/`write`），
+/// 取最大值 —— 同义字段并存（DeepSeek）时不会重复相加。
+///
+/// 误判的方向是可控的：多算命中 → 账偏便宜，所以调用方还会钳到 `≤ prompt`。
+pub fn cache_hits(u: &Value) -> u32 {
+    fn walk(v: &Value, best: &mut u64) {
+        let Some(obj) = v.as_object() else { return };
+        for (k, x) in obj {
+            let k = k.to_ascii_lowercase();
+            if ["miss", "creation", "write"].iter().any(|bad| k.contains(bad)) {
+                continue;
+            }
+            if let Some(n) = x.as_u64() {
+                if k.contains("cache") {
+                    *best = (*best).max(n);
+                }
+            } else {
+                walk(x, best);
+            }
+        }
+    }
+    let mut best = 0;
+    walk(u, &mut best);
+    best.min(u32::MAX as u64) as u32
 }
 
 pub fn clip(s: &str, n: usize) -> String {

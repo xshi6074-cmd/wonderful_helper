@@ -93,6 +93,7 @@ fn client(base: &str) -> HttpClient {
         model: "stub-1".into(),
         temperature: Some(0.0),
         max_tokens: 256,
+        price: None,
     };
     HttpClient::new(&p, &m, "k".into()).unwrap()
 }

@@ -257,7 +257,7 @@ function renderTop() {
   // 逼近上限时自己变色。数字要人去比对，颜色不用。
   const frac = S.foot ? S.foot.total / 128000 : 0;
   tc.className = 'chip ghost' + (frac > 0.9 ? ' bad' : frac > 0.7 ? ' warn' : '');
-  tc.title = frac > 0.7 ? '上下文快满了，下一轮会自动折叠早期对话' : '本会话累计 token';
+  tc.title = (frac > 0.7 ? '上下文快满了，下一轮会自动折叠早期对话' : '本会话累计 token') + ' · 点击看花费';
   const c = $('#conn-chip');
   c.textContent = S.connected ? (S.session ? S.session.slice(0, 8) : '无会话') : '断线重连中…';
   c.className = 'chip ' + (S.connected ? 'ghost' : 'bad');
@@ -271,6 +271,66 @@ function renderTop() {
   const q = $('#queue-chip');
   q.hidden = !S.queued;
   if (S.queued) q.textContent = `${S.queued} 条排队`;
+}
+
+// ───────────────────────── 花费 ─────────────────────────
+//
+// 从时间线上的 cost 事件现算，不在后端再记一份钱 —— 单价是用户随时会改的配置，
+// 改完点开就该是新价，而不是一份落了盘的旧账。代价是：中途换过模型的会话，
+// 早先那部分也按现在的单价折算。这一点在弹层里明说。
+
+const ROLE_CN = { judge: '判断段', answer: '回答段', subagent: '子任务' };
+
+function costSummary() {
+  const rows = {};
+  for (const e of S.timeline) {
+    if (e.kind !== 'cost') continue;
+    const u = e.body?.usage || {};
+    const k = String(e.body?.role || '').toLowerCase();
+    const r = rows[k] ||= { prompt: 0, completion: 0, cached: 0, estimated: false, money: null, cur: '' };
+    r.prompt += u.prompt || 0;
+    r.completion += u.completion || 0;
+    r.cached += Math.min(u.cached || 0, u.prompt || 0);
+    r.estimated ||= !!u.estimated;
+  }
+  const totals = {}, missing = [];
+  for (const [k, r] of Object.entries(rows)) {
+    const p = S.settings?.roles?.[k]?.price;
+    if (!p) { missing.push(k); continue; }
+    const hit = p.cached ?? p.input;
+    r.money = ((r.prompt - r.cached) * p.input + r.cached * hit + r.completion * p.output) / 1e6;
+    r.cur = p.currency || '$';
+    totals[r.cur] = (totals[r.cur] || 0) + r.money;
+  }
+  return { rows, totals, missing };
+}
+
+const fmtMoney = (v, cur) => cur + (v !== 0 && v < 0.01 ? v.toFixed(4) : v.toFixed(2));
+
+function openCost() {
+  const { rows, totals, missing } = costSummary();
+  const sum = Object.entries(totals).map(([c, v]) => fmtMoney(v, c)).join(' + ');
+  const tab = h('table', { class: 'cost-tab' },
+    h('tr', {}, h('th', {}, '角色'), h('th', {}, '输入'), h('th', {}, '其中缓存命中'), h('th', {}, '输出'), h('th', {}, '花费')));
+  for (const k of ['judge', 'answer', 'subagent']) {
+    const r = rows[k]; if (!r) continue;
+    tab.append(h('tr', {},
+      h('td', {}, ROLE_CN[k]),
+      h('td', {}, String(r.prompt)),
+      h('td', {}, r.prompt ? `${r.cached}（${Math.round(r.cached / r.prompt * 100)}%）` : '0'),
+      h('td', {}, String(r.completion)),
+      h('td', {}, r.money === null ? '未填单价' : fmtMoney(r.money, r.cur) + (r.estimated ? '（含估算）' : ''))));
+  }
+  modal('本会话花费', [
+    h('p', { class: 'cost-sum' }, Object.keys(rows).length
+      ? (sum || '还没有填单价') : '这个会话还没有花过 token'),
+    Object.keys(rows).length ? tab : null,
+    missing.length ? h('p', { class: 'hint' },
+      `${missing.map(k => ROLE_CN[k] || k).join('、')}没有填单价，只记 token、不折算。去左栏「配置」里对应角色下填。`) : null,
+    h('p', { class: 'hint' },
+      '按当前配置的单价折算整段历史 —— 中途换过模型的话，早先那部分也按现在的价算。'
+      + '缓存命中取自各家 usage 里键名含 cache 的字段；缓存写入按普通输入价算。'),
+  ].filter(Boolean), () => {}, '关闭', false);
 }
 
 function renderBanner() {
@@ -501,7 +561,7 @@ function procStep(e) {
       break;
     case 'noted': v.append(B.text || ''); break;
     case 'folded': v.append(`把 #${B.from}–#${B.to} 折成摘要（${B.folded} 条）`); break;
-    case 'cost': v.append(`${B.role}　输入 ${B.usage?.prompt ?? 0} / 输出 ${B.usage?.completion ?? 0}${B.usage?.estimated ? '（估算）' : ''}`); break;
+    case 'cost': v.append(`${B.role}　输入 ${B.usage?.prompt ?? 0}${B.usage?.cached ? `（缓存命中 ${B.usage.cached}）` : ''} / 输出 ${B.usage?.completion ?? 0}${B.usage?.estimated ? '（估算）' : ''}`); break;
     case 'aborted': v.append(`${B.call_id}：${B.why}`); break;
     case 'scene_overridden': v.append(`${B.from} → ${B.to}`); break;
     // phase_set 是已废弃的事件，只有老会话里还有。显示原样那一个值就够了。
@@ -763,13 +823,13 @@ function openGraphIndex() {
 
 // ───────────────────────── 编辑弹层 ─────────────────────────
 
-function modal(title, bodyNodes, onOk, okLabel = '应用') {
+function modal(title, bodyNodes, onOk, okLabel = '应用', cancel = true) {
   const m = $('#modal'), body = $('.sheet-body', m);
   body.textContent = '';
   body.append(h('h3', {}, title), ...bodyNodes,
     h('div', { class: 'acts', style: 'display:flex;gap:8px;margin-top:14px' },
       h('button', { class: 'primary', onclick: () => { if (onOk() !== false) close(); } }, okLabel),
-      h('button', { onclick: close }, '取消')));
+      cancel ? h('button', { onclick: close }, '取消') : null));
   m.hidden = false;
   function close() { m.hidden = true; }
   m.onclick = (e) => { if (e.target === m) close(); };
@@ -1363,6 +1423,28 @@ function renderConfig() {
           ? '判断段要的是确定性 —— 想稳就填 0。留空则由服务端决定。'
           : `留空 = 不发这个参数。这家的上限是 ${max}。`));
   };
+  /** 单价（每百万 token）。**不预填** —— 价格会变、币种各家不同，
+   *  内置一份过期的价比没有更糟。输入输出都留空 = 不折算，只记 token。 */
+  const price = (r) => {
+    const p = r.price ? { ...r.price } : { input: '', output: '', cached: '', currency: '$' };
+    const n = v => (v === '' || v === null || v === undefined) ? null : +v;
+    const sync = () => {
+      const input = n(p.input), output = n(p.output);
+      r.price = input === null && output === null ? null
+        : { input: input ?? 0, output: output ?? 0, cached: n(p.cached), currency: p.currency || '$' };
+    };
+    const box = (k, label, ph) => h('div', { class: 'field' }, h('label', {}, label),
+      h('input', {
+        type: 'number', step: 'any', min: '0', placeholder: ph, value: p[k] ?? '',
+        oninput: e => { p[k] = e.target.value.trim(); sync(); },
+      }));
+    return h('div', { class: 'price' },
+      h('div', { class: 'two' }, box('input', '输入单价', '每百万 token'), box('output', '输出单价', '每百万 token')),
+      h('div', { class: 'two' }, box('cached', '缓存命中单价', '留空 = 按输入价'),
+        h('div', { class: 'field' }, h('label', {}, '币种符号'),
+          h('input', { value: p.currency ?? '$', oninput: e => { p.currency = e.target.value.trim(); sync(); } }))),
+      h('p', { class: 'hint' }, '按厂商价目表填每百万 token 的价。不填就只记 token、不折算花费。'));
+  };
   const txt = (obj, k, label) => {
     const i = h('input', { value: obj[k], oninput: e => obj[k] = e.target.value });
     return h('div', { class: 'field' }, h('label', {}, label), i);
@@ -1439,6 +1521,7 @@ function renderConfig() {
         h('button', { class: 'ghost', onclick: (e) => { e.preventDefault(); openCaps(); } }, '看完整日志')) : null,
       sel(r, 'provider', 'provider', provs), modelInput(r),
       h('div', { class: 'two' }, temp(r, role), num(r, 'max_tokens', 'max tokens')),
+      price(r),
     ].filter(Boolean));
     if (broken || S.focusRole === role) {
       b.open = true;
@@ -1738,6 +1821,7 @@ function boot() {
 
   $$('#mode-seg button').forEach(b => b.onclick = () => send('mode', { to: b.dataset.mode }));
   $('#scene-chip').onclick = openScenePicker;
+  $('#token-chip').onclick = openCost;
   $('#distill-btn').onclick = () => {
     banner('info', '正在蒸馏这段会话…完成后会弹出草稿供你逐节审阅', 'distill-run');
     send('distill');

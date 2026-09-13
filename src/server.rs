@@ -401,7 +401,7 @@ fn fanout(e: UiEvent) -> Option<Value> {
         }),
         UiEvent::CostTick { role, usage, session_total } => json!({
             "t": "cost", "role": format!("{role:?}"),
-            "prompt": usage.prompt, "completion": usage.completion,
+            "prompt": usage.prompt, "completion": usage.completion, "cached": usage.cached,
             "estimated": usage.estimated, "total": session_total
         }),
         UiEvent::PersistDegraded { why, pending } => {
@@ -1497,7 +1497,7 @@ mod tests {
 
         h.cost_out(
             crate::model::Role::Subagent,
-            crate::model::Usage { prompt: 1200, completion: 300, estimated: false },
+            crate::model::Usage { prompt: 1200, completion: 300, estimated: false, cached: 0 },
         )
         .await;
         h.session_flush().await;

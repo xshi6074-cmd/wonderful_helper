@@ -374,7 +374,7 @@ impl Rig {
 fn chunks(parts: &[&str]) -> Vec<StreamEvent> {
     let mut v: Vec<StreamEvent> =
         parts.iter().map(|p| StreamEvent::Chunk((*p).to_string())).collect();
-    v.push(StreamEvent::Done(Usage { prompt: 400, completion: 60, estimated: false }));
+    v.push(StreamEvent::Done(Usage { prompt: 400, completion: 60, estimated: false, cached: 0 }));
     v
 }
 
@@ -1888,6 +1888,16 @@ data: {"type":"message_stop"}"#,
     let usage = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None });
     ok(usage.map(|u| u.prompt) == Some(120), "输入 token 从 message_start 拿到");
     ok(usage.map(|u| u.completion) == Some(45), "★ 输出 token 从 message_delta 拿到（不然账全靠估）");
+    ok(usage.map(|u| u.cached) == Some(0), "没开缓存时命中数是 0");
+
+    // ── 缓存命中：Anthropic 的 input_tokens 不含缓存那两段 ──
+    let evs = parse_sse(Api::Anthropic, &[
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":50,"cache_read_input_tokens":900,"cache_creation_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":50}}}}"#,
+        r#"data: {"type":"message_delta","usage":{"output_tokens":7}}"#,
+    ]);
+    let u = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None }).unwrap_or_default();
+    ok(u.prompt == 1000, "★ Anthropic 输入 = input + 缓存读 + 缓存写（只取 input_tokens 会少算 20 倍）");
+    ok(u.cached == 900, "★ 命中只算缓存读，缓存写（含嵌套的 cache_creation 对象）不算命中");
 
     // ── OpenAI SSE ──
     let o_blocks = vec![
@@ -1906,6 +1916,21 @@ data: {"type":"message_stop"}"#,
     let usage = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None });
     ok(usage.map(|u| (u.prompt, u.completion)) == Some((80, 12)), "usage 从末尾那块拿到");
     ok(!evs.iter().any(|e| matches!(e, StreamEvent::Failed(_))), "[DONE] 不该被当成错误");
+
+    // ── 缓存命中：OpenAI 兼容这一族各家字段名都不一样，按 cache 关键字匹配 ──
+    for (who, usage_json, want) in [
+        ("OpenAI/智谱", r#"{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":60},"completion_tokens_details":{"reasoning_tokens":3}}"#, 60),
+        ("DeepSeek", r#"{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40,"cached_tokens":60}"#, 60),
+        ("Kimi", r#"{"prompt_tokens":100,"completion_tokens":5,"cached_tokens":60}"#, 60),
+        ("没有缓存字段", r#"{"prompt_tokens":100,"completion_tokens":5}"#, 0),
+        ("离谱的命中数", r#"{"prompt_tokens":100,"completion_tokens":5,"cached_tokens":500}"#, 100),
+    ] {
+        let block = format!(r#"data: {{"choices":[],"usage":{usage_json}}}"#);
+        let evs = parse_sse(Api::OpenAiCompat, &[block.as_str()]);
+        let u = evs.iter().find_map(|e| match e { StreamEvent::Done(u) => Some(*u), _ => None }).unwrap_or_default();
+        ok(u.prompt == 100 && u.cached == want,
+           &format!("★ {who}：缓存命中 {} == {want}（miss 不算、同义字段不重复加、不超过输入）", u.cached));
+    }
 
     // ── 参数被截断时不该整轮失败 ──
     let broken = vec![
@@ -2427,6 +2452,7 @@ async fn s48_empty_answer_is_not_persisted() {
             prompt: 100,
             completion: 64_000,
             estimated: false,
+            cached: 0,
         })]);
     let r = Rig::new(m, Registry::new()).await;
     r.handle.session_send("回答", SendMode::Queue).await;

@@ -84,6 +84,13 @@ pub struct Usage {
     /// 流式被打断时拿不到服务端返回的 usage，但 prompt 已经发出去了，钱已经花了。
     /// 不估算兜底 R6 的账目就会漏 —— 而被打断的轮次往往还是最贵的那种。
     pub estimated: bool,
+    /// `prompt` 里**命中缓存**的那部分（是子集，不另加进 total）。
+    ///
+    /// 各家字段名不统一（`cached_tokens` / `prompt_cache_hit_tokens` /
+    /// `cache_read_input_tokens`），解析见 `client::cache_hits`。
+    /// 老时间线里没有这个字段，按 0 读 —— 等于全按原价算，只会高估不会低估。
+    #[serde(default)]
+    pub cached: u32,
 }
 
 impl Usage {
@@ -94,7 +101,7 @@ impl Usage {
     /// 打断兜底：prompt 按实际发出的算，completion 按已收到的 partial 长度粗估。
     /// 3 字符/token 是中英混排的折中，宁可高估也不要让账目显得比实际便宜。
     pub fn estimate(prompt: u32, partial_chars: usize) -> Usage {
-        Usage { prompt, completion: (partial_chars / 3) as u32, estimated: true }
+        Usage { prompt, completion: (partial_chars / 3) as u32, estimated: true, cached: 0 }
     }
 }
 
