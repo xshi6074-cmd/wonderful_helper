@@ -1325,8 +1325,119 @@ fn css(s: &'static str) -> impl IntoResponse {
     no_cache("text/css; charset=utf-8", s)
 }
 
-/// 起服务。返回实际监听的地址（端口写 0 时由系统分配）。
-pub async fn serve(app: Arc<App>, port: u16) -> Result<(), String> {
+/// `serve` 可执行文件的命令行：`serve [目录] [端口] [--no-browser]`。
+#[derive(Debug, PartialEq)]
+pub struct ServeArgs {
+    pub dir: String,
+    pub port: u16,
+    /// 起来之后要不要自己打开浏览器。
+    pub open_browser: bool,
+}
+
+/// 解析命令行。环境变量 `PREMORTEM_NO_BROWSER` 非空也等于 `--no-browser` ——
+/// 脚本和 CI 不方便改参数时用它。
+///
+/// 默认**打开**：发布出去的二进制是给人双击的，双击之后只弹一个黑框、
+/// 还得自己去找地址，看起来就像没启动成功。开发和测试脚本显式关掉。
+pub fn parse_serve_args(
+    args: impl IntoIterator<Item = String>,
+    env: crate::config::Env<'_>,
+) -> ServeArgs {
+    let mut open_browser = env("PREMORTEM_NO_BROWSER").is_none_or(|v| v.trim().is_empty());
+    let mut pos = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--no-browser" => open_browser = false,
+            s if s.starts_with("--") => eprintln!("[serve] 不认识的参数，忽略：{s}"),
+            _ => pos.push(a),
+        }
+    }
+    let mut pos = pos.into_iter();
+    ServeArgs {
+        dir: pos.next().unwrap_or_else(|| ".".into()),
+        port: pos.next().and_then(|p| p.parse().ok()).unwrap_or(7878),
+        open_browser,
+    }
+}
+
+/// 用系统默认浏览器打开 `url`。**打不开不是错误** —— 服务照常跑，提示用户手动打开。
+///
+/// 在后台线程里等打开命令的退出码：`xdg-open` 这类命令本身找得到、
+/// 但没有桌面环境（SSH 进来的机器）时是**事后**才失败的，只看 spawn 成功会误报。
+pub fn open_browser(url: &str) {
+    use std::process::{Command, Stdio};
+    let mut cmd = if cfg!(windows) {
+        // start 的第一个带引号参数是窗口标题，所以要先给一个空的
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    } else if is_wsl() {
+        // WSL 里通常没有 xdg-open，也没有 Linux 侧的浏览器；交给 Windows 那边开。
+        // WSL2 转发 localhost，Windows 浏览器直接连得上。
+        let mut c = Command::new("cmd.exe");
+        c.args(["/C", "start", "", url]);
+        // 在 Linux 路径下起 cmd.exe 会先吐一句「不支持 UNC 路径」，换到 C 盘下起
+        if std::path::Path::new("/mnt/c").is_dir() {
+            c.current_dir("/mnt/c");
+        }
+        c
+    } else {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let hint = format!("[serve] 没能自动打开浏览器，手动访问 {url}（加 --no-browser 可关掉这一步）");
+    match cmd.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || match child.wait() {
+                Ok(st) if st.success() => {}
+                _ => eprintln!("{hint}"),
+            });
+        }
+        Err(_) => eprintln!("{hint}"),
+    }
+}
+
+fn is_wsl() -> bool {
+    cfg!(target_os = "linux")
+        && std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .is_ok_and(|s| s.to_ascii_lowercase().contains("microsoft"))
+}
+
+#[cfg(test)]
+mod serve_args_tests {
+    use super::*;
+
+    fn parse(args: &[&str], env: &[(&str, &str)]) -> ServeArgs {
+        let env: Vec<(String, String)> =
+            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let get = move |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        parse_serve_args(args.iter().map(|s| s.to_string()), &get)
+    }
+
+    #[test]
+    fn double_click_opens_browser_on_default_port() {
+        assert_eq!(parse(&[], &[]), ServeArgs { dir: ".".into(), port: 7878, open_browser: true });
+    }
+
+    #[test]
+    fn flag_can_sit_anywhere_and_env_also_disables() {
+        let want = ServeArgs { dir: "/w".into(), port: 9000, open_browser: false };
+        assert_eq!(parse(&["--no-browser", "/w", "9000"], &[]), want);
+        assert_eq!(parse(&["/w", "9000", "--no-browser"], &[]), want);
+        assert_eq!(parse(&["/w", "9000"], &[("PREMORTEM_NO_BROWSER", "1")]), want);
+        // 设成空串不算关（shell 里 `PREMORTEM_NO_BROWSER= serve` 这种）
+        assert!(parse(&[], &[("PREMORTEM_NO_BROWSER", "")]).open_browser);
+    }
+}
+
+/// 起服务。`open` 为真时，端口绑好之后用系统浏览器打开页面。
+pub async fn serve(app: Arc<App>, port: u16, open: bool) -> Result<(), String> {
     // 第一次进来先把上一次的会话接上；没有就开个新的。
     // 失败（比如没配密钥）不致命：页面照样打得开，用户就是进来填密钥的。
     let last = app.store.list_sessions().unwrap_or_default().last().map(|s| s.id.clone());
@@ -1339,6 +1450,10 @@ pub async fn serve(app: Arc<App>, port: u16) -> Result<(), String> {
         tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("绑定 {addr} 失败：{e}"))?;
     let real = listener.local_addr().map_err(|e| e.to_string())?;
     println!("premortem UI → http://{real}");
+    // 绑好端口再开：此刻连接已经能排队，浏览器不会撞上「拒绝连接」。
+    if open {
+        open_browser(&format!("http://{real}"));
+    }
     // Ctrl-C 时把会话好好关掉：等 turn 收尾、等 writer 冲完。
     // 停放的会话也在 close() 里一起收 —— 它们正是「还在跑」的那些，
     // 直接被进程带走的话，丢的是用户刚等出来的那一整段正文。

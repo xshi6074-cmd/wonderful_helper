@@ -72,7 +72,8 @@ fs.writeFileSync(path.join(dir, 'repo', 'README.md'), '# 玩具仓库\n\nEncoder
 const log = { scenario, model, says, events: [], calls: [], banners: [], errors: [], msgs: [] };
 
 // ── 起服务 ──
-const srv = spawn('./target/debug/serve', [dir, String(port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+// --no-browser：脚本跑一次就弹一个浏览器标签页，跑十个场景就是十个
+const srv = spawn('./target/debug/serve', [dir, String(port), '--no-browser'], { stdio: ['ignore', 'pipe', 'pipe'] });
 let srvOut = '';
 srv.stdout.on('data', (d) => { srvOut += d; });
 srv.stderr.on('data', (d) => { srvOut += d; });
