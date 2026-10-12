@@ -1,58 +1,67 @@
-# Premortem
+# Premortem · 逐轮规划图
 
-Premortem 是一个面向科研实验设计的本地 AI 助手:让模糊的idea正确收敛，把与agent痛苦的意图对齐固化成agent必须执行的流程，探索更符合科研学生体质的workspace。
+把用户给出的 parts 和逐 part 大体规划，维护成细节充分、包含未决项、允许扩展的规划图。
 
-## Quick start
+核心是 `maintain-plan-map`：用户负责给出工作分区和大体方向；Codex 把路径、接口、依据、实验分支和验收具体化，并按每轮真实进展增量更新。候选仍标为候选，旧结果保留其配置和证据范围。
 
-准备支持 Rust 2024 edition 的工具链，以及至少一个兼容的模型 API 密钥。
+## 使用
 
-```sh
-cargo run --bin serve -- . 7878
+Skill 位于 [.agents/skills/maintain-plan-map](.agents/skills/maintain-plan-map/SKILL.md)。在包含该目录的仓库中使用 Codex，可按名称调用：
+
+```text
+用 $maintain-plan-map 维护这项工作。
+目标与交付：……
+我给出的 parts 和大体规划：
+A：……；打算先……，产物是……
+B：……；打算先……，产物是……
+C：……；打算先……，产物是……
+已有图／材料：……
+这轮进展或改动：……
+目前不确定：……
 ```
 
-第一个参数是项目数据目录，也是本地文件工具默认可读的根目录；分析其他项目时，把 `.` 换成对应路径。
+首次默认写入当前项目的 `docs/plan-map.md`，存在规划图时优先原位更新。只写已知内容，缺项变成具名未决项；可以先做局部图，不要求把所有疑问解决完才起步。
 
-启动后会自动用系统默认浏览器打开 [http://127.0.0.1:7878](http://127.0.0.1:7878)（WSL 里交给 Windows 侧的浏览器）；没打开的话手动访问这个地址。不想自动打开就加 `--no-browser`，或设环境变量 `PREMORTEM_NO_BROWSER=1`。
+跨项目使用时，把整个 `maintain-plan-map` 目录放到目标项目的 `.agents/skills/`，或个人 `~/.agents/skills/`，保留目录内的引用。目录发现与调用方式见 [Codex 官方 skill 文档](https://developers.openai.com/codex/skills)。
 
-打开之后：
+## 图中要看见什么
 
-1. 在“配置”中为 `judge`、`answer`、`subagent` 三个角色选择 provider 和模型，并存入相应provider的密钥。
-2. 在输入框下方确认模型可读的项目目录；需要时可在“工具”中调整目录、联网和返回体量限制。
-3. 点击“新对话”开始体验吧！
+- 总览中的 parts、真实依赖、产物与分支；逐 part 展开中的实际操作、关键接口和实验臂。
+- 同一对象的稳定 ID，以及由图指向的详细记录。
+- 方案状态、执行进度和证据来源；未决项的影响、候选、解决方式和复查时点。
+- 消融究竟改变什么决定、只改什么、固定什么、怎样比较；哪些可并行，哪些依赖前一结果。
+- 数据、目标或接口变更后，具体哪些结论需要复核；已解决问题如何成为带依据的决定。
+- 交付格式、验收口径与实际约定的对齐时点。
 
-也可以先通过环境变量提供密钥。
+图和明细保存在一个权威 Markdown 文件里。默认用 Mermaid，复杂处局部展开。调用 skill 本身只维护规划；实验执行使用用户已给出的授权。
 
-Windows PowerShell：
+## 内容
 
-```powershell
-$env:ANTHROPIC_API_KEY = "sk-..."
-cargo run --bin serve -- . 7878
-```
+| 文件 | 用途 |
+| --- | --- |
+| [SKILL.md](.agents/skills/maintain-plan-map/SKILL.md) | 调用范围、协作分工、图与明细、逐轮更新、验收 |
+| [experiment-detail.md](.agents/skills/maintain-plan-map/references/experiment-detail.md) | 数据、结构、loss、状态、消融、有效性和交付细节 |
+| [plan-map.template.md](.agents/skills/maintain-plan-map/assets/plan-map.template.md) | 按实际任务删改的初建骨架 |
+| [example-wind-plan.md](.agents/skills/maintain-plan-map/references/example-wind-plan.md) | 假想风速任务的总览、展开、记录和第二轮更新 |
+| [openai.yaml](.agents/skills/maintain-plan-map/agents/openai.yaml) | Codex 的显示名称和调用提示 |
 
-macOS / Linux / WSL：
+## 设计来源
 
-```sh
-export ANTHROPIC_API_KEY="sk-..."
-cargo run --bin serve -- . 7878
-```
+从原 Premortem 实现中提取以下规则：
 
-服务只监听本机 `127.0.0.1`。HTML、CSS 和 JavaScript 已编进 Rust 二进制，不需要 Node 构建步骤。网页抓取也内置在 Rust 进程中：抓取开关、域名白名单和体量限制可在“配置 → 工具权限与上限”中调整。
+| 原设计 | Skill 中的做法 |
+| --- | --- |
+| Graph 的节点、边与开放词表 | 用稳定 ID 与 Mermaid 表达模块、数据流、依赖和实验分支 |
+| Field.anchor 与图外工作记忆 | 同文件中的锚定明细记录目标、理由、未决项与验收 |
+| patch 与用户编辑优先 | 增量修改同一对象，保留用户直接编辑，不通过换 ID 绕开 |
+| 来源、观测与假设的区分 | 分别标记依据、方案与执行状态，不把运行当作验证 |
+| 上游修改后的完整链路复查 | 沿依赖标记下游需要复核的 loss、对照、指标与交付 |
 
-## 核心功能
-- 设计"场景分流"机制，在对话前先判断当前是否命中某些经验的相似场景，将相应经验灌入上下文供agent参考。同时给对话提供一键蒸馏，形成经验闭环。用户也可以选择蒸馏与其它agent的协作记录，选择保存。
-- 维护一层工作memory：把梳理架构图固定为必须执行的动作，要求agent设计时考虑完整实验链路，对于未定部分诚实标出；用户可以随时修改架构图，同时随每轮对话对实验设计有清晰把握，有利于意图快速对齐。显示维护待决策和已经决策的部分，减少错过设计要点的可能。
-- 强调个性化：分设行动和探索两种模式，对于希望快速落实方案的场景在不损失精度的情况下要求agent对用户精准发问，减少交互；对于用户希望拓展学习的场景鼓励agent进行发散和开放式提问。所有prompt方便修改，经验场景易于插拔。
+原始规则见 [memory/prompts.toml](https://github.com/xshi6074-cmd/wonderful_helper/blob/b565b6260066f5cad81415bbeb731413fb8ce4ac/memory/prompts.toml) 和 [src/state.rs](https://github.com/xshi6074-cmd/wonderful_helper/blob/b565b6260066f5cad81415bbeb731413fb8ce4ac/src/state.rs)。旧应用保留在 Git 历史中；这里的可用单元是规划图 skill，不包含应用运行时。
 
-## 演示用例
-受本课堂AI lab启发，您可以选择要求agent根据 https://lab.cs.tsinghua.edu.cn/rust/ 中的四个lab内容设计一个实验，用于对比编码前设计test和编码后设计test的成功率。
-prompt可以是：
-```
-https://lab.cs.tsinghua.edu.cn/rust/ 找到4个lab作业。我想借4个vibe-coding题目设计实验，测试agent辅助coding时在写业务代码前写测试代码/写业务代码后写测试代码的准确率差异。给我实验流程图.
-```
+## 两个试用草稿
 
-## 设计文档
+- [audit-work-basics](.agents/skills/audit-work-basics/SKILL.md)：以审计角色对照已有约定核查交付、文件／版本、验证证据与实验消融基本盘。区分实际违约、约定缺口和证据缺口；输出有证据、可处理的发现，不默认接管修复。
+- [pre-test](.agents/skills/pre-test/SKILL.md)：产品／可复用基础设施先定义关键行为测试再实现；一次性实验脚本以关键检查和小样本冒烟为主，对影响结论的共用模块投入针对性测试。避免从实现倒推弱断言。
 
-- [设计文档](docs/设计文档.html)
-- [数据契约](docs/数据契约.html)
-- [推断图](docs/推断图.html)
-- [实现与 UI 接线审计](docs/implementation-audit.md)
+分别用 `$audit-work-basics` 与 `$pre-test` 调用。三个 skill 职责独立；根据真实使用中的遗漏逐步修订，不把草稿当成已经证明有效的工作流。

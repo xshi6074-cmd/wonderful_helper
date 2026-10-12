@@ -1,0 +1,4 @@
+interface:
+  display_name: "基本盘审计（草稿）"
+  short_description: "核查已约定的交付、文件管理、测试与实验标准，给出有证据的基本盘审计"
+  default_prompt: "用 $audit-work-basics 对照已有约定和实际产物审计基本盘，列出有证据的问题、证据缺口和最小修正建议。"
