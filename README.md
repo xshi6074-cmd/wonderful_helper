@@ -58,3 +58,10 @@ C：……；打算先……，产物是……
 | 上游修改后的完整链路复查 | 沿依赖标记下游需要复核的 loss、对照、指标与交付 |
 
 原始规则见 [memory/prompts.toml](https://github.com/xshi6074-cmd/wonderful_helper/blob/b565b6260066f5cad81415bbeb731413fb8ce4ac/memory/prompts.toml) 和 [src/state.rs](https://github.com/xshi6074-cmd/wonderful_helper/blob/b565b6260066f5cad81415bbeb731413fb8ce4ac/src/state.rs)。旧应用保留在 Git 历史中；这里的可用单元是规划图 skill，不包含应用运行时。
+
+## 两个试用草稿
+
+- [audit-work-basics](.agents/skills/audit-work-basics/SKILL.md)：以审计角色对照已有约定核查交付、文件／版本、验证证据与实验消融基本盘。区分实际违约、约定缺口和证据缺口；输出有证据、可处理的发现，不默认接管修复。
+- [pre-test](.agents/skills/pre-test/SKILL.md)：产品／可复用基础设施先定义关键行为测试再实现；一次性实验脚本以关键检查和小样本冒烟为主，对影响结论的共用模块投入针对性测试。避免从实现倒推弱断言。
+
+分别用 `$audit-work-basics` 与 `$pre-test` 调用。三个 skill 职责独立；根据真实使用中的遗漏逐步修订，不把草稿当成已经证明有效的工作流。
