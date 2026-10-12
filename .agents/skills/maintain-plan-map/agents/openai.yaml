@@ -1,0 +1,4 @@
+interface:
+  display_name: "逐轮规划图"
+  short_description: "维护由用户划定 parts 的实验规划图，显式呈现细节、证据、消融和未决项"
+  default_prompt: "用 $maintain-plan-map 根据我给出的 parts 和逐 part 大体规划，画出可扩展的规划图，并按本轮进展更新细节、证据与未决项。"
